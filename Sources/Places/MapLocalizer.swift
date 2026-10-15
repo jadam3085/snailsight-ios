@@ -13,6 +13,11 @@
 // app is open and online — also while recording (slower) and with the sim off — with a battery-friendly cadence
 // (LocCadence: 1 s until locked, 12 refinements every 8 s, then one refresh a minute; LiDAR depth is switched off
 // between refreshes unless mapping / recording / Live map want it). The top pill (LocPill) shows the result.
+// 10.3 master map first: the session starts clean (PlaceController); a saved map being tried is cancelled by the first
+// server lock and the lock is CARRIED over that session reset (FrameCarry: the camera pose just before and just after
+// the reset is the same physical pose), then confirmed by an immediate re-check. Every accepted fix is remembered
+// (LastFixStore: where the phone was in the map) as the evidence for trying a saved place next launch. On a lock, saved
+// places' animals the map does not have yet are written into it (PlaceMigration), so no world map is needed for them.
 import ARKit
 import CoreImage
 import Foundation
@@ -52,6 +57,10 @@ final class MapLocalizer {
     private var notFound = false                        // server answered 404 (no such map)
     private var pendingApply: String?                   // a lock that arrived while recording: applied at Stop
     private var forceAttempt = false
+    private var lastCam: simd_float4x4?                 // 10.3: the camera in the current ARKit frame (last AR frame)
+    private var pendingCarry: (al: MapAlignment, oldCam: simd_float4x4, lockSeconds: Double?)?   // over a reset
+    private var carryAfter: TimeInterval = 0            // frames captured before the reset belong to the old run
+    private var migrateTried = Set<String>()            // one migration attempt per entity per app run
 
     static let syncDelay = 3.0
     static let realignCm = 10.0
@@ -60,7 +69,7 @@ final class MapLocalizer {
 
     private var now: TimeInterval { Date().timeIntervalSince1970 }
     private static func newStream() -> String { "ar-" + UUID().uuidString.prefix(8).lowercased() }
-    var isLocked: Bool { alignment != nil }
+    var isLocked: Bool { alignment != nil || pendingCarry != nil }
     /// 10.1 AR 1:1 status: "server" | "place_cache" | "" (no lock), seconds searching, attempts that matched.
     var lockSource: String { source }
     var searchSeconds: Double { now - streamStart }
@@ -74,12 +83,21 @@ final class MapLocalizer {
     /// The ARKit world frame changed (session reset / a saved place relocalized / another place loaded): every fix
     /// and the lock belong to the old frame.
     /// `sessionRunFollows`: the caller re-runs the session right after (it picks up `.sceneDepth` from wantsDepth).
-    func worldFrameChanged(_ reason: String, placeID: String? = nil, sessionRunFollows: Bool = false) {
+    /// `carryLock` (10.3): a saved map was aborted because the server locked: keep the lock across the reset.
+    func worldFrameChanged(_ reason: String, placeID: String? = nil, sessionRunFollows: Bool = false,
+                           carryLock: Bool = false) {
         model.liveStreamer.worldFrameChanged(reason)     // 10.0 Live map: a new odometry frame = a new stream_id
         model.meshMapper.worldFrameChanged(reason)       // 10.2 Map mesh: same rule
         model.controller.mapLayer.worldFrameChanged()    // 10.1 AR 1:1: the shown alignment belongs to the old frame
         model.log.event("maploc_reset", ["reason": .string(reason), "was_locked": .bool(alignment != nil),
-                                         "attempts": .int(attempts)])
+                                         "attempts": .int(attempts), "carry": .bool(carryLock && alignment != nil)])
+        if carryLock, let al = alignment, let cam = lastCam {
+            pendingCarry = (al, cam, lockSeconds)
+            carryAfter = ProcessInfo.processInfo.systemUptime
+        } else {
+            pendingCarry = nil
+        }
+        lastCam = nil
         streamID = Self.newStream()
         streamStart = now
         alignment = nil
@@ -108,13 +126,20 @@ final class MapLocalizer {
 
     /// Every AR frame (main). Cheap unless an attempt is due.
     func frame(_ f: ARFrame) {
+        if let pc = pendingCarry {
+            // the first frame of the new run (the old one was relocalizing; the new one initializes / tracks)
+            if f.timestamp > carryAfter, !Self.isRelocalizing(f.camera.trackingState) {
+                applyCarry(pc, newCam: f.camera.transform)
+            }
+        }
+        lastCam = f.camera.transform
         guard model.serverBase != nil, !inFlight, !model.showScans else { return }
         let t = now
         let hot = model.thermal == "SERIOUS" || model.thermal == "CRITICAL"
         let serverLocked = alignment != nil && source == "server"
         let since = t - lastAttempt
         // 10.2: depth only while it is useful (searching, refining, shortly before a refresh)
-        let needDepth = forceAttempt || model.placeCtl.tracker.isRelocalizing ||
+        let needDepth = forceAttempt || model.placeCtl.isTrying ||
             LocCadence.depthNeeded(locked: serverLocked, refinements: refinements, sinceLastAttempt: since,
                                    thermalSerious: hot, recording: model.recording)
         setDepthWanted(needDepth)
@@ -221,9 +246,19 @@ final class MapLocalizer {
         if let cur = alignment, cur.version == next.version || source == "place_cache" {
             cross = cur.delta(next, at: cameraPos)
         }
+        let wasCarried = source == "carried"
         alignment = next
         source = "server"
-        if firstServerLock {
+        LastFixStore.put(LastMapFix(mapID: a.mapID, position: next.toMap(arkit: cameraPos), at: now))
+        if firstServerLock && wasCarried {
+            // 10.3: the carried lock confirmed by the server in the new frame (bodies move only if it is > 10 cm off)
+            model.log.event("maploc_confirmed", ["cm": .double(cross?.cm ?? -1), "deg": .double(cross?.deg ?? -1),
+                                                 "version": .int(a.mapVersion)])
+            if let pid = model.placeCtl.activeID { MapFrameCache.put(pid, next) }
+            if let pw = placedWith, pw.delta(next, at: cameraPos).cm > Self.realignCm { applyLock(reason: "realign") }
+            else if placedWith == nil { applyLock(reason: "server") }
+            model.meshMapper.alignmentChanged(next, spreadCm: a.gate?.spreadCm, errCm: errorEstimate)
+        } else if firstServerLock {
             lockSeconds = a.timeToLockS ?? (now - streamStart)
             var ev: [String: LogValue] = ["version": .int(a.mapVersion), "seconds": .double(lockSeconds ?? 0),
                                           "attempts": .int(attempts), "session": .string(a.matchedSession ?? ""),
@@ -234,10 +269,11 @@ final class MapLocalizer {
             model.log.event("maploc_locked", ev)
             model.flash(MapLocText.locked(mapID: a.mapID, version: a.mapVersion, seconds: lockSeconds,
                                           method: next.method), seconds: 3)
-            model.placeCtl.mapLocked()
-            if let pid = model.placeCtl.activeID ?? model.placeCtl.tracker.current { MapFrameCache.put(pid, next) }
+            // only a place whose ARKit frame IS this session's (matched / saved here) may cache this alignment
+            if let pid = model.placeCtl.activeID { MapFrameCache.put(pid, next) }
             applyLock(reason: "server")
             model.meshMapper.alignmentChanged(next, spreadCm: a.gate?.spreadCm, errCm: errorEstimate)
+            model.placeCtl.mapLocked()          // 10.3: cancels a saved map still relocalizing (carries this lock)
         } else {
             if let c = cross { model.log.event("maploc_refine", ["cm": .double(c.cm), "deg": .double(c.deg), "n": .int(refinements)]) }
             if let pw = placedWith, pw.delta(next, at: cameraPos).cm > Self.realignCm {
@@ -249,6 +285,32 @@ final class MapLocalizer {
                 model.meshMapper.alignmentChanged(next, spreadCm: a.gate?.spreadCm, errCm: errorEstimate)
             }
         }
+    }
+
+    /// 10.3: the new session's first frame: carry the old lock into it, place the bodies, confirm with the server.
+    private func applyCarry(_ pc: (al: MapAlignment, oldCam: simd_float4x4, lockSeconds: Double?), newCam: simd_float4x4) {
+        pendingCarry = nil
+        let carried = FrameCarry.carry(pc.al, oldCam: Mat4(columnsMajor: Self.floats(pc.oldCam)),
+                                       newCam: Mat4(columnsMajor: Self.floats(newCam)), now: now)
+        alignment = carried
+        source = "carried"
+        lockSeconds = pc.lockSeconds
+        lastFixAt = now
+        model.log.event("maploc_carried", ["version": .int(carried.version),
+                                           "yaw_deg": .double(carried.yaw * 180 / .pi)])
+        forceAttempt = true                    // confirm in the new frame right away
+        setDepthWanted(true)
+        applyLock(reason: "carried")
+        publish()
+    }
+
+    private static func isRelocalizing(_ t: ARCamera.TrackingState) -> Bool {
+        if case .limited(.relocalizing) = t { return true }
+        return false
+    }
+
+    private static func floats(_ m: simd_float4x4) -> [Float] {
+        [m.columns.0, m.columns.1, m.columns.2, m.columns.3].flatMap { [$0.x, $0.y, $0.z, $0.w] }
     }
 
     // MARK: bodies in the map frame
@@ -270,9 +332,56 @@ final class MapLocalizer {
                     self.model.log.event("map_entities_error", ["status": .int(r?.1 ?? 0)])
                     return
                 }
+                if reason != "realign", self.migrateOrphans(doc, alignment: al, reason: reason) { return }
                 self.reconcile(doc, alignment: al, reason: reason)
             }
         }
+    }
+
+    /// 10.3 (P2b migration): animals of saved places — and bodies placed here without a lock — that the map has never
+    /// had go into the map one by one (each in its own map version), then the lock is applied again. true = migrating.
+    private func migrateOrphans(_ doc: MapEntitiesDoc, alignment al: MapAlignment, reason: String) -> Bool {
+        let present = Set(doc.entities.map { $0.id })
+        let known = MapKnownIDs.get()
+        MapKnownIDs.add(present)
+        var list = PlaceMigration.orphans(places: model.placeCtl.store.all, alignments: MapFrameCache.all(),
+                                          mapID: al.mapID, present: present, known: known, agentID: model.agentID)
+        list.removeAll { migrateTried.contains($0.id) }
+        var seen = present.union(known).union(migrateTried).union(list.map { $0.id })
+        let records = model.controller.sim.snapshot()
+        for (id, b) in currentBodies() where !seen.contains(id) {
+            guard let rec = records.first(where: { $0.id == id }) else { continue }
+            seen.insert(id)
+            list.append(MapEntity.from(rec, pose: al.mapPose(arkit: b.position, groundYaw: b.yaw), mapVersion: al.version,
+                                       agentID: model.agentID, placeID: model.placeCtl.activeID))
+        }
+        guard !list.isEmpty, !syncing else { return false }
+        migrateTried.formUnion(list.map { $0.id })
+        syncing = true
+        let link = model.link!
+        let mapID = al.mapID
+        Task { [weak self] in
+            var ok: [String] = []
+            for e in list {
+                guard let body = try? PlaceMigration.putBody(e) else { continue }
+                let r = try? await link.request("PUT", "/v1/maps/\(mapID)/entities/\(e.id)", body: body, timeout: 15)
+                if r?.1 == 200 { ok.append(e.id) }
+            }
+            await MainActor.run {
+                guard let self else { return }
+                self.syncing = false
+                MapKnownIDs.add(Set(ok))
+                self.model.log.event("map_migrate", ["entities": .int(list.count), "ok": .int(ok.count),
+                                                     "places": .string(Set(list.compactMap { $0.placeID }).sorted()
+                                                        .joined(separator: ","))])
+                if !ok.isEmpty {
+                    self.model.flash("Moved \(ok.count) animal\(ok.count == 1 ? "" : "s") into the house map", seconds: 3)
+                }
+                // apply again: the map now has them (MapKnownIDs stops a second round)
+                if self.alignment != nil { self.applyLock(reason: reason == "carried" ? "server" : reason) }
+            }
+        }
+        return true
     }
 
     private func reconcile(_ doc: MapEntitiesDoc, alignment al: MapAlignment, reason: String) {
@@ -443,11 +552,11 @@ final class MapLocalizer {
     private func publishPill() {
         let input = LocPillInput(
             online: model.serverBase != nil,
-            phase: alignment != nil ? .locked : (model.serverBase != nil ? .searching : .off),
+            phase: isLocked ? .locked : (model.serverBase != nil ? .searching : .off),
             mapID: alignment?.mapID ?? mapID, version: alignment?.version, method: alignment?.method, source: source,
             errCm: errorEstimate, searchSeconds: searchSeconds, attempts: attempts, matches: matches,
-            lastFixAge: lastFixAt.map { now - $0 }, trackingOK: model.tracking.severity == .ok,
-            notInMap: isNotInMap)
+            lastFixAge: lastFixAt.map { now - $0 }, trackingCode: model.tracking.code,
+            notInMap: isNotInMap, savedPlace: model.placeCtl.note)
         let p = LocPill.make(input)
         if model.locPill != p { model.locPill = p }
     }
@@ -457,8 +566,9 @@ final class MapLocalizer {
         if let al = alignment {
             s.phase = .locked
             s.title = MapLocText.locked(mapID: al.mapID, version: al.version, seconds: lockSeconds,
-                                        method: source == "place_cache" ? nil : al.method)
+                                        method: source == "place_cache" || source == "carried" ? nil : al.method)
             s.detail = source == "place_cache" ? "from the saved place · confirming with the map server" :
+                source == "carried" ? "re-anchored over an AR reset · confirming with the map server" :
                 (al.spreadCm.map { String(format: "fixes agree within %.1f cm", $0) } ?? "")
         } else if model.serverBase != nil {
             s.phase = .searching
@@ -485,10 +595,51 @@ enum MapFrameCache {
     }
 
     static func get(_ place: String) -> MapAlignment? { load()[place] }
+    static func all() -> [String: MapAlignment] { load() }
+
+    static func remove(_ place: String) {
+        var m = load()
+        guard m.removeValue(forKey: place) != nil else { return }
+        memo = m
+        if let u = url, let d = try? JSONEncoder().encode(m) { try? d.write(to: u, options: .atomic) }
+    }
 
     static func put(_ place: String, _ a: MapAlignment) {
         var m = load()
         m[place] = a
+        memo = m
+        if let u = url, let d = try? JSONEncoder().encode(m) { try? d.write(to: u, options: .atomic) }
+    }
+}
+
+/// 10.3: the last accepted server fix (map frame): the evidence for trying a saved place on the next launch.
+enum LastFixStore {
+    private static let key = "snailsight.lastMapFix"
+    static func get() -> LastMapFix? {
+        UserDefaults.standard.data(forKey: key).flatMap { try? JSONDecoder().decode(LastMapFix.self, from: $0) }
+    }
+    static func put(_ f: LastMapFix) {
+        if let d = try? JSONEncoder().encode(f) { UserDefaults.standard.set(d, forKey: key) }
+    }
+}
+
+/// 10.3: entity ids this phone has seen in the house map (or migrated into it): a body deleted from the map is never
+/// resurrected from an old place file. Documents/places/map_known.json.
+enum MapKnownIDs {
+    private static var url: URL? { PlaceStore.directory?.appendingPathComponent("map_known.json") }
+    private static var memo: Set<String>?
+
+    static func get() -> Set<String> {
+        if let m = memo { return m }
+        let m = url.flatMap { try? Data(contentsOf: $0) }.flatMap { try? JSONDecoder().decode(Set<String>.self, from: $0) } ?? []
+        memo = m
+        return m
+    }
+
+    static func add(_ ids: Set<String>) {
+        let cur = get()
+        guard !ids.isSubset(of: cur) else { return }
+        let m = cur.union(ids)
         memo = m
         if let u = url, let d = try? JSONEncoder().encode(m) { try? d.write(to: u, options: .atomic) }
     }

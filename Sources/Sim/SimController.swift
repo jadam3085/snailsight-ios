@@ -2220,7 +2220,7 @@ final class SimController: NSObject, UIGestureRecognizerDelegate {
     private func publish() {
         var s: String
         if pausedForRecording { s = "Sim paused (recording)" }
-        else if gated { s = "Sim hidden until LOCALIZED" }
+        else if gated { s = "Sim waits: trying a saved place" }
         else if enabled, let why = pauseReason {
             s = why == "heat" ? "Sim paused: iOS reports critical heat" : "Sim paused: tracking limited, move slowly"
         } else {

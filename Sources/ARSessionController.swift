@@ -113,7 +113,7 @@ final class ARSessionController: NSObject, ARSessionDelegate {
         guard !started else { return }
         started = true
         applyRenderSettings()
-        // P2a: relocalize into the most likely saved place (PlaceController), else a fresh session
+        // 10.3: always a clean session; the house map localizes it (a saved place only on evidence, PlaceController)
         model.placeCtl.launch { [weak self] map in
             guard let self else { return }
             self.arView.session.run(self.makeConfiguration(worldMap: map))
@@ -256,22 +256,22 @@ final class ARSessionController: NSObject, ARSessionDelegate {
 
     /// "Reset AR": start tracking again. With saved places it relocalizes into them (the place's animals come back
     /// from the last save once LOCALIZED); without, a clean session.
+    /// 10.3: always a clean session; the house map finds the phone again (and brings the bodies back), a saved place is
+    /// tried only on evidence (PlaceController / PlaceAssist).
     func resetSession() {
         model.log.event("reset", ["places": .int(model.placeCtl.store.manifests.count)])
         sim.removeAllBodies()
-        if !model.placeCtl.store.manifests.isEmpty {
-            model.placeCtl.beginRelocalization(reason: "reset")
-            model.flash("AR reset: relocalizing into your saved places (or Places ▸ Start new place)", seconds: 3)
-            return
-        }
+        model.placeCtl.sessionReset()
         runWorldMap(nil)
-        model.flash("AR reset: move slowly to start again")
+        model.flash("AR reset: move slowly; finding you on the house map", seconds: 3)
     }
 
     /// P2a: re-run the session from scratch with a saved place's world map (nil = an empty new place). Placed cubes,
     /// the mesh and every anchor go; sim bodies are restored by PlaceController once LOCALIZED.
-    func runWorldMap(_ map: ARWorldMap?) {
-        model.mapLocalizer.worldFrameChanged(map == nil ? "new_session" : "place_load", sessionRunFollows: true)
+    /// `carryLock` (10.3): an aborted saved map — keep the house-map lock across the reset (MapLocalizer carries it).
+    func runWorldMap(_ map: ARWorldMap?, carryLock: Bool = false) {
+        model.mapLocalizer.worldFrameChanged(map == nil ? (carryLock ? "place_abort" : "new_session") : "place_load",
+                                             sessionRunFollows: true, carryLock: carryLock)
         renderer.clearAll(session: arView.session)
         model.cubeSel = nil
         meshOverlay.removeAll()

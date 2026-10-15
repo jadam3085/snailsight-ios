@@ -29,15 +29,28 @@ public struct LocPillInput: Equatable {
     public var attempts: Int
     public var matches: Int
     public var lastFixAge: Double?      // s since the last accepted fix (lock / refinement)
-    public var trackingOK: Bool
+    public var trackingCode: String     // 10.3: ARKit TrackingStatus.code ("normal", "limited:excessiveMotion", …)
     public var notInMap: Bool           // LocPill.notInMap, or the server said 404 (other map)
+    public var savedPlace: SavedPlaceNote?   // 10.3: a saved ARWorldMap tried / matched / active (secondary info)
 
     public init(online: Bool, phase: LocPhase, mapID: String = "site", version: Int? = nil, method: String? = nil,
                 source: String = "", errCm: Double? = nil, searchSeconds: Double = 0, attempts: Int = 0,
-                matches: Int = 0, lastFixAge: Double? = nil, trackingOK: Bool = true, notInMap: Bool = false) {
+                matches: Int = 0, lastFixAge: Double? = nil, trackingCode: String = "normal", notInMap: Bool = false,
+                savedPlace: SavedPlaceNote? = nil) {
         self.online = online; self.phase = phase; self.mapID = mapID; self.version = version; self.method = method
         self.source = source; self.errCm = errCm; self.searchSeconds = searchSeconds; self.attempts = attempts
-        self.matches = matches; self.lastFixAge = lastFixAge; self.trackingOK = trackingOK; self.notInMap = notInMap
+        self.matches = matches; self.lastFixAge = lastFixAge; self.trackingCode = trackingCode; self.notInMap = notInMap
+        self.savedPlace = savedPlace
+    }
+
+    public var trackingOK: Bool { trackingCode == "normal" }
+
+    /// 10.3: ARKit is limited in a way the user must act on. Not: the first second of a session (initializing), nor
+    /// "relocalizing" while a saved map is being tried on purpose (that is FINDING YOU, with the place as a detail).
+    public var trackingBlocked: Bool {
+        if trackingCode == "normal" || trackingCode == "limited:initializing" { return false }
+        if trackingCode == "limited:relocalizing", case .trying = savedPlace?.state { return false }
+        return true
     }
 }
 
@@ -62,6 +75,7 @@ public enum LocPill {
     /// "saved place" for a cached alignment not yet confirmed by the server.
     public static func methodLabel(method: String?, source: String) -> String {
         if source == "place_cache" { return "saved place" }
+        if source == "carried" { return "re-anchored" }
         return (method?.contains("mesh") ?? false) ? "mesh" : "visual"
     }
 
@@ -72,6 +86,7 @@ public enum LocPill {
     public static func errorEstimate(spreadCm: Double?, rmseCm: Double?, method: String?, source: String) -> Double? {
         let floor: Double
         if source == "place_cache" { floor = 5 }
+        else if source == "carried" { floor = 8 }         // 10.3: carried over a session reset, until the server confirms
         else if source == "server" { floor = (method?.contains("mesh") ?? false) ? 2 : 3 }
         else { return nil }
         let measured = max(spreadCm ?? 0, rmseCm ?? 0)
@@ -87,11 +102,37 @@ public enum LocPill {
         return String(format: "%.1f h ago", s / 3600)
     }
 
+    /// What the user should do when ARKit is limited (the pill's headline then).
+    public static func trackingAdvice(_ code: String) -> String {
+        switch code {
+        case "limited:excessiveMotion": return "move slowly"
+        case "limited:insufficientFeatures": return "point at detail"
+        case "limited:relocalizing": return "look around slowly"
+        case "notAvailable": return "camera blocked"
+        default: return "move slowly"
+        }
+    }
+
+    /// 10.3: ONE state for the top pill, from both systems (the map-server lock and ARKit tracking); a saved place is
+    /// only ever a detail row.
     public static func make(_ i: LocPillInput) -> LocPillState {
         let map = MapLocText.mapName(i.mapID)
+        let placeRow = i.savedPlace.map { [$0.row] } ?? []
         if !i.online && i.phase != .locked {
             return LocPillState(tone: .idle, text: "OFFLINE",
-                                rows: ["No map server reachable (Wi-Fi / Tailscale)", "Localization resumes when it is back"])
+                                rows: ["No map server reachable (Wi-Fi / Tailscale)", "Localization resumes when it is back"]
+                                    + placeRow)
+        }
+        if i.trackingBlocked && i.phase != .off {
+            var rows = ["ARKit tracking is limited (\(i.trackingCode.replacingOccurrences(of: "limited:", with: ""))): the sim waits"]
+            if i.phase == .locked {
+                rows.append("House map lock kept (\(map)\(i.version.map { " v\($0)" } ?? "")): bodies resume when tracking is back")
+            } else {
+                rows.append(MapLocText.searching(mapID: i.mapID, seconds: i.searchSeconds, attempts: i.attempts,
+                                                 matches: i.matches))
+            }
+            return LocPillState(tone: .working, text: "TRACKING LIMITED — " + trackingAdvice(i.trackingCode),
+                                rows: rows + placeRow)
         }
         switch i.phase {
         case .locked:
@@ -104,20 +145,18 @@ public enum LocPill {
             if let e = i.errCm { rows.append("Error estimate: \(cm(e))") }
             if let a = i.lastFixAge { rows.append("Last fix: \(age(a))") }
             if !i.online { rows.append("Server offline: holding the last lock (ARKit keeps tracking)") }
-            if !i.trackingOK { rows.append("Tracking limited: move slowly, look at detail") }
-            return LocPillState(tone: .good, text: t, rows: rows)
+            return LocPillState(tone: .good, text: t, rows: rows + placeRow)
         case .searching:
             if i.notInMap {
                 return LocPillState(tone: .idle, text: "NOT IN MAP",
                                     rows: ["No match in the \(map) map after \(Int(i.searchSeconds)) s / \(i.attempts) tries",
                                            "This room may not be mapped yet: Map mesh can add it",
-                                           "Still retrying slowly · Retry / Pick place below"])
+                                           "Still retrying slowly · Retry / Pick place below"] + placeRow)
             }
-            var rows = [MapLocText.searching(mapID: i.mapID, seconds: i.searchSeconds, attempts: i.attempts,
+            let rows = [MapLocText.searching(mapID: i.mapID, seconds: i.searchSeconds, attempts: i.attempts,
                                              matches: i.matches)]
-            if !i.trackingOK { rows.append("Tracking limited: move slowly, look at detail") }
             return LocPillState(tone: .working, text: String(format: "FINDING YOU… %.0f s", max(0, i.searchSeconds)),
-                                rows: rows)
+                                rows: rows + placeRow)
         case .off:
             return LocPillState(tone: .idle, text: i.online ? "NOT LOCALIZED" : "OFFLINE",
                                 rows: ["Localization starts when the AR view runs"])
@@ -127,6 +166,7 @@ public enum LocPill {
     public static func methodDetail(method: String?, source: String) -> String {
         switch methodLabel(method: method, source: source) {
         case "saved place": return "saved place (confirming with the map server)"
+        case "re-anchored": return "re-anchored over an AR reset (confirming with the map server)"
         case "mesh": return method == "mesh" ? "mesh (LiDAR on the house mesh)" : "visual + mesh (LiDAR-refined)"
         default: return "visual (photo match)"
         }

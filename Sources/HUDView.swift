@@ -120,7 +120,7 @@ private struct StatusPill: View {
             .overlay(Capsule().stroke(.white.opacity(0.08)))
         }
         .buttonStyle(.plain)
-        .accessibilityLabel("Status: \(model.tracking.label), \(model.place.title), \(fpsText)")
+        .accessibilityLabel("Status: \(model.locPill.text), place \(model.place.short), \(fpsText)")
     }
 
     private var trackColor: Color {
@@ -130,14 +130,11 @@ private struct StatusPill: View {
         case .bad: return .red
         }
     }
-    private var placeIcon: String {
-        model.place.relocalizing ? "location.magnifyingglass" : model.place.tone == .good ? "mappin.and.ellipse" : "mappin"
-    }
-    private var placeColor: Color { HUDColors.place(model.place.tone) }
-    private var placeShort: String {
-        if case .normal = model.tracking {} else if !model.place.relocalizing { return model.tracking.label.replacingOccurrences(of: "TRACKING ", with: "").capitalized }
-        return model.place.title.capitalized
-    }
+    // 10.3: the localization pill above is the ONE state (house-map lock + ARKit tracking); this pill names the saved
+    // place only, in neutral colours, so the two never disagree ("Limited · Relocalizing" next to "LOCALIZED").
+    private var placeIcon: String { model.place.tone == .good ? "mappin.and.ellipse" : "mappin" }
+    private var placeColor: Color { model.place.tone == .good ? .primary : .secondary }
+    private var placeShort: String { model.place.short }
     private var target: Int { model.controller.heatBudget.arFPS }
     private var fpsWarn: Bool { StatusText.fpsTone(fps: model.fps, target: target) == .warn }
     private var fpsText: String {
@@ -166,18 +163,21 @@ private struct StatusCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
-                Text(model.tracking.label).font(.footnote.weight(.bold))
+                Text(model.locPill.text).font(.footnote.weight(.bold)).lineLimit(1).minimumScaleFactor(0.7)
+                    .foregroundStyle(model.locPill.tone == .good ? Color.green : model.locPill.tone == .working ? .orange : .secondary)
                 Spacer(minLength: 0)
                 Button { model.showSettings = true } label: { Image(systemName: "gearshape").font(.callout) }
                     .accessibilityLabel("Settings")
             }
-            if let h = model.tracking.hint { row("hand.point.up.left", h, .orange) }
-            Button { model.showPlaces = true } label: {
+            if model.locPill.text.hasPrefix("TRACKING LIMITED"), let h = model.tracking.hint {
+                row("hand.point.up.left", h, .orange)
+            }
+            Button { model.showPlaces = true } label: {             // saved place: secondary info
                 HStack(alignment: .top, spacing: 6) {
-                    Image(systemName: model.place.relocalizing ? "location.magnifyingglass" : "map")
-                        .foregroundStyle(HUDColors.place(model.place.tone))
+                    Image(systemName: "map").foregroundStyle(.secondary)
                     VStack(alignment: .leading, spacing: 1) {
-                        Text(model.place.title).font(.caption.weight(.bold)).foregroundStyle(HUDColors.place(model.place.tone))
+                        Text(model.place.title).font(.caption.weight(.semibold))
+                            .foregroundStyle(model.place.tone == .working ? Color.orange : .secondary)
                         Text(model.place.detail).font(.caption2).foregroundStyle(.secondary).lineLimit(2)
                             .multilineTextAlignment(.leading)
                     }
@@ -196,7 +196,7 @@ private struct StatusCard: View {
             if !model.arStatus.title.isEmpty {
                 row("house", "\(model.arStatus.title) · \(model.arStatus.detail)", model.arStatus.tone == .good ? .secondary : .orange)
             }
-            Text("map \(model.mapping) · mesh \(model.meshAnchors) \(AdaptiveCapture.meshLabel(model.meshMode, recording: model.recording)) · heat \(model.thermal) · v\(model.version)")
+            Text("ar \(model.tracking.code) · map \(model.mapping) · mesh \(model.meshAnchors) \(AdaptiveCapture.meshLabel(model.meshMode, recording: model.recording)) · heat \(model.thermal) · v\(model.version)")
                 .font(.caption2).foregroundStyle(.secondary).lineLimit(1).minimumScaleFactor(0.7)
             row(model.serverBase == nil ? "wifi.slash" : "server.rack", model.serverText,
                 model.serverBase == nil ? .orange : .secondary)

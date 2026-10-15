@@ -135,3 +135,30 @@ Otherwise do a non-splat data collection just for colored mesh?"
   are acknowledged → the server re-meshes + re-textures only the covered 4 m tiles and publishes a new map version; the
   app polls and says "House map updated · v11". Pauses while recording, in Scans, when critically hot, while tracking
   is limited or past 1.5 GB of unsent data. Status line under the pill: "mapping · 34 MB · 12 kf".
+
+**10.3 (master map first, one status, 2026-10-15)**: owner on 10.0.105, in the bathroom with a bedroom place ("Area 1")
+loaded at launch: the top read "Limited · Relocalizing" while the card said "LOCALIZED · mesh · whole house v10" *and*
+"RELOCALIZING · Area 1 · 52 s"; the sim was paused and no mesh was built. "Why do I see localized and localizing at the
+same time? Usually when it's like this, I need to select the map again."
+- **Master-map localization is primary.** Launch and Reset AR always run a clean ARKit session (tracking normal at
+  once); `MapLocalizer` finds the phone in the house map. No saved ARWorldMap is loaded at launch any more.
+- **Saved places are an accelerator** (`PlaceAssist`, pure + tests): one is tried only when the server has not locked
+  within 5 s AND the last accepted server fix (persisted, `LastMapFix`) lies inside that place's mapped box (carried with
+  the place's cached alignment, `PlaceEvidence`; 0.75 m slack, same floor). An automatic try gives up after 8 s (a
+  picked one after 20 s) and the session re-runs without the world map. Each place is tried once per session.
+- **A server lock cancels a saved map still relocalizing** — no re-selecting the map. The lock is carried over the
+  session reset (`FrameCarry`: the camera pose just before and just after is the same physical pose; yaw + translation),
+  shown as "re-anchored ±8 cm" and confirmed by an immediate server re-check (bodies move only if it is > 10 cm off).
+  Picking a place while the house map holds a lock is refused with a note (it is the better fix).
+- **One status.** The top pill derives ONE state from the server lock and ARKit tracking: LOCALIZED · whole house v10 ·
+  mesh · ±4 cm / FINDING YOU… / TRACKING LIMITED — move slowly / OFFLINE / NOT IN MAP. A saved place is a detail row
+  ("Saved place Area 1: also trying its AR map · 4 / 8 s") and the status pill only names the place, in neutral colours.
+  The status card's headline is the same pill text.
+- **Saved places' animals live in the house map** (`PlaceMigration`): on every lock, place entities the map has never
+  had (and bodies placed here without a lock) are written with `PUT /v1/maps/site/entities/{id}` in the map version
+  their alignment was locked against (the server carries them to the current one), then the lock is applied again.
+  Ids seen in the map are remembered (`map_known.json`) so a body deleted from the map is not resurrected.
+- Place bookkeeping: a place's cached map alignment is written only when the session's ARKit frame IS the place's
+  (matched, or saved here) — 10.2 could cache an alignment from a session that was still relocalizing. Bodies placed
+  while the house map holds a lock no longer auto-create "Area N" places. Logs: `reloc_try`, `reloc_abort`
+  (reason timeout / server_locked / cancelled, keep_lock), `maploc_carried`, `maploc_confirmed`, `map_migrate`.

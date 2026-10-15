@@ -4,7 +4,7 @@ Derived from Apple's sample code "Visualizing and Interacting with a Reconstruct
 Copyright © 2026 Apple Inc. See LICENSE-Apple-sample.txt (MIT-style) for this sample's licensing information.
 Originals, unmodified: upstream/apple-reconstructed-scene/ (Extensions.swift, ViewController.swift,
 ViewController+CoachingOverlay.swift). Changes: SwiftUI host instead of a storyboard; vertex/normal readers return
-SIMD3; coaching overlay and the session-failure alert are attached to our ARSessionController; P2a: Start Over while
+SIMD3; coaching overlay and the session-failure alert are attached to our ARSessionController; P2a/10.3: Start Over while
 relocalizing starts a new place.
 */
 
@@ -48,8 +48,8 @@ extension ARSessionController: ARCoachingOverlayViewDelegate {
     }
 
     func coachingOverlayViewDidRequestSessionReset(_ coachingOverlayView: ARCoachingOverlayView) {
-        // P2a: "Start Over" during relocalization = give up on the saved places and start a new one
-        if model.placeCtl.tracker.isRelocalizing { model.placeCtl.startNew() } else { resetSession() }
+        // 10.3: "Start Over" while a saved map is tried = stop trying it (a clean run); otherwise a clean reset
+        if model.placeCtl.isTrying { model.placeCtl.startNew() } else { resetSession() }
     }
 
     /// From the sample's `session(_:didFailWithError:)`: description + reason + recovery suggestion.

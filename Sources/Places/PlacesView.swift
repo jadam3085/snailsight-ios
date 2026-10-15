@@ -42,7 +42,7 @@ struct PlacesView: View {
                     ForEach(model.places, id: \.id) { p in row(p) }
                         .onDelete { idx in for i in idx { ctl.delete(model.places[i].id) } }
                 } header: { Text("Saved places") } footer: {
-                    Text("Tap one to load it: the app re-runs AR with that map and relocalizes when you look at the same area. Places are also kept on the map server, so they survive a reinstall.")
+                    Text("The house map localizes you on its own; a saved place is only a shortcut (tried automatically when the house map is slow and you were last seen in it). Tap one to try it now: it gives up after 20 s or as soon as the house map finds you. Its animals are kept in the house map too.")
                 }
             }
             .navigationTitle("Places")
@@ -59,8 +59,8 @@ struct PlacesView: View {
             VStack(alignment: .leading, spacing: 2) {
                 HStack {
                     Text(p.name).font(.body.weight(.semibold))
-                    if p.id == ctl.activeID || p.id == ctl.tracker.current {
-                        Text(ctl.tracker.isRelocalizing ? "trying" : "here").font(.caption2.weight(.bold))
+                    if p.id == ctl.activeID || p.id == ctl.assist.current {
+                        Text(ctl.isTrying ? "trying" : "here").font(.caption2.weight(.bold))
                             .padding(.horizontal, 6).padding(.vertical, 2).background(Color.green.opacity(0.3), in: Capsule())
                     }
                     Spacer()

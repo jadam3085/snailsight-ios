@@ -1,32 +1,37 @@
-// SnailSight P2a: persistent places + relocalization across launches (docs/SNAILSIGHT-REFACTOR-PLAN.md §7 P2a).
+// SnailSight P2a: persistent places (docs/SNAILSIGHT-REFACTOR-PLAN.md §7 P2a), demoted in 10.3 to an accelerator.
 //
-// One place = one ARWorldMap covering a floor / connected group of rooms (design choice (a), plan §7 P2a): walking
-// into a new room EXTENDS the current map and the next save grows the place; animals in different rooms live in the
-// same map. A separate floor or a far-away area is its own place, switched with "Places ▸ load" (a session re-run).
+// One place = one ARWorldMap covering a floor / connected group of rooms; walking into a new room EXTENDS the current map
+// and the next save grows the place.
 //
-// Launch: rank the saved places (PlaceRanking), load the first as `initialWorldMap`; the sim stays hidden while
-// RELOCALIZING; ARKit's "normal" after that = LOCALIZED → the place's animals re-spawn at their anchors and resume
-// their behaviour. No lock within RelocTracker.timeout (20 s) → the next candidate (a session re-run), cycling;
-// the user can pick a place or start a new one at any time. Every step is logged (reloc_* / place_*).
+// 10.3 master map first (owner on 10.0.105: "Why do I see localized and localizing at the same time? Usually when it's
+// like this, I need to select the map again." — a bedroom place was loaded at launch while he stood in the bathroom, so
+// ARKit sat in limited/relocalizing, the sim paused and no mesh was built, while the map server had already locked him):
+//  - launch / Reset AR run a CLEAN session (tracking normal at once); MapLocalizer finds the phone in the master map;
+//  - a saved map is tried only when the server has not locked within 5 s AND the last server fix lies inside that
+//    place (PlaceEvidence), and is aborted after 8 s (20 s when picked) — a re-run without the world map;
+//  - a server lock cancels a saved map still relocalizing (the lock is carried over the reset: FrameCarry);
+//  - saved places' animals are migrated into the master map (PlaceMigration in MapLocalizer).
+// Pure rules: SnailSightCore PlaceAssist. Every step is logged (reloc_* / place_*).
 import ARKit
 import Foundation
 import SnailSightCore
 import UIKit
 
-/// What the HUD shows about the place (AppModel.place).
+/// What the HUD shows about the saved place (AppModel.place): secondary info, never the headline (that is the pill).
 struct PlaceHUD: Equatable {
     enum Tone: Equatable { case neutral, working, good, bad }
-    var title = "NEW PLACE"
-    var detail = "Spawn animals, then Save place"
+    var title = "NO SAVED PLACE"
+    var detail = ""
     var tone: Tone = .neutral
-    var relocalizing = false
+    var relocalizing = false            // a saved map is being tried (Save place waits)
+    var short = "Places"                // the status pill's place word
 }
 
 final class PlaceController {
     private unowned let model: AppModel
     let store: PlaceStore
-    private(set) var tracker = RelocTracker()
-    /// The place this session belongs to: the one localized into, or the one a fresh session was saved as.
+    private(set) var assist = PlaceAssist()
+    /// The place this session's ARKit frame belongs to: the one matched, or the one this session was saved as.
     private(set) var activeID: String?
     private var lastSaveAt: TimeInterval = 0
     private var saving = false
@@ -37,10 +42,9 @@ final class PlaceController {
     private var bgTask: UIBackgroundTaskIdentifier = .invalid
     private var observers: [NSObjectProtocol] = []
     private var launched = false
-    private var tries = 0
     private var loading = false            // a map file is being read: tracking changes belong to the old run
 
-    static let restoreDelay = 0.8          // s after LOCALIZED: let ARKit settle the anchors before re-spawning
+    static let restoreDelay = 0.8          // s after a match: let ARKit settle the anchors before re-spawning
     static let autoSaveDelay = 5.0         // s after the last spawn / move / order change
     static let uploadThrottle = 60.0       // s between automatic uploads of the same place
 
@@ -58,142 +62,146 @@ final class PlaceController {
     private var now: TimeInterval { Date().timeIntervalSince1970 }
 
     var activeName: String? { activeID.flatMap { store.manifests[$0]?.name } }
+    /// A saved map is being tried (sim waits, Save place waits).
+    var isTrying: Bool { assist.isTrying }
 
     // MARK: launch
 
-    /// First AR run of the app: relocalize into the most likely saved place, else start fresh. Calls `run` exactly once.
+    /// First AR run of the app: always a clean session (10.3). Calls `run` exactly once.
     func launch(run: @escaping (ARWorldMap?) -> Void) {
         guard !launched else { return }
         launched = true
-        let order = PlaceRanking.order(store.all)
-        model.log.event("reloc_launch", ["places": .int(store.manifests.count), "order": .string(order.joined(separator: ","))])
-        guard let first = tracker.begin(candidates: order, now: now) else {
-            run(nil)
-            publish()
-            restoreFromServerIfEmpty()
-            return
-        }
-        load(first, why: "launch") { map in run(map) }
+        assist.reset(now: now)
+        model.log.event("reloc_launch", ["places": .int(store.manifests.count), "mode": .string("master_first")])
+        run(nil)
+        publish()
+        restoreFromServerIfEmpty()
     }
 
-    /// Reinstall: Documents is empty but the map server has the places → fetch them and start relocalizing.
+    /// Reinstall: Documents is empty but the map server has the places → fetch them (evidence / migration use them).
     private func restoreFromServerIfEmpty() {
         guard store.manifests.isEmpty else { return }
         store.restoreFromServer { [weak self] n in
-            guard let self, n > 0, self.activeID == nil, self.model.controller.sim.entityCount == 0,
-                  case .fresh = self.tracker.phase else { return }
-            self.model.flash("Restored \(n) saved place\(n == 1 ? "" : "s") from the map server: relocalizing", seconds: 4)
-            self.beginRelocalization(reason: "restored")
+            guard let self else { return }
+            self.model.log.event("place_restored", ["count": .int(n)])
+            self.publish()
         }
     }
 
-    /// Rank and try the saved places from the top (after Reset AR or a server restore).
-    func beginRelocalization(reason: String) {
-        let order = PlaceRanking.order(store.all)
-        guard let first = tracker.begin(candidates: order, now: now) else { publish(); return }
-        model.log.event("reloc_restart", ["reason": .string(reason), "order": .string(order.joined(separator: ","))])
-        switchTo(first, why: reason)
+    /// Reset AR (or back from Object Capture): a clean session, every place may be tried again.
+    func sessionReset() {
+        restoreWork?.cancel()
+        assist.reset(now: now)
+        activeID = nil                                   // the new ARKit frame is not the place's
+        model.controller.sim.gated = false
+        publish()
     }
 
-    /// Load a map file and hand it over (main thread). A broken file is skipped (logged) and the next one tried.
-    private func load(_ id: String, why: String, then: @escaping (ARWorldMap?) -> Void) {
-        tries += 1
+    /// Load a map file and re-run the session with it (main thread). A broken file is skipped (logged).
+    private func tryPlace(_ id: String, why: String) {
         loading = true
         model.controller.sim.gated = true
+        model.controller.sim.removeAllBodies()           // they come back from the place (match) or the house map
+        activeID = nil
         restoreWork?.cancel()
         store.loadMap(id) { [weak self] r in
             guard let self else { return }
             self.loading = false
+            guard self.assist.isTrying, self.assist.current == id else {     // cancelled / locked while loading
+                self.model.controller.sim.gated = false
+                return
+            }
             switch r {
             case .success(let (m, map)):
-                self.tracker.runStarted(now: self.now)          // the 20 s and time-to-localize start with the run
+                self.assist.runStarted(now: self.now)
                 self.model.log.event("reloc_start", ["place": .string(id), "name": .string(m.name), "why": .string(why),
-                                                     "candidates": .int(self.tracker.candidates.count),
-                                                     "index": .int(self.tracker.index), "round": .int(self.tracker.rounds),
                                                      "map_bytes": .int(m.mapBytes), "entities": .int(m.entities.count),
-                                                     "features": .int(map.rawFeaturePoints.points.count)])
-                // P2b: switch the sim on (hidden: gated) while relocalizing, so the animal models are loaded BEFORE
-                // the restore. 9.7 turned it on only at restore time; the bodies were spawned before their USDZ
-                // templates arrived and, with the sim frozen (thermal serious), never drew - only their shadows did.
-                if !m.entities.isEmpty && !self.model.simOn { self.model.simOn = true }
-                then(map)
+                                                     "features": .int(map.rawFeaturePoints.points.count),
+                                                     "timeout_s": .double(self.assist.timeout(picked: self.assist.isPicked))])
+                if !m.entities.isEmpty && !self.model.simOn { self.model.simOn = true }   // models load before restore
+                self.ar.runWorldMap(map)
             case .failure(let e):
                 self.model.log.event("reloc_load_error", ["place": .string(id), "error": .string(e.localizedDescription)])
                 self.model.flash("Saved place \(self.store.manifests[id]?.name ?? id) could not be read: skipped", seconds: 3)
                 self.store.forgetLocal(id)                       // the server copy stays (another build may read it)
-                if let next = self.tracker.begin(candidates: PlaceRanking.order(self.store.all), now: self.now) {
-                    self.load(next, why: "skip_broken", then: then)
-                } else {
-                    self.model.controller.sim.gated = false
-                    then(nil)
-                }
+                _ = self.assist.cancel(now: self.now)            // the session never left the clean run
+                self.model.controller.sim.gated = false
             }
             self.publish()
         }
     }
 
-    /// Re-run the session with another place's map (tracking + anchors + mesh reset; sim bodies cleared until it
-    /// localizes and restores them).
-    private func switchTo(_ id: String, why: String) {
-        model.controller.sim.removeAllBodies()
-        activeID = nil
-        load(id, why: why) { [weak self] map in
-            self?.ar.runWorldMap(map)
-        }
-    }
-
-    // MARK: ARKit callbacks (main)
+    // MARK: ARKit / localizer callbacks (main)
 
     func trackingChanged(_ s: TrackingStatus) {
         guard !loading else { return }
         let code = s.code
-        if tracker.isRelocalizing, code.hasPrefix("limited:") {
-            model.log.event("reloc_reason", ["place": .string(tracker.current ?? "?"), "reason": .string(code),
-                                             "t": .double((tracker.elapsed(now: now) * 10).rounded() / 10)])
+        if assist.isTrying, code.hasPrefix("limited:") {
+            model.log.event("reloc_reason", ["place": .string(assist.current ?? "?"), "reason": .string(code),
+                                             "t": .double((assist.elapsed(now: now) * 10).rounded() / 10)])
         }
-        handle(tracker.tracking(code, now: now))
+        handle(assist.tracking(code, now: now))
     }
 
     /// HUD tick (2 Hz).
     func tick() {
         guard !loading else { return }
-        handle(tracker.tick(now: now))
-        if tracker.isRelocalizing { publish() }
+        let locked = model.mapLocalizer.isLocked
+        var evidence: String?
+        if assist.wantsEvidence(now: now, serverLocked: locked), model.controller.sim.entityCount == 0 {
+            evidence = PlaceEvidence.candidate(places: store.all, alignments: MapFrameCache.all(),
+                                               fix: LastFixStore.get(), now: now)
+        }
+        handle(assist.tick(now: now, serverLocked: locked, evidence: evidence))
+        if assist.isTrying { publish() }
     }
 
-    private func handle(_ a: RelocAction) {
+    /// The house map locked this session: a saved map still relocalizing is cancelled at once (10.3).
+    func mapLocked() {
+        handle(assist.serverLock(now: now))
+    }
+
+    private func handle(_ a: PlaceAssistAction) {
         switch a {
         case .none: return
-        case .localized(let id, let secs):
+        case .tryPlace(let id):
+            let picked = assist.isPicked
+            model.log.event("reloc_try", ["place": .string(id), "name": .string(store.manifests[id]?.name ?? "?"),
+                                          "picked": .bool(picked),
+                                          "why": .string(picked ? "pick" : "evidence")])
+            tryPlace(id, why: picked ? "pick" : "evidence")
+        case .abort(let id, let reason, let keepLock):
+            if reason == "timeout", var m = store.manifests[id] { m.timedOut(); store.update(m) }
+            model.log.event("reloc_abort", ["place": .string(id), "reason": .string(reason), "keep_lock": .bool(keepLock),
+                                            "last_reason": .string(assist.lastReason),
+                                            "saw_relocalizing": .bool(assist.sawRelocalizing)])
+            let name = store.manifests[id]?.name ?? id
+            if reason == "timeout" {
+                model.flash("\(name) not matched: using the house map", seconds: 2.5)
+            }
+            model.controller.sim.gated = false
+            if !loading { ar.runWorldMap(nil, carryLock: keepLock) }    // a load in flight sees the cancel and stops
+        case .matched(let id, let secs):
             activeID = id
             var m = store.manifests[id]
             m?.localized(now: now, seconds: secs)
             if let m { store.update(m) }
             model.log.event("reloc_ok", ["place": .string(id), "name": .string(m?.name ?? "?"),
-                                         "seconds": .double((secs * 100).rounded() / 100), "tries": .int(tries),
-                                         "rounds": .int(tracker.rounds), "saw_relocalizing": .bool(tracker.sawRelocalizing),
+                                         "seconds": .double((secs * 100).rounded() / 100),
+                                         "saw_relocalizing": .bool(assist.sawRelocalizing),
                                          "entities": .int(m?.entities.count ?? 0)])
-            tries = 0
-            model.flash(String(format: "LOCALIZED in %@ (%.1f s)", m?.name ?? "saved place", secs), seconds: 3)
+            model.flash(String(format: "Saved place %@ matched (%.1f s)", m?.name ?? "?", secs), seconds: 2.5)
             model.mapLocalizer.worldFrameChanged("place_localized", placeID: id)   // ARKit's origin snapped to the place
             let w = DispatchWorkItem { [weak self] in self?.restoreEntities(id) }
             restoreWork = w
             DispatchQueue.main.asyncAfter(deadline: .now() + Self.restoreDelay, execute: w)
-        case .tryNext(let next, let failed):
-            if var m = store.manifests[failed] { m.timedOut(); store.update(m) }
-            model.log.event("reloc_timeout", ["place": .string(failed), "after_s": .double(RelocTracker.timeout),
-                                              "last_reason": .string(tracker.lastReason), "next": .string(next),
-                                              "round": .int(tracker.rounds)])
-            model.flash("Not \(store.manifests[failed]?.name ?? failed)? Trying \(store.manifests[next]?.name ?? next)…",
-                        seconds: 2.5)
-            switchTo(next, why: "timeout")
         }
         publish()
     }
 
     /// Re-spawn the place's animals at their anchors (now in the right place) and let them move again.
     private func restoreEntities(_ id: String) {
-        guard tracker.isLocalized, tracker.current == id, let m = store.manifests[id] else { return }
+        guard assist.isMatched, assist.current == id, let m = store.manifests[id] else { return }
         let anchors = ar.arView.session.currentFrame?.anchors ?? []
         let sim = model.controller.sim
         sim.gated = false
@@ -205,45 +213,41 @@ final class PlaceController {
         publish()
     }
 
-    /// P2b: the house map locked this session. A saved place still relocalizing must not be swapped out by the 20 s
-    /// timeout any more (that re-runs the session and drops the lock): keep it running, so ARKit can still snap into it.
-    func mapLocked() {
-        guard tracker.isRelocalizing, !tracker.pinned else { return }
-        tracker.pinned = true
-        model.log.event("reloc_pinned", ["place": .string(tracker.current ?? "?"), "why": .string("map_locked")])
-        publish()
-    }
-
     // MARK: user actions
 
     /// "Save place": the current place (grown with whatever was mapped since), or a new "Area N".
     func saveNow() { save(reason: "user") }
 
     func pick(_ id: String) {
-        guard store.manifests[id] != nil else { return }
-        if tracker.isLocalized && tracker.current == id { model.flash("Already in \(store.manifests[id]!.name)"); return }
+        guard let m = store.manifests[id] else { return }
+        if assist.isMatched && assist.current == id { model.flash("Already in \(m.name)"); return }
+        if model.mapLocalizer.isLocked {
+            // the house-map lock is the better fix, and the place's animals are in the house map (migration)
+            model.log.event("place_pick", ["place": .string(id), "skipped": .string("map_locked")])
+            model.flash("Localized on the house map already: \(m.name)'s animals are in it", seconds: 3)
+            return
+        }
         saveFirst(reason: "switch") { [weak self] in          // keep what was done here first
-            guard let self, let m = self.store.manifests[id] else { return }
-            self.tracker.pick(id, now: self.now)
+            guard let self else { return }
             self.model.log.event("place_pick", ["place": .string(id)])
-            self.switchTo(id, why: "pick")
+            self.handle(self.assist.pick(id, now: self.now, serverLocked: self.model.mapLocalizer.isLocked))
             self.model.flash("Loading \(m.name): look around where you saved it", seconds: 3)
         }
     }
 
-    /// Stop relocalizing (or leave the current place) and start an empty one; the next save names it "Area N".
+    /// Stop trying a saved map (Start Over / Places ▸ Start new place) or leave the current place; the session keeps
+    /// running (no reset unless a saved map was loaded) and the next save names a new "Area N".
     func startNew() {
         saveFirst(reason: "switch") { [weak self] in self?.resetToNew() }
     }
 
     private func resetToNew() {
-        tracker.startFresh()
+        let a = assist.cancel(now: now)
         activeID = nil
-        model.controller.sim.removeAllBodies()
         model.controller.sim.gated = false
-        ar.runWorldMap(nil)
-        model.log.event("place_new")
-        model.flash("New place: spawn animals, then Save place", seconds: 3)
+        model.log.event("place_new", ["was_trying": .bool(a != .none)])
+        handle(a)                                           // trying: re-run without the world map
+        model.flash("New place: Save place keeps this area", seconds: 3)
         publish()
     }
 
@@ -262,10 +266,8 @@ final class PlaceController {
         let name = store.manifests[id]?.name ?? id
         store.delete(id)
         if activeID == id { activeID = nil }
-        if tracker.current == id {                     // keep the session; the next save makes a new place
-            tracker.startFresh()
-            model.controller.sim.gated = false
-        }
+        if assist.current == id { handle(assist.cancel(now: now)) }   // trying it: back to a clean run
+        MapFrameCache.remove(id)
         model.log.event("place_delete", ["place": .string(id), "name": .string(name)])
         publish()
     }
@@ -308,8 +310,11 @@ final class PlaceController {
         save(reason: reason)
     }
 
+    /// 10.3: bodies placed while the house map holds a lock live in the house map; only an active place (matched, or
+    /// saved by the user) or bodies placed without a lock (offline) are worth a place save.
     private var worthSaving: Bool {
-        !tracker.isRelocalizing && !model.recording && (activeID != nil || model.controller.sim.entityCount > 0)
+        !assist.isTrying && !model.recording
+            && (activeID != nil || (model.controller.sim.entityCount > 0 && !model.mapLocalizer.isLocked))
     }
 
     /// Save (when there is something to keep) and only then continue: a session re-run right after
@@ -320,8 +325,8 @@ final class PlaceController {
     }
 
     private func save(reason: String, done: (() -> Void)? = nil) {
-        if tracker.isRelocalizing {
-            model.flash("Still relocalizing: wait for LOCALIZED, or Places ▸ Start new place", seconds: 3)
+        if assist.isTrying {
+            model.flash("Still trying a saved place: wait a few seconds, or Places ▸ Start new place", seconds: 3)
             done?()
             return
         }
@@ -362,6 +367,9 @@ final class PlaceController {
                     switch r {
                     case .success(let saved):
                         self.activeID = saved.id
+                        // the place's frame is now this session's: its cached map alignment must be this session's
+                        if let al = self.model.mapLocalizer.alignment { MapFrameCache.put(saved.id, al) }
+                        else { MapFrameCache.remove(saved.id) }
                         self.lastSaveAt = self.now
                         let ms = Int((CACurrentMediaTime() - t0) * 1000)
                         self.model.log.event("place_save", [
@@ -407,63 +415,31 @@ final class PlaceController {
 
     // MARK: HUD
 
-    /// P2b: the house-map lock is the headline once it exists ("LOCALIZED · whole house v7 · 1.8 s"); the place line
-    /// moves to the detail. While the map is still searching the place state stays the headline.
-    static func merge(_ place: PlaceHUD, map: MapLocState, placeLocalized: Bool) -> PlaceHUD {
-        var h = place
-        switch map.phase {
-        case .off:
-            break
-        case .locked:
-            h.title = map.title
-            let p = place.title.hasPrefix("NEW PLACE") ? "" : place.title.replacingOccurrences(of: "LOCALIZED · ", with: "place ")
-            h.detail = [map.detail, p].filter { !$0.isEmpty }.joined(separator: " · ")
-            h.tone = .good
-            h.relocalizing = false
-        case .searching:
-            if !place.relocalizing && !placeLocalized && place.title.hasPrefix("NEW PLACE") {
-                h.title = map.title
-                h.detail = map.detail
-                h.tone = .working
-            } else {
-                h.detail = place.detail + " · " + map.detail
-            }
+    /// The saved-place detail for the localization pill / card (nil = none in play).
+    var note: SavedPlaceNote? {
+        switch assist.phase {
+        case .trying(let id, _, let picked):
+            return SavedPlaceNote(name: store.manifests[id]?.name ?? id,
+                                  state: .trying(seconds: assist.elapsed(now: now), timeout: assist.timeout(picked: picked)))
+        case .matched(let id, _):
+            return SavedPlaceNote(name: store.manifests[id]?.name ?? id, state: .matched)
+        case .clean:
+            guard let id = activeID, let m = store.manifests[id] else { return nil }
+            return SavedPlaceNote(name: m.name, state: .active)
         }
-        return h
     }
 
     func publish() {
+        let n = note
+        let line = PlaceLine.make(note: n, masterLocked: model.mapLocalizer.isLocked, savedCount: store.manifests.count,
+                                  bodies: model.controller.sim.entityCount,
+                                  version: activeID.flatMap { store.manifests[$0]?.version })
         var h = PlaceHUD()
-        switch tracker.phase {
-        case .relocalizing(let id, _):
-            let name = store.manifests[id]?.name ?? id
-            let t = Int(tracker.elapsed(now: now))
-            h.title = "RELOCALIZING · \(name) · \(t) s"
-            var d = "Go to where you saved it and look around slowly"
-            if tracker.candidates.count > 1 && !tracker.pinned {
-                d += " · try \(tracker.index + 1)/\(tracker.candidates.count)"
-            }
-            if !tracker.lastReason.isEmpty && tracker.lastReason != "relocalizing" { d += " · \(tracker.lastReason)" }
-            h.detail = d
-            h.tone = .working
-            h.relocalizing = true
-        case .localized(let id, let secs):
-            let m = store.manifests[id]
-            h.title = String(format: "LOCALIZED · %@ · %.1f s", m?.name ?? id, secs)
-            let n = model.controller.sim.entityCount
-            h.detail = "\(n) sim bod\(n == 1 ? "y" : "ies") here · Save place keeps changes"
-            h.tone = .good
-        case .fresh:
-            if let id = activeID, let m = store.manifests[id] {
-                h.title = "PLACE · \(m.name)"
-                h.detail = "Saved v\(m.version) · \(m.entities.count) animal\(m.entities.count == 1 ? "" : "s")"
-                h.tone = .good
-            } else {
-                h.title = store.manifests.isEmpty ? "NEW PLACE" : "NEW PLACE (not saved)"
-                h.detail = "Spawn animals, then Save place"
-            }
-        }
-        h = Self.merge(h, map: model.mapLoc, placeLocalized: tracker.isLocalized)
+        h.title = line.title
+        h.detail = line.detail
+        h.tone = line.tone == .good ? .good : line.tone == .working ? .working : .neutral
+        h.relocalizing = line.trying
+        h.short = n?.name ?? (store.manifests.isEmpty ? "No place" : "Places")
         if model.place != h { model.place = h }
         let list = store.all
         if model.places != list { model.places = list }
