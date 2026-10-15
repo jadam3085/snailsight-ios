@@ -77,6 +77,20 @@ final class AppModel: ObservableObject {
     @Published var showPlaces = false
     /// P2b localization against the master `site` map (Sources/Places/MapLocalizer); folded into `place` for the HUD.
     @Published var mapLoc = MapLocState()
+    /// 10.2 the top "am I localized?" pill (LocPill via MapLocalizer) and its detail card.
+    @Published var locPill = LocPillState(tone: .idle, text: "OFFLINE", rows: [])
+    @Published var locExpanded = false
+    /// 10.2 "Map mesh" (Sources/MeshMap): off at launch; "Auto when localized" is remembered (default off).
+    @Published var meshMapOn = false { didSet { if meshMapOn != oldValue { meshMapper.update() } } }
+    @Published var meshMapAuto: Bool = UserDefaults.standard.bool(forKey: "meshmap.auto") {
+        didSet {
+            UserDefaults.standard.set(meshMapAuto, forKey: "meshmap.auto")
+            if meshMapAuto != oldValue { meshMapper.update() }
+        }
+    }
+    /// "mapping · 34 MB · 12 kf" under the pill (nil = hidden); live = capturing right now (not paused).
+    @Published var meshMapText: String?
+    @Published var meshMapLive = false
     @Published var showSettings = false
     /// 10.0 Live map (Sources/Live/LiveStreamer, API §6b): stream keyframes to the map server while on. Off at launch.
     @Published var liveOn = false { didSet { if liveOn != oldValue { liveStreamer.setEnabled(liveOn) } } }
@@ -161,6 +175,7 @@ final class AppModel: ObservableObject {
     private(set) lazy var placeCtl = PlaceController(model: self)
     private(set) lazy var mapLocalizer = MapLocalizer(model: self)
     private(set) lazy var liveStreamer = LiveStreamer(model: self)
+    private(set) lazy var meshMapper = MeshMapper(model: self)
     private(set) lazy var terrainLayer = TerrainARLayer(model: self)
     private(set) lazy var liveMap = LiveMapClient(model: self)
     private(set) lazy var serverSim = ServerSimClient(model: self)
@@ -225,7 +240,7 @@ final class AppModel: ObservableObject {
         services.onLink = { [weak self] base, label in
             self?.serverBase = base
             self?.serverLabel = label
-            if base != nil { self?.placeCtl.online(); self?.refreshFeatures() }   // places saved offline go up now
+            if base != nil { self?.placeCtl.online(); self?.refreshFeatures(); self?.meshMapper.pump() }   // places / mapping saved offline go up now
         }
         services.onUploads = { [weak self] items, rate in
             self?.uploads = items
@@ -304,6 +319,7 @@ final class AppModel: ObservableObject {
         log.event("background")
         // ARKit stops in the background and iOS may end a suspended app: finish the capture cleanly now
         if recorder.isRecording { stopRecording(reason: "background") }
+        meshMapper.appBackground()                      // 10.2: ARKit stops; the mapping upload finishes
         guard bgTask == .invalid else { return }
         // short work only (log sync, packing any unpacked parts, handing them to the background session);
         // the capture bytes themselves travel on the background URLSession, which needs no background task
@@ -380,6 +396,7 @@ final class AppModel: ObservableObject {
             self.recWarning = nil
             self.controller.setDepthCapture(false)
             self.controller.sim.recordingChanged(false)
+            self.mapLocalizer.recordingStopped()            // 10.2: a lock found while recording places the bodies now
             guard let s = summary else { return }
             var ev: [String: LogValue] = ["id": .string(s.clientSessionID), "frames": .int(s.frames),
                                           "mb": .double(Double(s.bytes) / 1_048_576), "dropped": .int(s.dropped)]

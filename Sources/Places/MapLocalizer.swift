@@ -9,6 +9,10 @@
 // already put the same bodies within 15 cm they are left alone (cross-check, logged); if the map has none yet, the
 // place's bodies are written into the map (migration). Every spawn / move / delete afterwards updates the map copy.
 // A few refinements follow (every 8 s); a correction never moves bodies unless it is > 10 cm (then "re-aligned").
+// 10.2 (owner: "I may open the app in any place, but don't necessarily want to record"): localization runs whenever the
+// app is open and online — also while recording (slower) and with the sim off — with a battery-friendly cadence
+// (LocCadence: 1 s until locked, 12 refinements every 8 s, then one refresh a minute; LiDAR depth is switched off
+// between refreshes unless mapping / recording / Live map want it). The top pill (LocPill) shows the result.
 import ARKit
 import CoreImage
 import Foundation
@@ -29,7 +33,7 @@ final class MapLocalizer {
     private(set) var alignment: MapAlignment?          // this ARKit session's map ← ARKit (nil until locked)
     private(set) var lockSeconds: Double?
     private var placedWith: MapAlignment?               // the alignment the bodies on screen were placed with
-    private var streamID = MapLocalizer.newStream()
+    private(set) var streamID = MapLocalizer.newStream()
     private var streamStart = Date().timeIntervalSince1970
     private var lastAttempt = 0.0
     private var inFlight = false
@@ -43,6 +47,11 @@ final class MapLocalizer {
     private let ci = CIContext(options: [.cacheIntermediates: false])
     private let enc = DispatchQueue(label: "snailsight.maploc", qos: .userInitiated)
     private var depthWanted = true
+    private var lastFixAt: Double?                      // 10.2: the last accepted fix (lock / refinement / refresh)
+    private var lastRmseCm: Double?
+    private var notFound = false                        // server answered 404 (no such map)
+    private var pendingApply: String?                   // a lock that arrived while recording: applied at Stop
+    private var forceAttempt = false
 
     static let syncDelay = 3.0
     static let realignCm = 10.0
@@ -67,6 +76,7 @@ final class MapLocalizer {
     /// `sessionRunFollows`: the caller re-runs the session right after (it picks up `.sceneDepth` from wantsDepth).
     func worldFrameChanged(_ reason: String, placeID: String? = nil, sessionRunFollows: Bool = false) {
         model.liveStreamer.worldFrameChanged(reason)     // 10.0 Live map: a new odometry frame = a new stream_id
+        model.meshMapper.worldFrameChanged(reason)       // 10.2 Map mesh: same rule
         model.controller.mapLayer.worldFrameChanged()    // 10.1 AR 1:1: the shown alignment belongs to the old frame
         model.log.event("maploc_reset", ["reason": .string(reason), "was_locked": .bool(alignment != nil),
                                          "attempts": .int(attempts)])
@@ -80,6 +90,9 @@ final class MapLocalizer {
         refinements = 0
         restoredFromMap = false
         source = ""
+        lastFixAt = nil
+        lastRmseCm = nil
+        pendingApply = nil
         if sessionRunFollows { depthWanted = true } else { setDepthWanted(true) }
         if let pid = placeID, let cached = MapFrameCache.get(pid) {      // fast path: the place knows its map alignment
             alignment = cached
@@ -95,16 +108,19 @@ final class MapLocalizer {
 
     /// Every AR frame (main). Cheap unless an attempt is due.
     func frame(_ f: ARFrame) {
-        guard model.serverBase != nil, !inFlight, !model.recording, !model.showScans else { return }
+        guard model.serverBase != nil, !inFlight, !model.showScans else { return }
         let t = now
         let hot = model.thermal == "SERIOUS" || model.thermal == "CRITICAL"
         let serverLocked = alignment != nil && source == "server"
-        guard let every = LocalizeCadence.interval(locked: serverLocked, refinements: refinements, thermalSerious: hot)
-        else {
-            if serverLocked && !model.placeCtl.tracker.isRelocalizing { setDepthWanted(false) }
-            return
-        }
-        guard t - lastAttempt >= every else { return }
+        let since = t - lastAttempt
+        // 10.2: depth only while it is useful (searching, refining, shortly before a refresh)
+        let needDepth = forceAttempt || model.placeCtl.tracker.isRelocalizing ||
+            LocCadence.depthNeeded(locked: serverLocked, refinements: refinements, sinceLastAttempt: since,
+                                   thermalSerious: hot, recording: model.recording)
+        setDepthWanted(needDepth)
+        let every = LocCadence.interval(locked: serverLocked, refinements: refinements, thermalSerious: hot,
+                                        recording: model.recording, notInMap: isNotInMap)
+        guard forceAttempt || since >= every else { return }
         switch f.camera.trackingState {
         case .normal: break
         case .limited(.relocalizing): break                // VIO still tracks in this session's frame
@@ -112,6 +128,7 @@ final class MapLocalizer {
         }
         guard let depth = f.sceneDepth else { setDepthWanted(true); return }
         lastAttempt = t
+        forceAttempt = false
         inFlight = true
         attempts += 1
         let K = f.camera.intrinsics
@@ -171,8 +188,9 @@ final class MapLocalizer {
                 guard let self else { return }
                 self.inFlight = false
                 guard stream == self.streamID else { return }            // the world frame changed meanwhile
-                if let a = answer { self.handle(a, roundTripMs: ms, cameraPos: cameraPos) }
+                if let a = answer { self.notFound = false; self.handle(a, roundTripMs: ms, cameraPos: cameraPos) }
                 else {
+                    if status == 404 { self.notFound = true; self.lastAttempt = self.now + 20 }   // no such map: slow down
                     self.model.log.event("maploc_error", ["status": .int(status), "error": .string(err ?? "?"),
                                                           "ms": .int(Int(ms))])
                     if status == 503 { self.lastAttempt = self.now + 4 }   // server loading a map version: back off
@@ -193,6 +211,8 @@ final class MapLocalizer {
                                        "rtt_ms": .int(Int(roundTripMs)), "version": .int(a.mapVersion),
                                        "method": .string(a.method ?? "")])
         guard a.locked, let T = a.T_map_arkit else { return }
+        if a.anyAccepted || source != "server" { lastFixAt = now }
+        if let r = a.bestRmseCm { lastRmseCm = r }
         let next = MapAlignment(mapID: a.mapID, version: a.mapVersion, T: T, at: now,
                                 inliers: a.gate?.inliers?.max(), spreadCm: a.gate?.spreadCm, method: a.shownMethod)
         let firstServerLock = source != "server"
@@ -217,6 +237,7 @@ final class MapLocalizer {
             model.placeCtl.mapLocked()
             if let pid = model.placeCtl.activeID ?? model.placeCtl.tracker.current { MapFrameCache.put(pid, next) }
             applyLock(reason: "server")
+            model.meshMapper.alignmentChanged(next, spreadCm: a.gate?.spreadCm, errCm: errorEstimate)
         } else {
             if let c = cross { model.log.event("maploc_refine", ["cm": .double(c.cm), "deg": .double(c.deg), "n": .int(refinements)]) }
             if let pw = placedWith, pw.delta(next, at: cameraPos).cm > Self.realignCm {
@@ -224,6 +245,9 @@ final class MapLocalizer {
                 applyLock(reason: "realign")
             }
             if let pid = model.placeCtl.activeID { MapFrameCache.put(pid, next) }
+            if cross.map({ $0.cm > 0.5 || $0.deg > 0.1 }) ?? true {
+                model.meshMapper.alignmentChanged(next, spreadCm: a.gate?.spreadCm, errCm: errorEstimate)
+            }
         }
     }
 
@@ -232,6 +256,10 @@ final class MapLocalizer {
     /// Lock (server or cached): fetch the map's entities and decide keep / restore / migrate.
     private func applyLock(reason: String) {
         guard let al = alignment else { return }
+        if model.recording {                    // 10.2: the capture owns the budget; bodies follow at Stop
+            pendingApply = reason == "realign" ? "realign" : (pendingApply ?? reason)
+            return
+        }
         let link = model.link!
         let q = [URLQueryItem(name: "version", value: String(al.version))]
         Task { [weak self] in
@@ -363,8 +391,65 @@ final class MapLocalizer {
     private func setDepthWanted(_ on: Bool) {
         guard on != depthWanted else { return }
         depthWanted = on
-        model.controller.rerunConfiguration()
+        // recording / mapping / Live map keep `.sceneDepth` on anyway: re-running the session would change nothing
+        let others = model.recording || model.meshMapper.wantsDepth || model.liveStreamer.wantsDepth
+        if !others && !model.showScans { model.controller.rerunConfiguration() }
         model.log.event("maploc_depth", ["on": .bool(on)])
+    }
+
+    // MARK: 10.2 pill, retry, recording
+
+    /// "NOT IN MAP": no match for a long time, or the server has no such map.
+    var isNotInMap: Bool {
+        alignment == nil && (notFound || LocPill.notInMap(searchSeconds: searchSeconds, attempts: attempts, matches: matches))
+    }
+
+    /// ± cm of the current lock (LocPill.errorEstimate).
+    var errorEstimate: Double? {
+        guard let al = alignment else { return nil }
+        return LocPill.errorEstimate(spreadCm: al.spreadCm, rmseCm: lastRmseCm, method: al.method, source: source)
+    }
+
+    /// The pill's "Retry": not locked → a fresh search (new stream, the server's gate starts over); locked → one
+    /// refinement attempt now.
+    func retry() {
+        model.log.event("maploc_retry", ["locked": .bool(alignment != nil), "attempts": .int(attempts)])
+        if alignment == nil {
+            streamID = Self.newStream()
+            streamStart = now
+            attempts = 0
+            matches = 0
+            notFound = false
+        }
+        forceAttempt = true
+        lastAttempt = 0
+        setDepthWanted(true)
+        publish()
+    }
+
+    /// Recording stopped: a lock that arrived meanwhile places the bodies now.
+    func recordingStopped() {
+        guard let r = pendingApply else { return }
+        pendingApply = nil
+        applyLock(reason: r)
+    }
+
+    /// Twice a second (HUD tick): keeps the pill's elapsed seconds / fix age current.
+    func tick() {
+        guard model.serverBase != nil || alignment != nil else { publishPill(); return }
+        publishPill()
+    }
+
+    private func publishPill() {
+        let input = LocPillInput(
+            online: model.serverBase != nil,
+            phase: alignment != nil ? .locked : (model.serverBase != nil ? .searching : .off),
+            mapID: alignment?.mapID ?? mapID, version: alignment?.version, method: alignment?.method, source: source,
+            errCm: errorEstimate, searchSeconds: searchSeconds, attempts: attempts, matches: matches,
+            lastFixAge: lastFixAt.map { now - $0 }, trackingOK: model.tracking.severity == .ok,
+            notInMap: isNotInMap)
+        let p = LocPill.make(input)
+        if model.locPill != p { model.locPill = p }
     }
 
     func publish() {
@@ -382,6 +467,7 @@ final class MapLocalizer {
         }
         if model.mapLoc != s { model.mapLoc = s }
         model.placeCtl.publish()
+        publishPill()
     }
 }
 

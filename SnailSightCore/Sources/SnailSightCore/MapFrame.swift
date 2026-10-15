@@ -246,6 +246,15 @@ public struct LocalizeAnswer: Decodable {
         public var reason: String?
         public var event: String?
         public var ms: Double?
+        public var method: String?
+        public var icp: ICP?
+    }
+    /// Per-frame mesh ICP diagnostics (API §5.6b).
+    public struct ICP: Decodable {
+        public var ok: Bool?
+        public var fitness: Double?
+        public var rmseCm: Double?
+        enum CodingKeys: String, CodingKey { case ok, fitness, rmseCm = "rmse_cm" }
     }
     enum CodingKeys: String, CodingKey {
         case ok, locked, events, gate, frames
@@ -259,6 +268,10 @@ public struct LocalizeAnswer: Decodable {
     public var shownMethod: String? { lockMethod ?? ((method == "none") ? nil : method) }
 
     public var bestInliers: Int { frames.map(\.inliers).max() ?? 0 }
+    /// A frame of this answer was accepted into the stream's gate (a fix, visual or mesh).
+    public var anyAccepted: Bool { frames.contains { $0.accepted == true } }
+    /// The best (lowest) point-to-plane RMSE of a passing mesh ICP in this answer, cm.
+    public var bestRmseCm: Double? { frames.compactMap { $0.icp?.ok == true ? $0.icp?.rmseCm : nil }.min() }
     public var anyMatch: Bool { frames.contains { $0.node > 0 } }
 }
 

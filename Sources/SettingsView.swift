@@ -55,6 +55,14 @@ struct SettingsView: View {
                     Text("Sim scale shrinks every robot, animal and object together (looks, collisions, paths and speeds); a body can have its own size in its action bar. 100 % = real size. Sim quality Auto eases off shadows, mesh updates and sim rate as iOS reports heat, and pauses only when iOS says critical; Battery saver always runs light. A recording pauses and hides the sim unless allowed here.")
                 }
                 Section {
+                    Toggle("Map mesh", isOn: $model.meshMapOn)
+                    Toggle("Auto when localized", isOn: $model.meshMapAuto)
+                    if let m = model.meshMapText { Text(m).font(.caption.monospaced()).foregroundStyle(.secondary) }
+                    Text(model.locPill.text).font(.caption.monospaced()).foregroundStyle(.secondary)
+                } header: { Text("Mapping (mesh only)") } footer: {
+                    Text("Collects LiDAR depth, a sharp photo every ~0.75 m and ARKit's mesh while you walk — no video, no audio — and sends it to the map server, which re-meshes and re-textures only the areas you covered and publishes a new house-map version. Off at launch; Auto starts it whenever the phone is localized. Pauses while recording, in Scans or when the phone is too hot; everything is saved on the phone first and resent after a Wi-Fi drop.")
+                }
+                Section {
                     Toggle("Live map", isOn: $model.liveOn)
                     Picker("Rate", selection: $model.liveRateHz) {
                         ForEach(LiveGate.allowedRates, id: \.self) { Text(LiveText.rate($0)).tag($0) }

@@ -111,3 +111,27 @@ migrated into it when it has none, updated on every spawn / move / delete. Pure 
   heights (`ElevatedNav`); tossed ones settle on whatever they hit. RobosnailBob goes on a table only if its footprint
   fits there (a NavGrid at the table height) and it weighs ≤ 15 kg at the current scale (`RobotSurface`). Log
   `sim_surface`.
+
+**10.2 (localization pill + mesh-only mapping, 2026-10-15)**: owner: "I may open the app in any place, but don't
+necessarily want to record. Can I have the localized as a status pill at the top margin to see if it's localized?
+Otherwise do a non-splat data collection just for colored mesh?"
+- **Always-on localization.** `MapLocalizer` now runs whenever the app is open and a server answers — also while
+  recording (half rate; a lock found mid-recording places the sim bodies at Stop) and with the sim off. Cadence
+  (`LocCadence`): an attempt every 1 s until locked (6 s once "not in map"), 12 refinements every 8 s, then one refresh a
+  minute (×3 when iOS reports serious heat, ×2 while recording). LiDAR depth is switched off between refreshes and back
+  on 3 s before the next one, unless mapping / recording / Live map keep it on.
+- **Top pill** (`LocPill`, centred at the top edge): green "LOCALIZED · whole house v10 · mesh · ±2 cm" (method =
+  mesh-refined / visual / saved place; ± = max(fix spread, mesh ICP RMSE) with a per-method floor of 2 / 3 / 5 cm),
+  amber "FINDING YOU… 12 s", grey "OFFLINE" or "NOT IN MAP" (no match for 45 s / 25 tries, or the server has no such
+  map). Tap: method, last fix age, error estimate, map version, server; **Retry** (new search, or one refinement now),
+  **Pick place**, Map mesh toggles.
+- **Map mesh** (More ▸ Mapping, Settings; off at launch; optional **Auto when localized**, with a 2 min grace after a
+  lost lock): `Sources/MeshMap/MeshMapper.swift` + `SnailSightCore/MeshMap.swift`. Collects LiDAR depth + confidence +
+  a 256×192 colour image at ≤ 2 Hz (only after 10 cm / 8° of motion), a sharp 1920×1440 keyframe every ~0.75 m or 20°
+  (first frame with ≤ 2 px predicted motion blur, ≤ 6 px after 1.5 s; Laplacian sharpness attached), ARKit mesh anchors
+  (new or grown ≥ 15 %, every 5 s) and the map alignment of every frame + `align` chunks at each lock / refinement. No
+  video, no audio. Chunks (`SSMM` framing) are written to Documents/meshmap/<upload_id>/ first, then uploaded one at a
+  time (`PUT /v1/meshmap/{id}/chunks/{seq}`, idempotent, resumes after offline / relaunch); stop → `finish` once all
+  are acknowledged → the server re-meshes + re-textures only the covered 4 m tiles and publishes a new map version; the
+  app polls and says "House map updated · v11". Pauses while recording, in Scans, when critically hot, while tracking
+  is limited or past 1.5 GB of unsent data. Status line under the pill: "mapping · 34 MB · 12 kf".

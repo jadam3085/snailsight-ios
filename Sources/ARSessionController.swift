@@ -102,6 +102,7 @@ final class ARSessionController: NSObject, ARSessionDelegate {
         // GPU, heat and (probes) memory that grows with the area walked
         // P2b: LiDAR depth also while localizing against the house map (MapLocalizer, the first minute or so)
         let wantDepth = depthCapture || model.mapLocalizer.wantsDepth || model.liveStreamer.wantsDepth   // 10.0 Live map
+            || model.meshMapper.wantsDepth                                                               // 10.2 Map mesh
         if model.peopleOcclusion && Self.supportsPeople && !wantDepth { c.frameSemantics.insert(.personSegmentationWithDepth) }
         if wantDepth && Self.supportsDepth { c.frameSemantics.insert(.sceneDepth) }
         c.environmentTexturing = depthCapture ? .none : .automatic
@@ -478,6 +479,7 @@ final class ARSessionController: NSObject, ARSessionDelegate {
         }
         model.mapLocalizer.frame(frame)                  // P2b: keyframes to /v1/localize while finding / refining
         model.liveStreamer.frame(frame)                  // 10.0 Live map: keyframes to the live uplink while on
+        model.meshMapper.frame(frame)                    // 10.2 Map mesh: depth / sharp keyframes to /v1/meshmap
         mapLayer.frame(frame)                            // 10.1 AR 1:1: blend the map alignment, labels face you
         model.serverSim.frame()                          // 10.1 S2: dead-reckoned shared-sim bodies + teleop
         renderer.updateBillboards(camera: Geo.position(frame.camera.transform))
@@ -491,6 +493,8 @@ final class ARSessionController: NSObject, ARSessionDelegate {
         model.fps = fpsMeter.fps
         model.mapping = Self.name(frame.worldMappingStatus)
         model.placeCtl.tick()
+        model.mapLocalizer.tick()                        // 10.2: the localization pill (elapsed s, fix age)
+        model.meshMapper.tick()                          // 10.2: mesh anchors, upload pump, mapping line
         model.liveMap.tick()                             // 10.1 L3: other agents, downlink
         model.serverSim.tick()                           // 10.1 S2: shared sim connection + authority
         model.meshAnchors = meshOverlay.count
@@ -526,9 +530,11 @@ final class ARSessionController: NSObject, ARSessionDelegate {
 
     func session(_ session: ARSession, didAdd anchors: [ARAnchor]) {
         for a in anchors { if let m = a as? ARMeshAnchor { meshOverlay.update(m); if model.simOn { sim.meshChanged(m) } } }
+        model.meshMapper.anchorsChanged(anchors.compactMap { $0 as? ARMeshAnchor })
     }
 
     func session(_ session: ARSession, didUpdate anchors: [ARAnchor]) {
+        model.meshMapper.anchorsChanged(anchors.compactMap { $0 as? ARMeshAnchor })
         for a in anchors {
             if let m = a as? ARMeshAnchor { meshOverlay.update(m); if model.simOn { sim.meshChanged(m) } }
             else if let shift = renderer.anchorShift(a), shift > 0.01,
@@ -542,6 +548,7 @@ final class ARSessionController: NSObject, ARSessionDelegate {
     func session(_ session: ARSession, didRemove anchors: [ARAnchor]) {
         for a in anchors where a is ARMeshAnchor {
             meshOverlay.remove(a.identifier)
+            model.meshMapper.anchorRemoved(a.identifier)
             if model.simOn { sim.meshRemoved(a.identifier) }
         }
     }

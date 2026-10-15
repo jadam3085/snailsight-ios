@@ -13,6 +13,13 @@ struct HUDView: View {
 
     var body: some View {
         VStack(spacing: 6) {
+            VStack(spacing: 4) {                                    // 10.2: "am I localized?" at the top edge
+                LocalizationPill()
+                if let m = model.meshMapText { MappingLine(text: m, live: model.meshMapLive) }
+                if model.locExpanded { LocCard().transition(.move(edge: .top).combined(with: .opacity)) }
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.top, -2)
             HStack(alignment: .top, spacing: 6) {
                 StatusPill()
                 Spacer(minLength: 0)
@@ -31,6 +38,7 @@ struct HUDView: View {
         .padding(.top, 4)
         .padding(.bottom, 6)
         .animation(.snappy(duration: 0.2), value: model.statusExpanded)
+        .animation(.snappy(duration: 0.2), value: model.locExpanded)
         .animation(.easeInOut(duration: 0.2), value: model.toast)
         .animation(.easeInOut(duration: 0.2), value: model.undoText)
     }
@@ -371,6 +379,10 @@ private struct MoreMenu: View {
                 Button { model.tool = .robotPath } label: { Label("Robot path tool", systemImage: "point.topleft.down.to.point.bottomright.curvepath") }
                 Button { model.tool = .objects } label: { Label("Fix objects tool", systemImage: "pencil") }
             }
+            Section("Mapping (mesh only)") {
+                Toggle(isOn: $model.meshMapOn) { Label("Map mesh", systemImage: "cube.transparent") }
+                Toggle(isOn: $model.meshMapAuto) { Label("Auto when localized", systemImage: "location.viewfinder") }
+            }
             Section("Live map") {
                 Toggle(isOn: $model.liveOn) { Label("Live map", systemImage: "dot.radiowaves.left.and.right") }
                 Picker(selection: $model.liveRateHz) {
@@ -410,6 +422,102 @@ private struct MoreMenu: View {
             ToolLabel(icon: "ellipsis.circle", label: "More")
         }
         .accessibilityLabel("More")
+    }
+}
+
+// MARK: - 10.2 localization pill, its card, the mapping line
+
+/// "LOCALIZED · whole house v10 · mesh · ±2 cm" (green) / "FINDING YOU… 12 s" (amber) / "OFFLINE" · "NOT IN MAP"
+/// (grey). Tap for the detail card. Never blocks: it only reads MapLocalizer's published state.
+private struct LocalizationPill: View {
+    @EnvironmentObject var model: AppModel
+
+    var body: some View {
+        let p = model.locPill
+        Button { model.locExpanded.toggle() } label: {
+            HStack(spacing: 5) {
+                Image(systemName: icon(p.tone)).font(.system(size: 10, weight: .bold))
+                Text(p.text).font(.caption2.weight(.bold)).monospacedDigit().lineLimit(1).minimumScaleFactor(0.7)
+                if model.meshMapLive {
+                    Image(systemName: "cube.transparent").font(.system(size: 10, weight: .bold))
+                        .accessibilityLabel("mapping")
+                }
+            }
+            .foregroundStyle(p.tone == .idle ? Color.white : Color.black)
+            .padding(.horizontal, 10).padding(.vertical, 4)
+            .background(fill(p.tone), in: Capsule())
+            .overlay(Capsule().stroke(.white.opacity(0.15)))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Localization: \(p.text)")
+        .accessibilityHint("Shows how the phone is localized in the house map")
+    }
+
+    private func icon(_ t: LocPillTone) -> String {
+        switch t {
+        case .good: return "location.fill"
+        case .working: return "location.magnifyingglass"
+        case .idle: return model.serverBase == nil ? "wifi.slash" : "location.slash"
+        }
+    }
+
+    private func fill(_ t: LocPillTone) -> Color {
+        switch t {
+        case .good: return Color.green.opacity(0.85)
+        case .working: return Color.orange.opacity(0.85)
+        case .idle: return Color.gray.opacity(0.65)
+        }
+    }
+}
+
+/// "mapping · 34 MB · 12 kf" (green dot while capturing, orange when paused / uploading).
+private struct MappingLine: View {
+    let text: String
+    let live: Bool
+
+    var body: some View {
+        HStack(spacing: 5) {
+            Circle().fill(live ? Color.green : Color.orange).frame(width: 6, height: 6)
+            Text(text).font(.caption2.weight(.semibold)).monospacedDigit().lineLimit(1).minimumScaleFactor(0.7)
+        }
+        .padding(.horizontal, 9).padding(.vertical, 3)
+        .background(.ultraThinMaterial, in: Capsule())
+        .accessibilityLabel(text)
+    }
+}
+
+/// The pill's detail: method, last fix, error, map; Retry, Pick place, Map mesh.
+private struct LocCard: View {
+    @EnvironmentObject var model: AppModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            ForEach(Array(model.locPill.rows.enumerated()), id: \.offset) { _, r in
+                Text(r).font(.caption2).lineLimit(2).multilineTextAlignment(.leading)
+            }
+            Text(model.serverText).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+            HStack(spacing: 8) {
+                Button { model.mapLocalizer.retry() } label: {
+                    Label(model.mapLocalizer.isLocked ? "Re-check" : "Retry", systemImage: "arrow.clockwise")
+                }
+                .disabled(model.serverBase == nil)
+                Button { model.locExpanded = false; model.showPlaces = true } label: {
+                    Label("Pick place", systemImage: "map")
+                }
+                Spacer(minLength: 0)
+            }
+            .font(.caption.weight(.semibold))
+            .buttonStyle(.bordered)
+            Toggle(isOn: $model.meshMapOn) {
+                Label("Map mesh (no video, no audio)", systemImage: "cube.transparent").font(.caption)
+            }
+            Toggle(isOn: $model.meshMapAuto) {
+                Label("Auto when localized", systemImage: "location.viewfinder").font(.caption)
+            }
+        }
+        .padding(10)
+        .frame(maxWidth: 360, alignment: .leading)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
     }
 }
 
