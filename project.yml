@@ -1,0 +1,59 @@
+# SnailSight 9 (P0 + P1 capture/upload; 9.6 Scans viewer; 9.7 P2a saved places + relocalization; 9.8 P2b whole-house map localization + sim; 10.0 Live map keyframe streaming; 10.1 AR 1:1 house map, robot terrain, live agents, shared sim) — XcodeGen spec; the CI runner generates SnailSight.xcodeproj from this (never committed).
+# Bundle id stays com.example.apple-samplecode.iLiDAR: the owner's signing service re-signs it under its own team
+# prefix, so updates install in place, keep Documents and use no new free-account app-ID slot. PRODUCT_NAME stays iLiDAR (iLiDAR.app inside iLiDAR-<ver>.ipa).
+name: SnailSight
+options:
+  deploymentTarget:
+    iOS: "18.0"            # 9.6: MetalSplatter (Scans → Splat) needs iOS 18; the owner's phone runs iOS 26
+packages:
+  SnailSightCore:
+    path: SnailSightCore
+  MetalSplatter:           # native Gaussian splat renderer (MIT, scier/MetalSplatter), pinned
+    url: https://github.com/scier/MetalSplatter
+    exactVersion: 1.0.1
+targets:
+  SnailSight:
+    type: application
+    platform: iOS
+    sources:
+      - path: Sources
+      - path: Resources
+    dependencies:
+      - package: SnailSightCore
+      - package: MetalSplatter
+        product: MetalSplatter
+      - package: MetalSplatter
+        product: SplatIO
+    info:
+      path: Generated/Info.plist
+      properties:
+        CFBundleDisplayName: SnailSight
+        CFBundleShortVersionString: "$(MARKETING_VERSION)"
+        CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
+        NSCameraUsageDescription: "SnailSight uses the camera and LiDAR for world-locked AR and scanning."
+        NSLocalNetworkUsageDescription: "SnailSight uploads logs and room captures to your map server on the home network."
+        NSMotionUsageDescription: "SnailSight records the motion sensors with a room capture so the map server can build an accurate map."
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: true
+        UILaunchScreen: {}
+        UIRequiredDeviceCapabilities: [arkit]
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
+        UIStatusBarHidden: true
+        UIFileSharingEnabled: true
+        LSSupportsOpeningDocumentsInPlace: true
+        ITSAppUsesNonExemptEncryption: false
+        # Default map servers (NOT in source): empty here; set SNAILSIGHT_SERVER_TAILNET / SNAILSIGHT_SERVER_LAN as
+        # xcodebuild settings, or inject the keys into the unsigned IPA before signing. Empty = Settings override only.
+        SnailSightServerTailnet: "$(SNAILSIGHT_SERVER_TAILNET)"
+        SnailSightServerLAN: "$(SNAILSIGHT_SERVER_LAN)"
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.example.apple-samplecode.iLiDAR
+        PRODUCT_NAME: iLiDAR
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        SWIFT_VERSION: "5.0"
+        TARGETED_DEVICE_FAMILY: "1"
+        MARKETING_VERSION: "10.1.0"
+        CURRENT_PROJECT_VERSION: "0"
+        SNAILSIGHT_SERVER_TAILNET: ""
+        SNAILSIGHT_SERVER_LAN: ""

@@ -1,0 +1,177 @@
+// Client for the `snailsight` map server (versioned `/v1` API, docs/SNAILSIGHT-API.md).
+// Plain HTTP to IP addresses (ATS relaxed in Info.plist); Tailscale first, home LAN fallback (SnailSightCore.ServerConfig).
+import Foundation
+import Network
+import SnailSightCore
+
+/// Stable per-device agent identity (UserDefaults survives in-place app updates).
+enum Identity {
+    static let agentType = "phone"
+    static let client = "snailsight-ios"
+    private static let key = "snailsight.agent_id"
+
+    static var agentID: String {
+        let d = UserDefaults.standard
+        if let s = d.string(forKey: key), AgentID.isValid(s) { return s }
+        let s = AgentID.make()
+        d.set(s, forKey: key)
+        return s
+    }
+}
+
+enum NetKeys {
+    static let override = "snailsight.server_override"
+    static let lastGood = "snailsight.server_last_good"
+}
+
+enum NetError: LocalizedError {
+    case offline
+    case http(Int, String)
+    var errorDescription: String? {
+        switch self {
+        case .offline: return "Map server not reachable (Tailscale or home Wi-Fi needed)"
+        case .http(let s, let d): return "server said \(s): \(d)"
+        }
+    }
+}
+
+/// JSON helpers tolerant of FastAPI's `{"detail": {...}}` wrapping.
+enum JSON {
+    static func object(_ d: Data) -> [String: Any] {
+        (try? JSONSerialization.jsonObject(with: d)) as? [String: Any] ?? [:]
+    }
+    static func int(_ o: [String: Any], _ key: String) -> Int? {
+        if let v = o[key] as? Int { return v }
+        if let v = o[key] as? Double { return Int(v) }
+        if let inner = o["detail"] as? [String: Any] { return int(inner, key) }
+        return nil
+    }
+    static func string(_ o: [String: Any], _ key: String) -> String? {
+        if let v = o[key] as? String { return v }
+        if let inner = o["detail"] as? [String: Any] { return string(inner, key) }
+        return nil
+    }
+    static func detail(_ d: Data) -> String {
+        let o = object(d)
+        if let s = o["detail"] as? String { return s }
+        if let s = string(o, "detail") { return s }
+        return String(decoding: d.prefix(200), as: UTF8.self)
+    }
+    static func body(_ o: [String: Any]) -> Data { (try? JSONSerialization.data(withJSONObject: o)) ?? Data("{}".utf8) }
+}
+
+struct AgentInfo {
+    var name: String
+    var device: String
+    var appVersion: String
+}
+
+/// Which server answers, and the one place requests are made. An actor so probes/requests from the log uploader,
+/// the capture queue and the UI never race.
+actor ServerLink {
+    private let session: URLSession
+    private let info: AgentInfo
+    private let report: (String?, String) -> Void          // (base, label) → UI (called off-main; it hops to main)
+    private var onOnline: [() -> Void] = []
+    private(set) var base: String?
+    private(set) var label = "offline"
+    private var probing = false
+    private var lastProbe: Date = .distantPast
+    private let monitor = NWPathMonitor()
+
+    init(info: AgentInfo, report: @escaping (String?, String) -> Void) {
+        let c = URLSessionConfiguration.ephemeral
+        c.timeoutIntervalForRequest = 15
+        c.timeoutIntervalForResource = 120
+        c.waitsForConnectivity = false
+        session = URLSession(configuration: c)
+        self.info = info
+        self.report = report
+    }
+
+    func whenOnline(_ f: @escaping () -> Void) { onOnline.append(f) }
+
+    func startMonitoring() {
+        monitor.pathUpdateHandler = { [weak self] path in
+            guard let self else { return }
+            Task { await self.pathChanged(satisfied: path.status == .satisfied) }
+        }
+        monitor.start(queue: DispatchQueue(label: "snailsight.netpath"))
+    }
+
+    private func pathChanged(satisfied: Bool) async {
+        if satisfied { _ = await probe(force: true) }
+        else { setOffline() }
+    }
+
+    private func setOffline() {
+        base = nil
+        label = "offline"
+        report(nil, label)
+    }
+
+    /// Find a server: override → last working → tailnet → LAN. `GET /v1` with a 4 s timeout each.
+    @discardableResult
+    func probe(force: Bool = false) async -> String? {
+        if probing { return base }
+        if !force, base != nil { return base }
+        if !force, Date().timeIntervalSince(lastProbe) < 5 { return base }
+        probing = true
+        defer { probing = false; lastProbe = Date() }
+        let d = UserDefaults.standard
+        for c in ServerConfig.candidates(override: d.string(forKey: NetKeys.override), lastGood: d.string(forKey: NetKeys.lastGood)) {
+            guard let url = URL(string: c.base + "/" + ServerConfig.apiVersion) else { continue }
+            var r = URLRequest(url: url)
+            r.timeoutInterval = 4
+            if let (_, resp) = try? await session.data(for: r), (resp as? HTTPURLResponse)?.statusCode == 200 {
+                base = c.base
+                label = c.label
+                d.set(c.base, forKey: NetKeys.lastGood)
+                report(base, label)
+                await registerAgent()
+                for f in onOnline { f() }
+                return base
+            }
+        }
+        setOffline()
+        return nil
+    }
+
+    private func registerAgent() async {
+        let body: [String: Any] = ["agent_type": Identity.agentType, "name": info.name, "device": info.device,
+                                   "app_version": info.appVersion, "client": Identity.client]
+        _ = try? await rawRequest("PUT", "/v1/agents/\(Identity.agentID)", body: JSON.body(body), contentType: "application/json")
+    }
+
+    /// One request against the current server (probing first if needed). Returns (body, HTTP status).
+    /// Network failures mark the server offline so the next call re-probes; HTTP errors are returned, not thrown.
+    func request(_ method: String, _ path: String, query: [URLQueryItem] = [], body: Data? = nil,
+                 contentType: String = "application/json", timeout: TimeInterval = 30) async throws -> (Data, Int) {
+        if base == nil { await probe() }
+        guard base != nil else { throw NetError.offline }
+        return try await rawRequest(method, path, query: query, body: body, contentType: contentType, timeout: timeout)
+    }
+
+    private func rawRequest(_ method: String, _ path: String, query: [URLQueryItem] = [], body: Data? = nil,
+                            contentType: String = "application/json", timeout: TimeInterval = 30) async throws -> (Data, Int) {
+        guard let b = base, var comps = URLComponents(string: b + path) else { throw NetError.offline }
+        if !query.isEmpty { comps.queryItems = query }
+        guard let url = comps.url else { throw NetError.offline }
+        var r = URLRequest(url: url)
+        r.httpMethod = method
+        r.timeoutInterval = timeout
+        do {
+            let (data, resp): (Data, URLResponse)
+            if let body {
+                r.setValue(contentType, forHTTPHeaderField: "Content-Type")
+                (data, resp) = try await session.upload(for: r, from: body)
+            } else {
+                (data, resp) = try await session.data(for: r)
+            }
+            return (data, (resp as? HTTPURLResponse)?.statusCode ?? 0)
+        } catch {
+            if (error as? URLError) != nil { setOffline() }
+            throw error
+        }
+    }
+}

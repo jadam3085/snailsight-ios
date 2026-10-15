@@ -1,0 +1,348 @@
+import Foundation
+
+// SnailSight 10.1 S2/S3 client side (plan §7 S2 "Shared, server-authoritative sim", S3 "sim agents are mock robots").
+// Contract (plan §7 S2, coded against while the server lane builds it): WS /v1/maps/{map_id}/sim streams snapshots
+// (~10 Hz) + events; POST …/sim/entities spawns, DELETE …/sim/entities/{id} despawns, POST …/sim/entities/{id}/cmd
+// sends teleop {v, w, ttl} or a goal. Entities {id, kind, pose{x,y,z,theta}, vel, state, owner, t_mono} in the MAP frame.
+// - Dead reckoning: every entity is extrapolated from its last snapshot by its velocity (≤ 0.5 s), and the drawn pose
+//   eases out the snapshot-to-snapshot error (τ 0.15 s: gain × latency < 1, no ringing) — snailCOP measured 82 % frozen
+//   frames without it (memory snailcop-wargame-two-tier).
+// - Teleop commands carry ttl 0.5 s and are re-sent at 10 Hz while the stick is held; one zero command on release.
+//   A dropped link stops the robot by itself (server side TTL, like the snailSIM cmdvel_relay 0.6 s deadman).
+// - Authority: server mode only when the feature is on, online, localized and the stream is alive; local S1 sim is the
+//   fallback (hysteresis: 1 s healthy to switch in, 3 s silent to switch back).
+// Pure, Linux-tested (SimServerTests).
+
+/// A pose in the map frame with a tolerant decoder (theta | yaw; arrays [x, y, z, theta] too).
+public struct SimPose: Equatable {
+    public var x: Double, y: Double, z: Double, theta: Double
+    public init(x: Double, y: Double, z: Double, theta: Double) { self.x = x; self.y = y; self.z = z; self.theta = theta }
+}
+
+extension SimPose: Decodable {
+    enum K: String, CodingKey { case x, y, z, theta, yaw }
+    public init(from d: Decoder) throws {
+        if var a = try? d.unkeyedContainer() {
+            var v: [Double] = []
+            while !a.isAtEnd { v.append(try a.decode(Double.self)) }
+            guard v.count >= 2 else { throw DecodingError.dataCorrupted(.init(codingPath: d.codingPath, debugDescription: "pose")) }
+            x = v[0]; y = v[1]; z = v.count > 3 ? v[2] : 0; theta = v.count > 3 ? v[3] : (v.count == 3 ? v[2] : 0)
+            return
+        }
+        let c = try d.container(keyedBy: K.self)
+        x = try c.decode(Double.self, forKey: .x)
+        y = try c.decode(Double.self, forKey: .y)
+        z = (try? c.decodeIfPresent(Double.self, forKey: .z)) ?? 0
+        let th: Double? = try? c.decodeIfPresent(Double.self, forKey: .theta)
+        let yw: Double? = try? c.decodeIfPresent(Double.self, forKey: .yaw)
+        theta = th ?? yw ?? 0
+    }
+}
+
+/// Velocity: body frame {v, w} (unicycle) or world {vx, vy, vz, wz}; omega aliases.
+public struct SimVel: Equatable {
+    public var v: Double?, w: Double
+    public var vx: Double?, vy: Double?, vz: Double
+    public init(v: Double? = nil, w: Double = 0, vx: Double? = nil, vy: Double? = nil, vz: Double = 0) {
+        self.v = v; self.w = w; self.vx = vx; self.vy = vy; self.vz = vz
+    }
+    public static let zero = SimVel(v: 0)
+}
+
+extension SimVel: Decodable {
+    enum K: String, CodingKey { case v, w, omega, wz, vx, vy, vz }
+    public init(from d: Decoder) throws {
+        let c = try d.container(keyedBy: K.self)
+        func g(_ k: K) -> Double? { let x: Double? = try? c.decodeIfPresent(Double.self, forKey: k); return x }
+        v = g(.v); vx = g(.vx); vy = g(.vy); vz = g(.vz) ?? 0
+        w = g(.w) ?? g(.omega) ?? g(.wz) ?? 0
+    }
+}
+
+public struct SimEntitySnap: Equatable {
+    public var id: String
+    public var kind: String
+    public var pose: SimPose
+    public var vel: SimVel
+    public var state: String?
+    public var owner: String?
+    public var tMono: Double?
+    public var name: String?
+    public var agentType: String?                 // S3: sim-rover | sim-drone
+    public var goal: [Double]?
+    public var path: [[Double]]?
+    public var cat: String?                       // robot | drone | animal | object (entity docs)
+    public var dims: [Double]?                    // L, W, H metres (entity docs)
+}
+
+extension SimEntitySnap: Decodable {
+    enum K: String, CodingKey { case id, kind, pose, vel, state, owner, name, goal, path, cat, dims, tMono = "t_mono", agentType = "agent_type" }
+    public init(from d: Decoder) throws {
+        let c = try d.container(keyedBy: K.self)
+        if let s = try? c.decode(String.self, forKey: .id) { id = s } else { id = String(try c.decode(Int.self, forKey: .id)) }
+        func opt<T: Decodable>(_ t: T.Type, _ k: K) -> T? { let x: T? = try? c.decodeIfPresent(t, forKey: k); return x }
+        kind = opt(String.self, .kind) ?? "robot"
+        pose = try c.decode(SimPose.self, forKey: .pose)
+        vel = opt(SimVel.self, .vel) ?? .zero
+        state = opt(String.self, .state)
+        owner = opt(String.self, .owner)
+        tMono = opt(Double.self, .tMono)
+        name = opt(String.self, .name)
+        agentType = opt(String.self, .agentType)
+        goal = opt([Double].self, .goal)
+        path = opt([[Double]].self, .path)
+        cat = opt(String.self, .cat)
+        dims = opt([Double].self, .dims)
+    }
+
+    /// Keep what only the entity docs carry (name, cat, dims) when a 10 Hz snapshot (dynamic state only) arrives.
+    public func merged(withStatic d: SimEntitySnap?) -> SimEntitySnap {
+        guard let d else { return self }
+        var s = self
+        if s.name == nil { s.name = d.name }
+        if s.cat == nil { s.cat = d.cat }
+        if s.dims == nil { s.dims = d.dims }
+        if s.agentType == nil { s.agentType = d.agentType }
+        return s
+    }
+
+    public var isDrone: Bool { cat == "drone" || kind.contains("drone") || (agentType ?? "").contains("drone") }
+    public var isRover: Bool {
+        cat == "robot" || kind == "robot" || kind.contains("rover") || (agentType ?? "").contains("rover")
+    }
+    public var isObject: Bool { cat == "object" }
+}
+
+public enum SimStreamMessage: Equatable {
+    /// `full` = every entity is listed (absent ones are gone); otherwise sleeping objects are left out.
+    case snapshot(tMono: Double?, entities: [SimEntitySnap], full: Bool)
+    case entity(SimEntitySnap)                  // a static description changed (name, dims, …)
+    case event(kind: String, text: String?, entityID: String?)
+    case lease(entityID: String, owner: String?, granted: Bool?)
+    case error(String)
+    case other(String)
+
+    struct Raw: Decodable {
+        var type: String?
+        var t_mono: Double?
+        var full: Bool?
+        var entity: SimEntitySnap?
+        var entities: [SimEntitySnap]?
+        var event: String?
+        var kind: String?
+        var text: String?
+        var message: String?
+        var id: String?
+        var entity_id: String?
+        var owner: String?
+        var granted: Bool?
+        var detail: String?
+    }
+
+    public static func parse(_ data: Data) -> SimStreamMessage? {
+        guard let r = try? JSONDecoder().decode(Raw.self, from: data) else { return nil }
+        switch r.type ?? (r.entities != nil ? "snapshot" : "") {
+        case "snapshot", "state": return .snapshot(tMono: r.t_mono, entities: r.entities ?? [], full: r.full ?? true)
+        case "hello": return .snapshot(tMono: nil, entities: r.entities ?? [], full: true)   // the world on connect
+        case "entity": return r.entity.map { .entity($0) } ?? .other("entity")
+        case "event": return .event(kind: r.event ?? r.kind ?? "event", text: r.text ?? r.message, entityID: r.entity_id ?? r.id)
+        case "lease": return .lease(entityID: r.entity_id ?? r.id ?? "", owner: r.owner, granted: r.granted)
+        case "error": return .error(r.detail ?? r.message ?? "?")
+        case let t: return .other(t)
+        }
+    }
+}
+
+/// Client-side track of one server entity: extrapolate + ease out the correction error.
+public struct RemoteTrack: Equatable {
+    public private(set) var snap: SimEntitySnap
+    public private(set) var recvAt: Double                 // local clock when the snapshot arrived
+    private var errX = 0.0, errY = 0.0, errZ = 0.0, errT = 0.0
+    private var errAt = 0.0
+    public static let maxExtrapolate = 0.5
+    public static let tau = 0.15
+    public static let snapMetres = 1.0                     // teleports (spawn / respawn) are not eased
+
+    public init(_ s: SimEntitySnap, now: Double) { snap = s; recvAt = now; errAt = now }
+
+    /// Pure extrapolation of `s` by `dt` seconds.
+    public static func extrapolate(_ s: SimEntitySnap, dt rawDt: Double) -> SimPose {
+        let dt = max(0, min(rawDt, maxExtrapolate))
+        var p = s.pose
+        if let vx = s.vel.vx, let vy = s.vel.vy {
+            p.x += vx * dt; p.y += vy * dt
+        } else if let v = s.vel.v {
+            let w = s.vel.w
+            if abs(w) < 1e-6 {
+                p.x += v * cos(p.theta) * dt; p.y += v * sin(p.theta) * dt
+            } else {
+                let th1 = p.theta + w * dt
+                p.x += v / w * (sin(th1) - sin(p.theta)); p.y -= v / w * (cos(th1) - cos(p.theta))
+            }
+        }
+        p.z += s.vel.vz * dt
+        p.theta = atan2(sin(p.theta + s.vel.w * dt), cos(p.theta + s.vel.w * dt))
+        return p
+    }
+
+    /// The pose to draw at local time `now`.
+    public func pose(now: Double) -> SimPose {
+        var p = Self.extrapolate(snap, dt: now - recvAt)
+        let k = exp(-max(0, now - errAt) / Self.tau)
+        p.x += errX * k; p.y += errY * k; p.z += errZ * k
+        p.theta = atan2(sin(p.theta + errT * k), cos(p.theta + errT * k))
+        return p
+    }
+
+    /// A new snapshot: what was being drawn becomes the starting error, so nothing jumps.
+    public mutating func update(_ s: SimEntitySnap, now: Double) {
+        let drawn = pose(now: now)
+        snap = s
+        recvAt = now
+        errAt = now
+        let dx = drawn.x - s.pose.x, dy = drawn.y - s.pose.y, dz = drawn.z - s.pose.z
+        if (dx * dx + dy * dy + dz * dz).squareRoot() > Self.snapMetres {
+            errX = 0; errY = 0; errZ = 0; errT = 0
+        } else {
+            errX = dx; errY = dy; errZ = dz
+            errT = atan2(sin(drawn.theta - s.pose.theta), cos(drawn.theta - s.pose.theta))
+        }
+    }
+}
+
+/// Local S1 vs server S2.
+public struct SimAuthority: Equatable {
+    public enum Mode: String, Equatable { case local, server }
+    public private(set) var mode: Mode = .local
+    public private(set) var reason = "off"
+    private var healthySince: Double?
+    public static let switchInS = 1.0
+    public static let silentOutS = 3.0
+    public init() {}
+
+    /// `lastMessageAt`: local time of the newest sim stream message (nil = none since connect).
+    @discardableResult
+    public mutating func update(enabled: Bool, online: Bool, localized: Bool, connected: Bool, lastMessageAt: Double?,
+                                now: Double) -> Bool {
+        let old = mode
+        let alive = connected && (lastMessageAt.map { now - $0 <= Self.silentOutS } ?? false)
+        var why: String?
+        if !enabled { why = "off" } else if !online { why = "offline" } else if !localized { why = "not localized" }
+        else if !alive { why = connected ? "stream silent" : "not connected" }
+        if let w = why {
+            mode = .local; reason = w; healthySince = nil
+        } else {
+            if healthySince == nil { healthySince = now }
+            if mode == .local, now - healthySince! >= Self.switchInS { mode = .server }
+            reason = mode == .server ? "server" : "connecting"
+        }
+        return mode != old
+    }
+}
+
+/// Teleop deadman: what to send for the stick right now (nil = nothing).
+public struct TeleopSender: Equatable {
+    public static let ttl = 0.5
+    public static let every = 0.1
+    public static let deadband = 0.02
+    private var lastSent = -1e9
+    private var lastWasZero = true
+    public init() {}
+
+    public mutating func next(v: Double, w: Double, now: Double) -> (v: Double, w: Double, ttl: Double)? {
+        let zero = abs(v) < Self.deadband && abs(w) < Self.deadband
+        if zero {
+            if lastWasZero { return nil }
+            lastWasZero = true
+            lastSent = now
+            return (0, 0, Self.ttl)                   // one explicit stop on release
+        }
+        guard now - lastSent >= Self.every || lastWasZero else { return nil }
+        lastWasZero = false
+        lastSent = now
+        return (v, w, Self.ttl)
+    }
+}
+
+/// Request bodies + paths (one place to adapt if the server lane names things differently).
+public enum SimServerAPI {
+    public static func streamPath(map: String) -> String { "/v1/maps/\(map)/sim" }
+    public static func entitiesPath(map: String) -> String { "/v1/maps/\(map)/sim/entities" }
+    public static func entityPath(map: String, id: String) -> String { "/v1/maps/\(map)/sim/entities/\(id)" }
+    public static func cmdPath(map: String, id: String) -> String { "/v1/maps/\(map)/sim/entities/\(id)/cmd" }
+    public static func taskPath(map: String, id: String) -> String { "/v1/maps/\(map)/sim/entities/\(id)/task" }
+
+    /// S3 tasks on a sim rover (POST …/task): drone_assist (the target demo: a drone flies ahead to `goal`), deter
+    /// (herd deer away), goto_label, patrol.
+    public static func taskBody(task: String, goal: [Double]? = nil, label: String? = nil, kinds: [String]? = nil,
+                                agentID: String) -> Data {
+        var o: [String: Any] = ["task": task, "agent_id": agentID]
+        if let g = goal { o["goal"] = g.prefix(3).map(r) }
+        if let l = label { o["label"] = l }
+        if let k = kinds { o["kinds"] = k }
+        return json(o)
+    }
+
+    public enum Command: Equatable {
+        case teleop(v: Double, w: Double, ttl: Double)
+        case goal(x: Double, y: Double, z: Double?)
+        case goTo(label: String, objectID: String?, x: Double, y: Double)
+        case goToLabel(String)
+        case patrol([[Double]])
+        case stop
+    }
+
+    static func json(_ o: [String: Any]) -> Data { (try? JSONSerialization.data(withJSONObject: o, options: [.sortedKeys])) ?? Data() }
+
+    public static func body(_ c: Command, agentID: String) -> Data {
+        switch c {
+        case .teleop(let v, let w, let ttl):
+            return json(["v": r(v), "w": r(w), "ttl": ttl, "owner": agentID])
+        case .goal(let x, let y, let z):
+            return json(["goal": z.map { [r(x), r(y), r($0)] } ?? [r(x), r(y)], "owner": agentID])
+        case .goTo(let label, let oid, let x, let y):
+            // the client's own pick (objects API) as a plain goal beside the object + the semantic target
+            var t: [String: Any] = ["label": label]
+            if let oid { t["object_id"] = oid }
+            return json(["goal": [r(x), r(y)], "target": t, "owner": agentID])
+        case .goToLabel(let label):
+            // S3 "go to the lamp": the server resolves the label (objects API) and plans
+            return json(["target": ["label": label], "owner": agentID])
+        case .patrol(let pts):
+            return json(["patrol": pts.map { [r($0[0]), r($0[1])] }, "loop": true, "owner": agentID])
+        case .stop:
+            return json(["v": 0, "w": 0, "ttl": TeleopSender.ttl, "stop": true, "owner": agentID])
+        }
+    }
+
+    /// Spawn body: {kind, pose{x,y,z,theta}, agent_type?, owner}.
+    public static func spawnBody(kind: String, x: Double, y: Double, z: Double, theta: Double, agentID: String) -> Data {
+        var o: [String: Any] = ["kind": kind, "pose": ["x": r(x), "y": r(y), "z": r(z), "theta": r(theta)], "owner": agentID]
+        if kind == "sim-rover" || kind == "sim-drone" { o["agent_type"] = kind }
+        return json(o)
+    }
+
+    static func r(_ v: Double) -> Double { (v * 1000).rounded() / 1000 }
+}
+
+/// "Go to the lamp": pick the object nearest to `from` whose label / name matches (API §8.6 robot use), and a goal on
+/// the floor beside its box, on the side facing `from`.
+public enum SemanticGoal {
+    public static func pick(_ objs: [ARObject], query: String, from p: [Double]) -> ARObject? {
+        let q = query.lowercased().trimmingCharacters(in: .whitespaces)
+        guard !q.isEmpty else { return nil }
+        return objs.filter { $0.centroid.count >= 3 }
+            .filter { $0.label.lowercased().contains(q) || ($0.name ?? "").lowercased().contains(q) }
+            .min { hypot($0.centroid[0] - p[0], $0.centroid[1] - p[1]) < hypot($1.centroid[0] - p[0], $1.centroid[1] - p[1]) }
+    }
+
+    /// A point `clearance` m outside the object's footprint toward `from` (map XY).
+    public static func standoff(_ o: ARObject, from p: [Double], clearance: Double = 0.5) -> [Double] {
+        let c = o.box?.center.count == 3 ? o.box!.center : o.centroid
+        let half = (o.box?.size.count == 3) ? max(o.box!.size[0], o.box!.size[1]) / 2 : 0.15
+        var dx = p[0] - c[0], dy = p[1] - c[1]
+        let n = hypot(dx, dy)
+        if n < 1e-6 { dx = 1; dy = 0 } else { dx /= n; dy /= n }
+        return [c[0] + dx * (half + clearance), c[1] + dy * (half + clearance)]
+    }
+}

@@ -1,0 +1,24 @@
+===== https://raw.githubusercontent.com/series-ai/jam-ready-assets/bdce326b2d7eee85524c08c751faf4804d453f3d/kaykit-prototype-bits/3D/prototype-blocks/License.txt
+===== sha256 ae2cff1491f4ae5d847a641e14c2e335777845d11b07c25b6f8a10bd4bf14e69
+
+SPDX-License-Identifier: CC0-1.0
+Source: https://www.kaylousberg.com/game-assets
+Verified-by: run-workshop maintainers, 2026-08-25
+
+Covered by The Complete KayKit Collection v4 license, previously carried only as a bucket-level file at 3D/LICENSE-kaykit.txt.
+
+--- License text as supplied by the creator ---
+
+The Complete KayKit Collection v4
+
+	Created/distributed by Kay Lousberg (www.kaylousberg.com)
+	Creation date: 19/02/2026 09:00
+
+			------------------------------
+
+	License: (Creative Commons Zero, CC0)
+	http://creativecommons.org/publicdomain/zero/1.0/
+
+	This content is free to use in personal, educational and commercial projects.
+	You can support me by purchasing an asset pack at the EXTRA or SOURCE tiers, leaving a donation/tip on itch.io, or joining my Patreon.
+	If you wish to credit me you can do so by crediting "Kay Lousberg, www.kaylousberg.com" (this is not mandatory)

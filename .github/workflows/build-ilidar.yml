@@ -1,0 +1,105 @@
+# SnailSight (iOS) -> unsigned iLiDAR.ipa artifact. Signing/installing happens outside CI.
+#
+# Contract kept for downstream release tooling: workflow file name, workflow_dispatch inputs (apply_fork is a legacy
+# input, ignored), artifact name `iLiDAR-ipa-arkitfork` containing `iLiDAR.ipa`, bundle id
+# com.example.apple-samplecode.iLiDAR, CFBundleShortVersionString = <app_version>.<build#>, CFBundleVersion = <build#>, build# = run# + 200
+# (continues the numbering of the earlier private builds, which reached 106).
+name: build-ilidar
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      apply_fork:
+        description: "Legacy input (older release tooling passes it); ignored"
+        type: boolean
+        default: true
+      app_version:
+        description: "Marketing version prefix (the phone sees <prefix>.<run# + 200>)"
+        type: string
+        default: "10.1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-ilidar-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    # SnailSightCore unit tests on Linux. simd-based files/tests are excluded on Linux by Package.swift.
+    runs-on: ubuntu-latest
+    container: swift:6.0.3
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: swift test (SnailSightCore)
+        working-directory: SnailSightCore
+        run: swift test
+
+  build:
+    # macOS archive only on manual dispatch (release tooling); pushes/PRs run the Linux tests.
+    if: github.event_name == 'workflow_dispatch'
+    needs: test
+    runs-on: macos-15          # Xcode 16.4 / iOS 18.5 SDK; move to macos-26 deliberately
+    timeout-minutes: 30
+    env:
+      APP_VERSION: ${{ inputs.app_version || '10.1' }}
+      # Optional default map servers for forks (repo variables). Empty = none compiled in (README "Map server address").
+      SNAILSIGHT_SERVER_TAILNET: ${{ vars.SNAILSIGHT_SERVER_TAILNET }}
+      SNAILSIGHT_SERVER_LAN: ${{ vars.SNAILSIGHT_SERVER_LAN }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain + build number
+        run: |
+          xcodebuild -version; xcrun --sdk iphoneos --show-sdk-version; swift --version
+          echo "BUILD_NO=$((GITHUB_RUN_NUMBER + 200))" >> "$GITHUB_ENV"
+
+      - name: Cache SwiftPM checkouts (MetalSplatter etc.)
+        uses: actions/cache@v4
+        with:
+          path: build/SourcePackages
+          key: spm-${{ runner.os }}-${{ hashFiles('project.yml', 'SnailSightCore/Package.swift') }}
+          restore-keys: spm-${{ runner.os }}-
+
+      - name: XcodeGen
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+          HOMEBREW_NO_INSTALL_CLEANUP: "1"
+          HOMEBREW_NO_INSTALL_UPGRADE: "1"
+        run: (command -v xcodegen >/dev/null || brew install xcodegen) && xcodegen generate
+
+      - name: Archive (signing disabled)
+        run: |
+          xcodebuild -project SnailSight.xcodeproj -scheme SnailSight -configuration Release \
+            -sdk iphoneos -clonedSourcePackagesDirPath "$PWD/build/SourcePackages" -archivePath "$PWD/build/SnailSight.xcarchive" archive \
+            MARKETING_VERSION="${APP_VERSION}.${BUILD_NO}" \
+            CURRENT_PROJECT_VERSION="${BUILD_NO}" \
+            SNAILSIGHT_SERVER_TAILNET="${SNAILSIGHT_SERVER_TAILNET}" \
+            SNAILSIGHT_SERVER_LAN="${SNAILSIGHT_SERVER_LAN}" \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" DEVELOPMENT_TEAM=""
+
+      - name: Package unsigned .ipa + inspect
+        run: |
+          mkdir -p Payload
+          cp -R build/SnailSight.xcarchive/Products/Applications/*.app Payload/
+          P=$(ls -d Payload/*.app)/Info.plist
+          for k in CFBundleIdentifier CFBundleDisplayName CFBundleShortVersionString CFBundleVersion MinimumOSVersion UIFileSharingEnabled SnailSightServerTailnet SnailSightServerLAN; do
+            echo "$k = $(/usr/libexec/PlistBuddy -c "Print :$k" "$P")"
+          done
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$P")" = "com.example.apple-samplecode.iLiDAR"
+          ls Payload/*.app | head -40
+          zip -qr iLiDAR.ipa Payload
+          ls -la iLiDAR.ipa
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: iLiDAR-ipa-arkitfork
+          path: iLiDAR.ipa
+          if-no-files-found: error
+          retention-days: 14

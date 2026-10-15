@@ -1,0 +1,29 @@
+===== https://raw.githubusercontent.com/series-ai/jam-ready-assets/bdce326b2d7eee85524c08c751faf4804d453f3d/kenney-food-kit/3D/food/License.txt
+===== sha256 32a081c2035dd4db47d850c83244da048165f0e53d71c076b76c1afc0590bc7f
+
+Food Kit (2.0)
+
+	Created/distributed by Kenney (www.kenney.nl)
+	Creation date: 26-06-2024 01:23
+	
+			------------------------------
+
+	License: (Creative Commons Zero, CC0)
+	http://creativecommons.org/publicdomain/zero/1.0/
+
+	You can use this content for personal, educational, and commercial purposes.
+
+	Support by crediting 'Kenney' or 'www.kenney.nl' (this is not a requirement)
+
+			------------------------------
+
+	• Website : www.kenney.nl
+	• Donate  : www.kenney.nl/donate
+
+	• Patreon : patreon.com/kenney
+	
+	Follow on social media for updates:
+
+	• Twitter:   twitter.com/KenneyNL
+	• Instagram: instagram.com/kenney_nl
+	• Mastodon:  mastodon.gamedev.place/@kenney

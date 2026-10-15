@@ -1,0 +1,13 @@
+===== https://raw.githubusercontent.com/VitexSoftware/ishtaria-client/33034c160e6d3f1cc39a3267a3594baad7722f8b/assets/quaternius/farm-animals/License.txt
+===== sha256 f29d66980b5988c8c3e9f09446163012557de35a9bf8052878510671e0a22ab3
+
+Farm animals: Chicken, Pig and Sheep
+
+Created by Quaternius (https://quaternius.com)
+Sources (GLB files, downloaded from the original pages; renamed to lower-case identifiers):
+  chicken - https://poly.pizza/m/ineV9pU5VL
+  pig     - https://poly.pizza/m/u35l6uP5vj
+  sheep   - https://poly.pizza/m/rgJXF570ZK
+
+License: Creative Commons Zero (CC0 1.0 Universal, public domain)
+https://creativecommons.org/publicdomain/zero/1.0/
