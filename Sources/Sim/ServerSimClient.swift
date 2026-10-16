@@ -4,6 +4,9 @@
 // connects WS /v1/maps/{map}/sim, and after 1 s of healthy snapshots takes over from the local S1 sim
 // (SimController.remoteAuthority: local bodies hidden + frozen, kept for later). It falls back to the local sim after
 // 3 s of silence, offline or unlocalized (SnailSightCore.SimAuthority).
+// 10.5: it takes over ONLY when the server world holds every local body (same ids: the server sim is seeded from the
+// map entities); missing ones are uploaded first (POST …/sim/import). An empty server world sends it back to local
+// (SimHandoff). The status line always names the mode: "Server sim · N bodies" / "Local sim (server: why)".
 // - Entities are drawn in the map frame under MapARLayer.simNode, dead-reckoned between snapshots (RemoteTrack).
 // - Tap a body to select it; the bar offers Drive (joystick: {v, w, ttl 0.5} at 10 Hz, zero on release), Go to (tap
 //   the floor), Go to… (an object label: the server resolves it, S3; if it can't, the phone picks the nearest match
@@ -61,6 +64,12 @@ final class ServerSimClient {
     private var attempt = 0
     private var lastStatus: TimeInterval = 0
     private var events = 0
+    // 10.5 hand-off: local bodies must be on the server before the local ones are hidden
+    private var uploading = false
+    private var nextUploadAt: TimeInterval = 0
+    private var uploadTries = 0
+    private var deletedHere: Set<String> = []            // despawned from this phone in server mode: not re-uploaded
+    private var lastBlocker: String?
     private let session: URLSession = {
         let c = URLSessionConfiguration.default
         c.timeoutIntervalForRequest = 15
@@ -98,17 +107,66 @@ final class ServerSimClient {
         } else if connected || connecting {
             close()
         }
+        let blocker = handoffBlocker(now: t)
         let changed = authority.update(enabled: enabled, online: model.serverBase != nil, localized: layer.isAligned,
-                                       connected: connected, lastMessageAt: lastMessageAt, now: t)
+                                       connected: connected, lastMessageAt: lastMessageAt, now: t, blocked: blocker)
         if changed { authorityChanged() }
+        if blocker != lastBlocker {
+            lastBlocker = blocker
+            if let b = blocker, enabled {
+                model.log.event("sim_handoff_blocked", ["why": .string(b), "server_bodies": .int(tracks.count),
+                                                        "mode": .string(authority.mode.rawValue)])
+            }
+        }
         layer.simNode.isEnabled = isActive
         if t - lastStatus >= 1 {
             lastStatus = t
             let s: String
             if !enabled { s = "" }
-            else if isActive { s = "Shared sim · \(tracks.count) bod\(tracks.count == 1 ? "y" : "ies")" }
-            else { s = "Shared sim: \(authority.reason) · local sim meanwhile" }
+            else if isActive { s = "Server sim · \(tracks.count) bod\(tracks.count == 1 ? "y" : "ies")" }
+            else { s = "Local sim (server: \(authority.reason))" }
             if ui.status != s { ui.status = s }
+        }
+    }
+
+    /// Ids of the local (S1) bodies: robot + animals (their SimEntityRecord ids = the map entity ids).
+    private var localIDs: Set<String> {
+        Set(model.controller.sim.snapshot().map(\.id)).subtracting(deletedHere)
+    }
+
+    /// nil = the server may be (stay) in charge. Before the switch it must hold every local body: the missing ones
+    /// are uploaded (import), retried every 5 s, at most 5 times (then the phone simply stays on its local sim).
+    private func handoffBlocker(now t: TimeInterval) -> String? {
+        guard enabled, connected, lastMessageAt != nil else { return nil }
+        let local = localIDs
+        let server = Set(tracks.keys)
+        let b = SimHandoff.blocker(local: local, server: server, serverMode: isActive, uploading: uploading)
+        if b != nil, !isActive, !uploading, t >= nextUploadAt, uploadTries < 5, layer.isAligned {
+            upload(local.subtracting(server))
+        }
+        return b
+    }
+
+    private func upload(_ ids: Set<String>) {
+        guard !ids.isEmpty, let link = model.link, let loc = model.mapLocalizer.localEntities(ids: ids),
+              !loc.list.isEmpty, loc.mapID == mapID,
+              let body = try? SimServerAPI.importBody(loc.list, agentID: model.agentID) else { return }
+        let map = loc.mapID, list = loc.list
+        uploading = true
+        uploadTries += 1
+        nextUploadAt = now + 5
+        let path = SimServerAPI.importPath(map: map)
+        Task { [weak self] in
+            let r = try? await link.request("POST", path, body: body, timeout: 15)
+            await MainActor.run {
+                guard let self else { return }
+                self.uploading = false
+                let o = r.map { JSON.object($0.0) } ?? [:]
+                self.model.log.event("sim_import", ["entities": .int(list.count), "status": .int(r?.1 ?? 0),
+                                                    "spawned": .int((o["spawned"] as? [Any])?.count ?? -1),
+                                                    "skipped": .int((o["skipped"] as? [Any])?.count ?? -1),
+                                                    "bodies": .int(JSON.int(o, "bodies") ?? -1)])
+            }
         }
     }
 
@@ -205,6 +263,7 @@ final class ServerSimClient {
     }
 
     private func close() {
+        uploadTries = 0
         gen += 1
         task?.cancel(with: .goingAway, reason: nil)
         task = nil
@@ -482,6 +541,7 @@ final class ServerSimClient {
         guard let s = ui.selection else { return }
         let link = model.link!, path = SimServerAPI.entityPath(map: mapID, id: s.id)
         ui.selection = nil
+        deletedHere.insert(s.id)
         Task { [weak self] in
             let r = try? await link.request("DELETE", path, timeout: 10)
             await MainActor.run { self?.model.log.event("sim_server_despawn", ["id": .string(s.id), "status": .int(r?.1 ?? 0)]) }

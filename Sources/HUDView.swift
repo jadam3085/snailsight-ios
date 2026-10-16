@@ -760,7 +760,8 @@ private struct SimArea: View {
                         if shared.active { model.serverSim.setStick(v) } else { model.controller.sim.setStick(v) }
                     }
                 }
-                let text = shared.active ? shared.status : (model.simStatus.isEmpty ? shared.status : model.simStatus)
+                let text = shared.active ? shared.status
+                    : [shared.status, model.simStatus].filter { !$0.isEmpty }.joined(separator: " · ")
                 if !text.isEmpty {
                     Text(text).font(.caption2.weight(.semibold)).monospacedDigit().lineLimit(1)
                         .padding(.horizontal, 8).padding(.vertical, 4)

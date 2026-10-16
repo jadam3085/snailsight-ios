@@ -84,6 +84,47 @@ final class SimServerTests: XCTestCase {
         XCTAssertEqual(a.reason, "off")
     }
 
+    func testAuthorityBlockedUntilServerHoldsLocalBodies() {
+        var a = SimAuthority()
+        let local: Set<String> = ["deer-1", "fox-2", "robot-3"]
+        // healthy stream, but the server world is empty: stay local (the owner's animals must not vanish)
+        var b = SimHandoff.blocker(local: local, server: [], serverMode: false, uploading: false)
+        XCTAssertEqual(b, "server world empty")
+        a.update(enabled: true, online: true, localized: true, connected: true, lastMessageAt: 0, now: 0, blocked: b)
+        XCTAssertFalse(a.update(enabled: true, online: true, localized: true, connected: true, lastMessageAt: 2, now: 2,
+                                blocked: b))
+        XCTAssertEqual(a.mode, .local); XCTAssertEqual(a.reason, "server world empty")
+        b = SimHandoff.blocker(local: local, server: ["deer-1"], serverMode: false, uploading: true)
+        XCTAssertEqual(b, "uploading 2 bodies")
+        // the upload landed: every local body is on the server -> switch after the usual 1 s
+        b = SimHandoff.blocker(local: local, server: local.union(["other-9"]), serverMode: false, uploading: false)
+        XCTAssertNil(b)
+        a.update(enabled: true, online: true, localized: true, connected: true, lastMessageAt: 3, now: 3, blocked: b)
+        XCTAssertTrue(a.update(enabled: true, online: true, localized: true, connected: true, lastMessageAt: 4, now: 4.1,
+                               blocked: b))
+        XCTAssertEqual(a.mode, .server)
+        // in charge: a partial world keeps it (deletes on the server are real), an empty one falls back
+        XCTAssertNil(SimHandoff.blocker(local: local, server: ["deer-1"], serverMode: true, uploading: false))
+        b = SimHandoff.blocker(local: local, server: [], serverMode: true, uploading: false)
+        XCTAssertTrue(a.update(enabled: true, online: true, localized: true, connected: true, lastMessageAt: 5, now: 5,
+                               blocked: b))
+        XCTAssertEqual(a.mode, .local)
+        XCTAssertNil(SimHandoff.blocker(local: [], server: [], serverMode: false, uploading: false))
+    }
+
+    func testImportBodyCarriesMapEntities() throws {
+        let rec = SimEntityRecord(id: "A-1", kind: "deer", behaviour: "roam", heading: 0, anchor: [0, 0, 0])
+        let e = MapEntity(id: "A-1", kind: "deer", pose: MapPose(x: 1, y: 2, z: -1.3, yaw: 0.5), mapVersion: 12,
+                          record: rec, agentID: "phone-aaaa")
+        let o = try JSONSerialization.jsonObject(with: SimServerAPI.importBody([e], agentID: "phone-aaaa")) as! [String: Any]
+        XCTAssertEqual(o["agent_id"] as? String, "phone-aaaa")
+        let first = (o["entities"] as! [[String: Any]])[0]
+        XCTAssertEqual(first["id"] as? String, "A-1")
+        XCTAssertEqual(first["map_version"] as? Int, 12)
+        XCTAssertEqual((first["pose"] as! [String: Any])["y"] as? Double, 2)
+        XCTAssertEqual(SimServerAPI.importPath(map: "site"), "/v1/maps/site/sim/import")
+    }
+
     func testTeleopDeadmanCadence() {
         var t = TeleopSender()
         XCTAssertNil(t.next(v: 0, w: 0, now: 0))

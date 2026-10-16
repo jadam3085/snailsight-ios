@@ -464,6 +464,19 @@ final class MapLocalizer {
         return out
     }
 
+    /// 10.5: the local bodies with these ids as map entities (this session's map frame), for the shared sim's import
+    /// before it takes over. nil = not locked (no map frame).
+    func localEntities(ids: Set<String>) -> (mapID: String, list: [MapEntity])? {
+        guard let al = alignment else { return nil }
+        let bodies = currentBodies()
+        let list = model.controller.sim.snapshot().filter { ids.contains($0.id) }.map { r -> MapEntity in
+            let b = bodies[r.id] ?? (position: r.anchor, yaw: 0.0)
+            return MapEntity.from(r, pose: al.mapPose(arkit: b.position, groundYaw: b.yaw), mapVersion: al.version,
+                                  agentID: model.agentID, placeID: model.placeCtl.activeID)
+        }
+        return (al.mapID, list)
+    }
+
     /// Sim changed (spawn / move / delete / new order): write the map copy a few seconds later.
     func entitiesChanged() {
         guard alignment != nil, restoredFromMap else { return }

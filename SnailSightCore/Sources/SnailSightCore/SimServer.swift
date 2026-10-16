@@ -221,14 +221,17 @@ public struct SimAuthority: Equatable {
     public init() {}
 
     /// `lastMessageAt`: local time of the newest sim stream message (nil = none since connect).
+    /// `blocked`: why the server may not (or may no longer) be authoritative although the stream is healthy — e.g. its
+    /// world lacks this phone's bodies (SimHandoff.blocker): the phone stays / falls back to its local sim.
     @discardableResult
     public mutating func update(enabled: Bool, online: Bool, localized: Bool, connected: Bool, lastMessageAt: Double?,
-                                now: Double) -> Bool {
+                                now: Double, blocked: String? = nil) -> Bool {
         let old = mode
         let alive = connected && (lastMessageAt.map { now - $0 <= Self.silentOutS } ?? false)
         var why: String?
         if !enabled { why = "off" } else if !online { why = "offline" } else if !localized { why = "not localized" }
         else if !alive { why = connected ? "stream silent" : "not connected" }
+        else if let b = blocked { why = b }
         if let w = why {
             mode = .local; reason = w; healthySince = nil
         } else {
@@ -237,6 +240,21 @@ public struct SimAuthority: Equatable {
             reason = mode == .server ? "server" : "connecting"
         }
         return mode != old
+    }
+}
+
+/// 10.5: handing the sim to the server never makes the owner's bodies vanish. Before the switch the server world must
+/// hold every local body (by id; the phone uploads the missing ones first: POST …/sim/import); once the server is in
+/// charge, an EMPTY server world (while the phone has bodies) sends it back to the local sim. nil = may be / stay
+/// server-authoritative.
+public enum SimHandoff {
+    public static func blocker(local: Set<String>, server: Set<String>, serverMode: Bool, uploading: Bool) -> String? {
+        if local.isEmpty { return nil }                       // nothing of ours to lose
+        if serverMode { return server.isEmpty ? "server world empty" : nil }
+        let missing = local.subtracting(server).count
+        if missing == 0 { return nil }
+        if uploading { return "uploading \(missing) bod\(missing == 1 ? "y" : "ies")" }
+        return server.isEmpty ? "server world empty" : "server lacks \(missing) of \(local.count) bodies"
     }
 }
 
@@ -271,6 +289,14 @@ public enum SimServerAPI {
     public static func entityPath(map: String, id: String) -> String { "/v1/maps/\(map)/sim/entities/\(id)" }
     public static func cmdPath(map: String, id: String) -> String { "/v1/maps/\(map)/sim/entities/\(id)/cmd" }
     public static func taskPath(map: String, id: String) -> String { "/v1/maps/\(map)/sim/entities/\(id)/task" }
+    public static func importPath(map: String) -> String { "/v1/maps/\(map)/sim/import" }
+
+    /// POST …/sim/import: this phone's local bodies (map frame) that the server world lacks; the server writes them to
+    /// the map entities (the one store) and spawns them with the same ids.
+    public static func importBody(_ list: [MapEntity], agentID: String) throws -> Data {
+        struct B: Encodable { let agent_id: String; let entities: [MapEntity] }
+        return try JSONEncoder().encode(B(agent_id: agentID, entities: list))
+    }
 
     /// S3 tasks on a sim rover (POST …/task): drone_assist (the target demo: a drone flies ahead to `goal`), deter
     /// (herd deer away), goto_label, patrol.
