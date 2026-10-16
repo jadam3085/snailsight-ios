@@ -112,6 +112,14 @@ private struct StatusPill: View {
                     Image(systemName: "tortoise.fill").font(.caption2).foregroundStyle(.yellow)
                         .accessibilityLabel("Moving fast for sharp photos")
                 }
+                if model.serverBase == nil && CopState.isCopLabel(model.serverLabel) {
+                    // 10.9: "COP off" / "COP waking…" (the owner's power gate), with captures waiting to upload
+                    Text(CopState.pill(model.serverLabel, pending: model.pendingUploads))
+                        .font(.caption2.weight(.semibold)).lineLimit(1)
+                        .padding(.horizontal, 5).padding(.vertical, 1)
+                        .background(Color.blue.opacity(0.25), in: Capsule())
+                        .foregroundStyle(.blue)
+                }
                 Circle().fill(model.serverBase == nil ? Color.orange : Color.green).frame(width: 6, height: 6)
                 Image(systemName: model.statusExpanded ? "chevron.up" : "chevron.down")
                     .font(.system(size: 9, weight: .bold)).foregroundStyle(.secondary)

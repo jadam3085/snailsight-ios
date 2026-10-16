@@ -261,7 +261,12 @@ final class AppModel: ObservableObject {
         }
         if it.parts.isEmpty { return "Preparing upload…" }
         let packed = it.parts.filter { $0.packaged || $0.done }.count
-        if serverBase == nil && it.sentBytes == 0 { return "Waiting for the map server (offline) · \(packed)/\(it.parts.count) parts ready" }
+        if serverBase == nil && it.sentBytes == 0 {
+            if CopState.isCopLabel(serverLabel) {       // 10.9: the owner switched the COP off; this upload waits
+                return "Queued: \(serverLabel) · uploads when it is back · \(packed)/\(it.parts.count) parts ready"
+            }
+            return "Waiting for the map server (offline) · \(packed)/\(it.parts.count) parts ready"
+        }
         return UploadText.progressLine(sent: it.sentBytes, total: it.bytesTotal, bytesPerSecond: uploadRate)
     }
 
@@ -275,7 +280,7 @@ final class AppModel: ObservableObject {
 
     /// HUD text: "srv tailnet ✓" / "srv offline · 2 queued" / "srv lan ✓ · ↑ 40 %".
     var serverText: String {
-        var s = serverBase == nil ? "srv offline" : "srv \(serverLabel) ✓"
+        var s = serverBase == nil ? (CopState.isCopLabel(serverLabel) ? serverLabel : "srv offline") : "srv \(serverLabel) ✓"
         if let up = uploads.first(where: { !$0.serverHasAll }), serverBase != nil, up.bytesTotal > 0 {
             s += String(format: " · ↑ %.0f %%", up.progress * 100)
         }

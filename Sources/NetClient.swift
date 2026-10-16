@@ -75,6 +75,10 @@ actor ServerLink {
     private var onOnline: [() -> Void] = []
     private(set) var base: String?
     private(set) var label = "offline"
+    /// 10.9: the COP power gate's last answer while the server stack is OFF / waking (nil when the server answers).
+    private(set) var cop: CopState?
+    private var wakeClass = "phone-live"
+    private var rewakeScheduled = false
     private var probing = false
     private var lastProbe: Date = .distantPast
     private let monitor = NWPathMonitor()
@@ -90,6 +94,30 @@ actor ServerLink {
     }
 
     func whenOnline(_ f: @escaping () -> Void) { onOnline.append(f) }
+
+    /// Why this phone knocks while the COP is off: `phone-capture` (captures waiting) may wake it, `phone-live` only asks.
+    func setWakeClass(_ c: String) { wakeClass = c }
+
+    /// A power-gate answer: show "COP off" / "COP waking…", stay offline (queues keep their work), re-probe after
+    /// `retry_s` when it is waking.
+    private func copAnswer(_ c: CopState) {
+        cop = c
+        base = nil
+        label = c.label
+        report(nil, label)
+        guard c.kind == .waking, !rewakeScheduled else { return }
+        rewakeScheduled = true
+        let delay = c.retryS
+        Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            await self?.rewake()
+        }
+    }
+
+    private func rewake() async {
+        rewakeScheduled = false
+        _ = await probe(force: true)
+    }
 
     func startMonitoring() {
         monitor.pathUpdateHandler = { [weak self] path in
@@ -123,7 +151,16 @@ actor ServerLink {
             guard let url = URL(string: c.base + "/" + ServerConfig.apiVersion) else { continue }
             var r = URLRequest(url: url)
             r.timeoutInterval = 4
-            if let (_, resp) = try? await session.data(for: r), (resp as? HTTPURLResponse)?.statusCode == 200 {
+            r.setValue(wakeClass, forHTTPHeaderField: CopWake.header)
+            r.setValue(Identity.agentID, forHTTPHeaderField: CopWake.agentHeader)
+            guard let (data, resp) = try? await session.data(for: r) else { continue }
+            let status = (resp as? HTTPURLResponse)?.statusCode ?? 0
+            if let gate = CopState.parse(status: status, body: data) {
+                copAnswer(gate)
+                return nil
+            }
+            if status == 200 {
+                cop = nil
                 base = c.base
                 label = c.label
                 d.set(c.base, forKey: NetKeys.lastGood)
@@ -168,7 +205,14 @@ actor ServerLink {
             } else {
                 (data, resp) = try await session.data(for: r)
             }
-            return (data, (resp as? HTTPURLResponse)?.statusCode ?? 0)
+            let status = (resp as? HTTPURLResponse)?.statusCode ?? 0
+            // 10.9: the server stack was switched off under us (the power gate answers on its address): go offline
+            // so every caller treats it like "no server" and keeps its work queued.
+            if let gate = CopState.parse(status: status, body: data) {
+                copAnswer(gate)
+                throw NetError.offline
+            }
+            return (data, status)
         } catch {
             if (error as? URLError) != nil { setOffline() }
             throw error

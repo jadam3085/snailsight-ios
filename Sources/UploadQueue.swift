@@ -211,6 +211,7 @@ actor UploadQueue {
         running = true
         defer { running = false }
         if !started { await start() }
+        await link.setWakeClass(CopWake.wakeClass(pendingUploads: items.filter { !$0.serverHasAll }.count))   // 10.9
         let now = Date().timeIntervalSince1970
         for it in items where !it.serverHasAll && it.mode == "parts" && it.nextAttempt <= now {
             do {
