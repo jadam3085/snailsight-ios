@@ -206,7 +206,7 @@ final class PlaceAssistTests: XCTestCase {
         let s = LocPill.make(LocPillInput(online: true, phase: .locked, version: 10, method: "visual+mesh",
                                           source: "server", errCm: 4.3, trackingCode: "normal"))
         XCTAssertEqual(s.tone, .good)
-        XCTAssertEqual(s.text, "LOCALIZED · whole house v10 · mesh · ±5 cm")
+        XCTAssertEqual(s.text, "LOCALIZED · whole house v10 · geometry+visual · ±5 cm")
         XCTAssertFalse(s.rows.contains { $0.lowercased().contains("relocaliz") })
     }
 

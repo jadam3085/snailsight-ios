@@ -427,7 +427,7 @@ private struct MoreMenu: View {
 
 // MARK: - 10.2 localization pill, its card, the mapping line
 
-/// "LOCALIZED · whole house v10 · mesh · ±2 cm" (green) / "FINDING YOU… 12 s" (amber) / "OFFLINE" · "NOT IN MAP"
+/// "LOCALIZED · whole house v10 · geometry+visual · ±2 cm" (green) / "FINDING YOU… 12 s" (amber) / "OFFLINE" · "NOT IN MAP"
 /// (grey). Tap for the detail card. Never blocks: it only reads MapLocalizer's published state.
 private struct LocalizationPill: View {
     @EnvironmentObject var model: AppModel
