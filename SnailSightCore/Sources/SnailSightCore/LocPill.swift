@@ -33,15 +33,17 @@ public struct LocPillInput: Equatable {
     public var notInMap: Bool           // LocPill.notInMap, or the server said 404 (other map)
     public var savedPlace: SavedPlaceNote?   // 10.3: a saved ARWorldMap tried / matched / active (secondary info)
     public var hint: String?            // 10.4: the server's search hint ("Turn to see a corner of the room")
+    public var retry: String?           // 10.6.x: "retrying (server slow)" after an error / timeout (LocRetry.note)
+    public var paused: String?          // 10.6.x: why no attempt can run now ("Scans open", "AR paused", …)
 
     public init(online: Bool, phase: LocPhase, mapID: String = "site", version: Int? = nil, method: String? = nil,
                 source: String = "", errCm: Double? = nil, searchSeconds: Double = 0, attempts: Int = 0,
                 matches: Int = 0, lastFixAge: Double? = nil, trackingCode: String = "normal", notInMap: Bool = false,
-                savedPlace: SavedPlaceNote? = nil, hint: String? = nil) {
+                savedPlace: SavedPlaceNote? = nil, hint: String? = nil, retry: String? = nil, paused: String? = nil) {
         self.online = online; self.phase = phase; self.mapID = mapID; self.version = version; self.method = method
         self.source = source; self.errCm = errCm; self.searchSeconds = searchSeconds; self.attempts = attempts
         self.matches = matches; self.lastFixAge = lastFixAge; self.trackingCode = trackingCode; self.notInMap = notInMap
-        self.savedPlace = savedPlace; self.hint = hint
+        self.savedPlace = savedPlace; self.hint = hint; self.retry = retry; self.paused = paused
     }
 
     public var trackingOK: Bool { trackingCode == "normal" }
@@ -157,8 +159,15 @@ public enum LocPill {
             var rows = [MapLocText.searching(mapID: i.mapID, seconds: i.searchSeconds, attempts: i.attempts,
                                              matches: i.matches)]
             if let h = i.hint, !h.isEmpty { rows.append("Tip: " + h) }
-            return LocPillState(tone: .working, text: String(format: "FINDING YOU… %.0f s", max(0, i.searchSeconds)),
-                                rows: rows + placeRow)
+            var text = String(format: "FINDING YOU… %.0f s", max(0, i.searchSeconds))
+            if let p = i.paused {                       // 10.6.x: never a stale "finding" while nothing can run
+                text = "FINDING YOU · paused (\(p))"
+                rows.insert("Localization resumes by itself when this ends", at: 0)
+            } else if let r = i.retry {
+                text += " · " + r
+                rows.insert("The map server did not answer: retrying with backoff (2, 4, 8, 10 s)", at: 0)
+            }
+            return LocPillState(tone: .working, text: text, rows: rows + placeRow)
         case .off:
             return LocPillState(tone: .idle, text: i.online ? "NOT LOCALIZED" : "OFFLINE",
                                 rows: ["Localization starts when the AR view runs"])
@@ -207,4 +216,77 @@ public enum LocCadence {
         if every <= refining * recordingFactor { return true }
         return sinceLastAttempt >= every - depthLeadS
     }
+}
+
+
+/// 10.6.x (owner 2026-10-16: one timeout and the app never placed him): the master-map localize loop never stops
+/// while unplaced. After any error / timeout the next attempt waits 2, 4, 8, then 10 s (cap); foreground, a network
+/// change, a new map version and an AR resume restart it at once. The first request gets 30 s (a cold server warms
+/// a freshly built map version), later ones 15 s. Only a lock ends the search (the tracking cadence takes over).
+public struct LocRetry: Equatable {
+    public private(set) var failures = 0
+    public private(set) var requests = 0
+    public private(set) var nextAt = 0.0
+    public private(set) var lastWhy: String?
+    public static let firstTimeout = 30.0
+    public static let timeout = 15.0
+    public static let cap = 10.0
+    public init() {}
+
+    /// Timeout for the next request.
+    public var requestTimeout: Double { requests == 0 ? Self.firstTimeout : Self.timeout }
+
+    /// Backoff after `n` consecutive failures: 2, 4, 8, 10, 10 … s.
+    public static func delay(failures n: Int) -> Double {
+        n <= 0 ? 0 : min(cap, 2 * pow(2, Double(min(n, 8) - 1)))
+    }
+
+    /// Why it failed, for the pill / log: "server slow" (timeout), "server warming" (503/504), "offline", …
+    public static func why(status: Int, error: String?) -> String {
+        if status == 503 || status == 504 { return "server warming" }
+        if status == 404 { return "map not found" }
+        if status == 0 {
+            let e = (error ?? "").lowercased()
+            if e.contains("timed out") || e.contains("timeout") { return "server slow" }
+            if e.contains("offline") || e.contains("not connected") || e.contains("network") || e.contains("connection") {
+                return "offline"
+            }
+            return "no answer"
+        }
+        return "server error \(status)"
+    }
+
+    public mutating func sent() { requests += 1 }
+
+    /// A failed request: when the next one may go, and why.
+    @discardableResult
+    public mutating func failed(status: Int, error: String?, now: Double) -> (delay: Double, why: String) {
+        failures += 1
+        let w = Self.why(status: status, error: error)
+        lastWhy = w
+        let d = Self.delay(failures: failures)
+        nextAt = now + d
+        return (d, w)
+    }
+
+    public mutating func succeeded() {
+        failures = 0
+        lastWhy = nil
+        nextAt = 0
+    }
+
+    /// Foreground / network back / new map version / AR resumed: try again now (the backoff starts over).
+    /// true = it was waiting (so the resume changed something).
+    @discardableResult
+    public mutating func resume(now: Double) -> Bool {
+        let waiting = nextAt > now || failures > 0
+        failures = 0
+        nextAt = now
+        return waiting
+    }
+
+    public func due(now: Double) -> Bool { now >= nextAt }
+
+    /// The pill's suffix while it is retrying.
+    public var note: String? { lastWhy.map { "retrying (\($0))" } }
 }

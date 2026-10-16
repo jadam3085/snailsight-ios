@@ -321,7 +321,18 @@ final class AppModel: ObservableObject {
             guard let self else { return }
             self.log.event("foreground")
             let q = self.queue!
-            Task { await self.link.probe(force: true); await q.kick(reason: "foreground") }
+            // 10.6.x: every server loop resumes at once (owner: one timeout + background and it never placed him)
+            self.mapLocalizer.resume(why: "foreground")
+            self.liveMap.resume(why: "foreground")
+            self.serverSim.resume(why: "foreground")
+            self.placeCtl.publish()
+            Task {
+                await self.link.probe(force: true)
+                await MainActor.run {                       // the server answered again (or still not): resume again
+                    if self.serverBase != nil { self.mapLocalizer.resume(why: "network") }
+                }
+                await q.kick(reason: "foreground")
+            }
         })
     }
 
@@ -349,6 +360,7 @@ final class AppModel: ObservableObject {
 
     private func backgroundFlush() {
         log.event("background")
+        mapLocalizer.enteredBackground()
         // ARKit stops in the background and iOS may end a suspended app: finish the capture cleanly now
         if recorder.isRecording { stopRecording(reason: "background") }
         meshMapper.appBackground()                      // 10.2: ARKit stops; the mapping upload finishes
@@ -501,6 +513,8 @@ final class AppModel: ObservableObject {
 
     func scansClosed() {
         controller.resumeAfterScans()
+        mapLocalizer.resume(why: "scans_closed")
+        liveMap.resume(why: "scans_closed")
     }
 
     /// 9.9: "Deleted … [Undo]" for 5 s (the deletion itself is kept in ARSessionController's UndoBuffer).

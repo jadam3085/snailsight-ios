@@ -558,7 +558,10 @@ final class ARSessionController: NSObject, ARSessionDelegate {
     }
 
     func sessionWasInterrupted(_ session: ARSession) { model.log.event("interrupted") }
-    func sessionInterruptionEnded(_ session: ARSession) { model.log.event("interruption_ended") }
+    func sessionInterruptionEnded(_ session: ARSession) {
+        model.log.event("interruption_ended")
+        model.mapLocalizer.resume(why: "ar_resumed")             // 10.6.x
+    }
     func sessionShouldAttemptRelocalization(_ session: ARSession) -> Bool { true }
 
     func session(_ session: ARSession, didFailWithError error: Error) {

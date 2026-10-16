@@ -72,6 +72,14 @@ final class LiveMapClient {
     }()
 
     /// Twice a second from the AR controller's HUD tick (main).
+    /// 10.6.x: foreground / Scans closed / network back: reconnect now (no leftover backoff).
+    func resume(why: String) {
+        guard reconnectAt > now || attempt > 0 else { return }
+        reconnectAt = 0
+        attempt = 0
+        model.log.event("live_down_resume", ["why": .string(why)])
+    }
+
     func tick() {
         let t = now
         layer.agentNode.isEnabled = model.arAgents

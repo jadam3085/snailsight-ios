@@ -115,6 +115,14 @@ final class ServerSimClient {
 
     // MARK: ticks
 
+    /// 10.6.x: foreground / network back: reconnect now (no leftover backoff, no 30 s slow retry).
+    func resume(why: String) {
+        guard reconnectAt > now || attempt > 0 else { return }
+        reconnectAt = 0
+        attempt = 0
+        model.log.event("sim_server_resume", ["why": .string(why)])
+    }
+
     /// HUD tick (2 Hz): connection + authority.
     func tick() {
         let t = now

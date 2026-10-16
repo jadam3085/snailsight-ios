@@ -42,6 +42,12 @@ final class MapLocalizer {
     private var streamStart = Date().timeIntervalSince1970
     private var lastAttempt = 0.0
     private var inFlight = false
+    private var inFlightSince = 0.0
+    private var retryState = LocRetry()                 // 10.6.x: backoff after errors; never stops while unplaced
+    private var lastFrameAt = 0.0                       // AR frames arriving? (no frames = AR paused)
+    private var wasOnline = false
+    private var seenVersion: Int?
+    private(set) var inBackground = false
     private var attempts = 0
     private var matches = 0
     private var hint: String?               // 10.4: the server's search hint (geometry search, API §5.6c)
@@ -135,8 +141,14 @@ final class MapLocalizer {
             }
         }
         lastCam = f.camera.transform
+        lastFrameAt = now
+        if inFlight, now - inFlightSince > retryState.requestTimeout + 10 {   // a request that never came back
+            inFlight = false
+            model.log.event("maploc_stuck_cleared", ["s": .double(now - inFlightSince)])
+        }
         guard model.serverBase != nil, !inFlight, !model.showScans else { return }
         let t = now
+        guard forceAttempt || retryState.due(now: t) else { return }      // backoff after an error / timeout
         let hot = model.thermal == "SERIOUS" || model.thermal == "CRITICAL"
         let serverLocked = alignment != nil && source == "server"
         let since = t - lastAttempt
@@ -157,7 +169,10 @@ final class MapLocalizer {
         lastAttempt = t
         forceAttempt = false
         inFlight = true
+        inFlightSince = t
         attempts += 1
+        let timeout = retryState.requestTimeout
+        retryState.sent()
         let K = f.camera.intrinsics
         let res = f.camera.imageResolution
         let T = f.camera.transform
@@ -181,7 +196,7 @@ final class MapLocalizer {
             if let cp { fr["conf_png"] = cp.base64EncodedString() }
             let body: [String: Any] = ["agent_id": self.model.agentID, "stream_id": stream, "map_id": self.mapID,
                                        "frames": [fr]]
-            self.send(body, link: link, stream: stream,
+            self.send(body, link: link, stream: stream, timeout: timeout,
                       cameraPos: [Double(T.columns.3.x), Double(T.columns.3.y), Double(T.columns.3.z)])
         }
     }
@@ -195,7 +210,7 @@ final class MapLocalizer {
         return ci.jpegRepresentation(of: scaled, colorSpace: space, options: [key: 0.8])
     }
 
-    private func send(_ body: [String: Any], link: ServerLink, stream: String, cameraPos: [Double]) {
+    private func send(_ body: [String: Any], link: ServerLink, stream: String, timeout: Double, cameraPos: [Double]) {
         let t0 = CACurrentMediaTime()
         Task { [weak self] in
             var answer: LocalizeAnswer?
@@ -203,7 +218,7 @@ final class MapLocalizer {
             var err: String?
             do {
                 let data = try JSONSerialization.data(withJSONObject: body)
-                let (d, s) = try await link.request("POST", "/v1/localize", body: data, timeout: 15)
+                let (d, s) = try await link.request("POST", "/v1/localize", body: data, timeout: timeout)
                 status = s
                 if s == 200 { answer = try JSONDecoder().decode(LocalizeAnswer.self, from: d) }
                 else { err = JSON.string(JSON.object(d), "detail") ?? "HTTP \(s)" }
@@ -215,12 +230,18 @@ final class MapLocalizer {
                 guard let self else { return }
                 self.inFlight = false
                 guard stream == self.streamID else { return }            // the world frame changed meanwhile
-                if let a = answer { self.notFound = false; self.handle(a, roundTripMs: ms, cameraPos: cameraPos) }
-                else {
+                if let a = answer {
+                    self.notFound = false
+                    self.retryState.succeeded()
+                    self.handle(a, roundTripMs: ms, cameraPos: cameraPos)
+                } else {
                     if status == 404 { self.notFound = true; self.lastAttempt = self.now + 20 }   // no such map: slow down
                     self.model.log.event("maploc_error", ["status": .int(status), "error": .string(err ?? "?"),
-                                                          "ms": .int(Int(ms))])
-                    if status == 503 { self.lastAttempt = self.now + 4 }   // server loading a map version: back off
+                                                          "ms": .int(Int(ms)), "timeout_s": .double(timeout)])
+                    // 10.6.x: never stop — retry after 2, 4, 8, 10 s (a timeout / 503 / 504 = the server warming up)
+                    let (d, why) = self.retryState.failed(status: status, error: err, now: self.now)
+                    self.model.log.event("maploc_retry", ["n": .int(self.retryState.failures), "delay_s": .double(d),
+                                                          "why": .string(why), "locked": .bool(self.alignment != nil)])
                 }
                 self.publish()
             }
@@ -581,9 +602,35 @@ final class MapLocalizer {
         applyLock(reason: r)
     }
 
-    /// Twice a second (HUD tick): keeps the pill's elapsed seconds / fix age current.
+    /// 10.6.x: start again NOW (foreground, network back, new map version, AR resumed, Scans closed). The search never
+    /// stops while unplaced; this only cuts a backoff wait short.
+    func resume(why: String) {
+        if why == "foreground" { inBackground = false }
+        let waiting = retryState.resume(now: now)
+        if alignment == nil { forceAttempt = true }
+        if inFlight, now - inFlightSince > 5 { inFlight = false }     // a request cut by the background never answers
+        model.log.event("maploc_resume", ["why": .string(why), "locked": .bool(alignment != nil),
+                                          "was_waiting": .bool(waiting), "attempts": .int(attempts)])
+        publish()
+    }
+
+    func enteredBackground() { inBackground = true; publishPill() }
+
+    /// Why no attempt can run right now (the pill says so instead of a stale "finding").
+    private var pausedReason: String? {
+        if inBackground { return "app in background" }
+        if model.showScans { return "Scans open: close it to be placed" }
+        if lastFrameAt > 0, now - lastFrameAt > 3 { return "AR paused" }
+        return nil
+    }
+
+    /// Twice a second (HUD tick): keeps the pill's elapsed seconds / fix age current; network / map-version resumes.
     func tick() {
-        guard model.serverBase != nil || alignment != nil else { publishPill(); return }
+        let online = model.serverBase != nil
+        if online && !wasOnline && attempts > 0 { resume(why: "network") }
+        wasOnline = online
+        if let v = model.liveBaseVersion, seenVersion != nil, v != seenVersion { resume(why: "map_version") }
+        if let v = model.liveBaseVersion { seenVersion = v }
         publishPill()
     }
 
@@ -594,7 +641,8 @@ final class MapLocalizer {
             mapID: alignment?.mapID ?? mapID, version: alignment?.version, method: alignment?.method, source: source,
             errCm: errorEstimate, searchSeconds: searchSeconds, attempts: attempts, matches: matches,
             lastFixAge: lastFixAt.map { now - $0 }, trackingCode: model.tracking.code,
-            notInMap: isNotInMap, savedPlace: model.placeCtl.note, hint: hint)
+            notInMap: isNotInMap, savedPlace: model.placeCtl.note, hint: hint,
+            retry: alignment == nil ? retryState.note : nil, paused: alignment == nil ? pausedReason : nil)
         let p = LocPill.make(input)
         if model.locPill != p { model.locPill = p }
     }
