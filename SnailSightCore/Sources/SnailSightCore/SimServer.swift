@@ -142,6 +142,7 @@ public enum SimStreamMessage: Equatable {
     case entity(SimEntitySnap)                  // a static description changed (name, dims, …)
     case event(kind: String, text: String?, entityID: String?)
     case lease(entityID: String, owner: String?, granted: Bool?)
+    case ack(ref: String, ok: Bool, status: Int?, detail: String?)   // the server's answer to a WS command with a ref
     case error(String)
     case other(String)
 
@@ -159,7 +160,19 @@ public enum SimStreamMessage: Equatable {
         var entity_id: String?
         var owner: String?
         var granted: Bool?
-        var detail: String?
+        var detail: LenientText?
+        var ref: String?
+        var ok: Bool?
+        var status: Int?
+    }
+
+    /// A field that is text in some replies and an object in others (409 detail): never fails the message.
+    struct LenientText: Decodable {
+        var text: String?
+        init(from d: Decoder) throws {
+            if let c = try? d.singleValueContainer(), let s = try? c.decode(String.self) { text = s; return }
+            text = "detail"
+        }
     }
 
     public static func parse(_ data: Data) -> SimStreamMessage? {
@@ -170,7 +183,8 @@ public enum SimStreamMessage: Equatable {
         case "entity": return r.entity.map { .entity($0) } ?? .other("entity")
         case "event": return .event(kind: r.event ?? r.kind ?? "event", text: r.text ?? r.message, entityID: r.entity_id ?? r.id)
         case "lease": return .lease(entityID: r.entity_id ?? r.id ?? "", owner: r.owner, granted: r.granted)
-        case "error": return .error(r.detail ?? r.message ?? "?")
+        case "ack": return .ack(ref: r.ref ?? "", ok: r.ok ?? false, status: r.status, detail: r.detail?.text)
+        case "error": return .error(r.detail?.text ?? r.message ?? "?")
         case let t: return .other(t)
         }
     }
@@ -342,34 +356,84 @@ public enum SimServerAPI {
         case place(x: Double, y: Double, z: Double?)         // move (drag / Move): the server puts it there
         case kick(fromX: Double, fromY: Double)              // animals: bolt away from this map point
         case behaviour(String)                               // an order without params (roam, graze, hold, wander)
+        case flee(fromX: Double, fromY: Double, seconds: Double)   // Flee: run from the person
+        case followAgent(String)                             // Follow me: follow this client's published pose
+
+        /// Short name for logs (sim_cmd).
+        public var name: String {
+            switch self {
+            case .teleop: return "teleop"
+            case .goal: return "goto"
+            case .goTo, .goToLabel: return "goto_label"
+            case .patrol: return "patrol"
+            case .stop: return "stop"
+            case .place: return "place"
+            case .kick: return "kick"
+            case .behaviour(let b): return b
+            case .flee: return "flee"
+            case .followAgent: return "follow"
+            }
+        }
     }
 
     static func json(_ o: [String: Any]) -> Data { (try? JSONSerialization.data(withJSONObject: o, options: [.sortedKeys])) ?? Data() }
 
-    public static func body(_ c: Command, agentID: String) -> Data {
+    public static func body(_ c: Command, agentID: String) -> Data { json(fields(c, agentID: agentID)) }
+
+    /// WS command (protocol snailsight-sim/2): {type: cmd, id, ref, agent_id, …the REST body…}; the server acks the ref.
+    public static func wsCommand(_ c: Command, id: String, agentID: String, ref: String?) -> Data {
+        var o = fields(c, agentID: agentID)
+        o["type"] = "cmd"; o["id"] = id; o["agent_id"] = agentID
+        if let ref { o["ref"] = ref }
+        return json(o)
+    }
+
+    public static func wsDelete(id: String, agentID: String, ref: String) -> Data {
+        json(["type": "delete", "id": id, "agent_id": agentID, "ref": ref])
+    }
+
+    public static func wsSpawn(kind: String, x: Double, y: Double, z: Double, theta: Double, scale: Double?,
+                               agentID: String, ref: String) -> Data {
+        var o = (try? JSONSerialization.jsonObject(with: spawnBody(kind: kind, x: x, y: y, z: z, theta: theta,
+                                                                    agentID: agentID))) as? [String: Any] ?? [:]
+        if let scale { o["scale"] = min(2, max(0.1, scale)) }
+        o["type"] = "spawn"; o["agent_id"] = agentID; o["ref"] = ref
+        return json(o)
+    }
+
+    /// Follow me: this client's own map pose (~2 Hz while something follows it).
+    public static func wsAgentPose(agentID: String, x: Double, y: Double, z: Double) -> Data {
+        json(["type": "agent_pose", "agent_id": agentID, "pose": ["x": r(x), "y": r(y), "z": r(z)]])
+    }
+
+    static func fields(_ c: Command, agentID: String) -> [String: Any] {
         switch c {
         case .teleop(let v, let w, let ttl):
-            return json(["v": r(v), "w": r(w), "ttl": ttl, "owner": agentID])
+            return ["v": r(v), "w": r(w), "ttl": ttl, "owner": agentID]
         case .goal(let x, let y, let z):
-            return json(["goal": z.map { [r(x), r(y), r($0)] } ?? [r(x), r(y)], "owner": agentID])
+            return ["goal": z.map { [r(x), r(y), r($0)] } ?? [r(x), r(y)], "owner": agentID]
         case .goTo(let label, let oid, let x, let y):
             // the client's own pick (objects API) as a plain goal beside the object + the semantic target
             var t: [String: Any] = ["label": label]
             if let oid { t["object_id"] = oid }
-            return json(["goal": [r(x), r(y)], "target": t, "owner": agentID])
+            return ["goal": [r(x), r(y)], "target": t, "owner": agentID]
         case .goToLabel(let label):
             // S3 "go to the lamp": the server resolves the label (objects API) and plans
-            return json(["target": ["label": label], "owner": agentID])
+            return ["target": ["label": label], "owner": agentID]
         case .patrol(let pts):
-            return json(["patrol": pts.map { [r($0[0]), r($0[1])] }, "loop": true, "owner": agentID])
+            return ["patrol": pts.map { [r($0[0]), r($0[1])] }, "loop": true, "owner": agentID]
         case .stop:
-            return json(["v": 0, "w": 0, "ttl": TeleopSender.ttl, "stop": true, "owner": agentID])
+            return ["v": 0, "w": 0, "ttl": TeleopSender.ttl, "stop": true, "owner": agentID]
         case .place(let x, let y, let z):
-            return json(["place": z.map { [r(x), r(y), r($0)] } ?? [r(x), r(y)], "owner": agentID])
+            return ["place": z.map { [r(x), r(y), r($0)] } ?? [r(x), r(y)], "owner": agentID]
         case .kick(let x, let y):
-            return json(["kick": [r(x), r(y)], "owner": agentID])
+            return ["kick": [r(x), r(y)], "owner": agentID]
         case .behaviour(let b):
-            return json(["behaviour": b, "params": [String: Any](), "owner": agentID])
+            return ["behaviour": b, "params": [String: Any](), "owner": agentID]
+        case .flee(let x, let y, let sec):
+            return ["flee": [r(x), r(y)], "seconds": min(10, max(0.5, sec)), "owner": agentID]
+        case .followAgent(let a):
+            return ["follow": ["agent": a], "owner": agentID]
         }
     }
 
@@ -473,4 +537,85 @@ public enum SimServerVisual: Equatable {
 
     /// An older server without `scale`: 1.0 (what it simulated with).
     static func defaultScale(_ s: SimEntitySnap) -> Double { 1.0 }
+}
+
+
+// MARK: - 10.6: one selection / command path (local + server), acks, trash, spawn mode
+
+public extension SimCommand {
+    /// The commands the selection bar offers for a body. ONE list for the local and the server sim (10.6: the server
+    /// bar had none for animals). Owner list: Go to / Roam / Stay / Flee / Follow me / Delete.
+    static func offered(role: SimKind.Role, drone: Bool = false, server: Bool) -> [SimCommand] {
+        switch role {
+        case .animal:
+            return server ? [.goTo, .roam, .stay, .flee, .follow, .graze, .wander, .delete] : available(for: SimKind(key: "a", role: .animal))
+        case .robot:
+            if drone { return [.goTo, .patrol, .stop, .delete] }
+            return server ? [.goTo, .follow, .stop, .patrol, .delete] : available(for: .robot)
+        case .object:
+            return server ? [.delete] : available(for: .block)
+        }
+    }
+
+    /// The server command for a bar command that needs no floor point (nil = needs a point / handled elsewhere).
+    /// `phone`: this phone's map position (Flee runs away from it; Follow me follows this agent).
+    func serverCommand(agentID: String, phone: [Double]?) -> SimServerAPI.Command? {
+        switch self {
+        case .stop, .stay: return .stop
+        case .roam: return .behaviour("roam")
+        case .graze: return .behaviour("graze")
+        case .wander: return .behaviour("wander")
+        case .flee:
+            guard let p = phone, p.count >= 2 else { return nil }
+            return .flee(fromX: p[0], fromY: p[1], seconds: 4)
+        case .follow: return .followAgent(agentID)
+        default: return nil
+        }
+    }
+}
+
+public extension SimEntitySnap {
+    /// Role for the bar (robot / animal / object), drones as robots.
+    var role: SimKind.Role {
+        if isRover || isDrone { return .robot }
+        if isObject { return .object }
+        return .animal
+    }
+}
+
+/// Commands sent over the WebSocket wait for the server's ack (sim_cmd {cmd, id, ack} in the log).
+public struct SimAcks: Equatable {
+    public struct Pending: Equatable {
+        public var cmd: String, id: String, sentAt: Double
+    }
+    private var pending: [String: Pending] = [:]
+    private var seq = 0
+    public static let timeout = 3.0
+    public init() {}
+
+    public var count: Int { pending.count }
+
+    public mutating func register(cmd: String, id: String, now: Double) -> String {
+        seq += 1
+        let ref = "c\(seq)"
+        pending[ref] = Pending(cmd: cmd, id: id, sentAt: now)
+        return ref
+    }
+
+    public mutating func resolve(_ ref: String) -> Pending? { pending.removeValue(forKey: ref) }
+
+    /// Commands with no ack after `timeout` (removed).
+    public mutating func expired(now: Double) -> [(ref: String, Pending)] {
+        let old = pending.filter { now - $0.value.sentAt > Self.timeout }
+        for k in old.keys { pending[k] = nil }
+        return old.map { ($0.key, $0.value) }.sorted { $0.ref < $1.ref }
+    }
+}
+
+/// Drag a body onto the trash can (bottom centre) to delete it.
+public enum SimTrash {
+    public static let width = 150.0, height = 150.0
+    public static func hit(x: Double, y: Double, viewWidth: Double, viewHeight: Double) -> Bool {
+        abs(x - viewWidth / 2) <= width / 2 && y >= viewHeight - height
+    }
 }

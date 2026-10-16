@@ -85,6 +85,73 @@ final class SimModelLibrary {
     }
 }
 
+/// 10.6: THE model + clip player of every animal / object drawing — the local sim's SimAnimal and the shared server
+/// sim's ServerSimBody both use it, so the two paths cannot diverge again (10.5.213 drew server bodies as boxes).
+/// One cloned USDZ per clip under `body`; `show(_:)` enables one and plays its animation; `lockPhase` keeps the
+/// playing clip at the server's phase (ONE master world, API §5.9.10).
+final class SimClipRig {
+    let body: Entity
+    private(set) var clips: [String: Entity] = [:]
+    private var durations: [String: Double] = [:]
+    private(set) var current: String?
+    private var playback: AnimationPlaybackController?
+    private var lastSync = 0.0
+    var onAttached: (() -> Void)?
+
+    init(body: Entity) { self.body = body }
+
+    var isEmpty: Bool { clips.isEmpty }
+    var available: Set<String> { Set(clips.keys) }
+
+    /// Add one clip's model (a clone of the loaded template), hidden until shown.
+    func attach(clip: String, template: Entity) {
+        guard clips[clip] == nil else { return }
+        let c = template.clone(recursive: true)
+        c.isEnabled = false
+        body.addChild(c)
+        clips[clip] = c
+        current = nil
+        onAttached?()
+    }
+
+    /// Request every file of a catalog item from the shared library (logs: sim_model_load via the library,
+    /// sim_model_fallback here when the item has no files).
+    func load(_ item: SimCatalogItem, library: SimModelLibrary, log: (String, [String: LogValue]) -> Void) {
+        let files = item.files ?? [:]
+        if files.isEmpty { log("sim_model_fallback", ["kind": .string(item.key), "why": .string("no model files in the catalog")]) }
+        for (clip, file) in files {
+            library.request(file) { [weak self] t in self?.attach(clip: clip, template: t) }
+        }
+    }
+
+    /// Show this clip (no-op when it already shows); the animation loops.
+    func show(_ key: String, transition: TimeInterval = 0.25) {
+        guard key != current, let e = clips[key] else { return }
+        for (k, c) in clips { c.isEnabled = (k == key) }
+        current = key
+        playback?.stop()
+        playback = nil
+        if let a = e.availableAnimations.first {
+            durations[key] = a.definition.duration
+            playback = e.playAnimation(a.repeat(), transitionDuration: transition, startsPaused: false)
+        }
+        lastSync = 0
+    }
+
+    /// Keep the playing clip at the server's phase: at most once a second, only when off by > 80 ms.
+    func lockPhase(clipT0: Double?, rate: Double?, serverNow: Double?, now: Double) {
+        guard let key = current, let c = playback, let d = durations[key], d > 0.05, clipT0 != nil, serverNow != nil,
+              now - lastSync >= 1.0 else { return }
+        lastSync = now
+        let want = SimSharedClip.time(clipT0: clipT0, rate: rate, serverNow: serverNow, duration: d)
+        let cur = c.time.truncatingRemainder(dividingBy: d)
+        let err = abs(want - cur)
+        if min(err, d - err) > 0.08 { c.time = want }
+    }
+
+    func stop() { playback?.stop() }
+}
+
 /// RobosnailBob drawn from `RobotModel.parts` (the real Q6 Edge 2.0 base + the URDF sensor head; 0.82 × 0.62 ×
 /// 0.61 m at 100 %). Drive wheels spin with each side's ground speed (spokes make it visible); a soft contact shadow
 /// grounds it. 9.8: the drawing is built at 100 % under `body`, scaled by `scale`; the drive profile (footprint, step,
@@ -209,8 +276,7 @@ final class SimAnimal {
     var support: SupportState
     private(set) var scale: Double
     var scaleOverride: Double?
-    private var clips: [String: Entity] = [:]
-    private var current: String?
+    private lazy var rig = SimClipRig(body: body)
     private var shownHeading: Double
     // 9.9 physical body (owner on 9.8.91: "I don't see good collision detection for things like if an animal is
     // kicked"): kinematic while the brain drives it, dynamic while knocked (SnailSightCore Knock / Impact).
@@ -326,7 +392,7 @@ final class SimAnimal {
     var size: SIMD3<Double> { item.size * scale }
     var massKg: Double { item.massKg * scale * scale * scale }
     var velocity: V2 { SimMath.unit(brain.state.heading) * brain.state.speed }
-    var hasModel: Bool { !clips.isEmpty }
+    var hasModel: Bool { !rig.isEmpty }
 
     func setScale(_ s: Double) {
         guard abs(s - scale) > 1e-6 else { return }
@@ -337,12 +403,7 @@ final class SimAnimal {
     }
 
     func attach(clip: String, template: Entity) {
-        guard clips[clip] == nil else { return }
-        let c = template.clone(recursive: true)
-        c.isEnabled = false
-        body.addChild(c)
-        clips[clip] = c
-        current = nil
+        rig.attach(clip: clip, template: template)
         showClip()                          // visible now, even if the sim is not ticking (the 9.7.75 bug)
     }
 
@@ -367,14 +428,9 @@ final class SimAnimal {
     }
 
     private func showClip() {
-        guard !clips.isEmpty else { return }
-        let want = SimClips.pick(brain.state.gait, available: Set(clips.keys)) ?? clips.keys.sorted().first!
-        guard want != current, let show = clips[want] else { return }
-        for (k, e) in clips { e.isEnabled = (k == want) }
-        current = want
-        if let anim = show.availableAnimations.first {
-            show.playAnimation(anim.repeat(), transitionDuration: 0.25, startsPaused: false)
-        }
+        guard !rig.isEmpty, let want = SimClips.pick(brain.state.gait, available: rig.available) ?? rig.available.sorted().first
+        else { return }
+        rig.show(want)
     }
 }
 

@@ -31,6 +31,10 @@ struct ContentView: View {
                     .shadow(radius: 2).allowsHitTesting(false)
             }
             HUDView()
+            if model.simOn && model.simDragging {                // 10.6: drop a dragged body here to delete it
+                VStack { Spacer(); SimTrashCan(hot: model.simDragHot).padding(.bottom, 44) }
+                    .frame(maxWidth: .infinity).allowsHitTesting(false)
+            }
             ObjectScanOverlay(scan: model.objectScan)          // 9.3 object scan: chooser, AR box panel, Object Capture
         }
         .sheet(isPresented: $model.showSettings) { SettingsView().environmentObject(model) }

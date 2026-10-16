@@ -423,6 +423,10 @@ final class ARSessionController: NSObject, ARSessionDelegate {
         case .robotPath: _ = model.terrainLayer.handleTap(pt, arView: arView); return
         default: break
         }
+        if model.simOn, model.spawnMode {                    // 10.6 Spawn mode: a tap places the picked kind there
+            model.spawnPicked(at: pt)
+            return
+        }
         if model.simOn, model.serverSim.handleTap(pt, arView: arView) { return }   // 10.1 S2: shared sim bodies
         if model.simOn, sim.handleTap(pt) { return }        // 9.5: select / command sim bodies first
         // As in Apple's sample: `.estimatedPlane` + `.any` also hits the reconstructed mesh.

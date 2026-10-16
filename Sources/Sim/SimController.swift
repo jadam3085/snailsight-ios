@@ -228,7 +228,9 @@ final class SimController: NSObject, UIGestureRecognizerDelegate {
         library.onLoaded = { [weak self] file, ent, ms in self?.modelLoaded(file, ent, ms) }
         library.onError = { [weak self] file, err in
             guard let self else { return }
-            self.model.log.event("sim_model_error", ["file": .string(file), "error": .string(err)])
+            let kind = self.catalog.items.first { ($0.files ?? [:]).values.contains(file) }?.key ?? file
+            self.model.log.event("sim_model_load", ["kind": .string(kind), "file": .string(file), "ok": .bool(false),
+                                                    "err": .string(err)])
             if self.modelErrorsShown < 2 {
                 self.modelErrorsShown += 1
                 self.model.flash("Model \(file) could not load", seconds: 2)
@@ -408,8 +410,10 @@ final class SimController: NSObject, UIGestureRecognizerDelegate {
         }
     }
 
+    private var spawnPoint: CGPoint?                     // 10.6 Spawn mode: the tapped floor point
+
     private func centreStandHit() -> StandHit? {
-        guard let h = standHit(at: CGPoint(x: arView.bounds.midX, y: arView.bounds.midY)) else {
+        guard let h = standHit(at: spawnPoint ?? CGPoint(x: arView.bounds.midX, y: arView.bounds.midY)) else {
             model.flash(standHint())
             return nil
         }
@@ -478,13 +482,18 @@ final class SimController: NSObject, UIGestureRecognizerDelegate {
 
     private var cameraPosition: SIMD3<Float> { arView.cameraTransform.translation }
 
-    /// Spawn picker entry point.
-    func spawn(_ item: SimCatalogItem) {
+    /// Spawn picker entry point; `at`: the floor point tapped in Spawn mode (else the + at the screen centre).
+    func spawn(_ item: SimCatalogItem, at pt: CGPoint? = nil) {
+        spawnPoint = pt
+        defer { spawnPoint = nil }
+        model.log.event("sim_spawn_request", ["kind": .string(item.key), "mode": .string("local")])
         if item.isAnimal { spawnAnimal(item) } else { spawnObject(item) }
         model.noteSpawned(item.key)
     }
 
-    func spawnRobot() {
+    func spawnRobot(at pt: CGPoint? = nil) {
+        spawnPoint = pt
+        defer { spawnPoint = nil }
         guard enabled, canSpawn(), let h = centreStandHit() else { return }
         let override = robot?.scaleOverride
         let heading = cameraGround.heading
@@ -799,7 +808,9 @@ final class SimController: NSObject, UIGestureRecognizerDelegate {
             ev["catalog_m"] = .doubles([s.x, s.y, s.z])
             if s.y > 0 { ev["ratio_h"] = .double((Double(b.extents.y) / s.y * 100).rounded() / 100) }
         }
-        model.log.event("sim_model", ev)
+        ev["ok"] = .bool(true)
+        ev["kind"] = .string(owner?.key ?? (file as NSString).deletingPathExtension)
+        model.log.event("sim_model_load", ev)                // 10.6 (was sim_model): every load, local or server body
     }
 
     // MARK: mesh changes (ARSessionDelegate → here, only while the sim is on)
@@ -2070,6 +2081,29 @@ final class SimController: NSObject, UIGestureRecognizerDelegate {
     @objc private func handlePan(_ g: UIPanGestureRecognizer) {
         if remoteAuthority { model.serverSim.handlePan(g, arView: arView); return }
         let pt = g.location(in: arView)
+        // 10.6: the trash can (bottom centre) while dragging; dropping a body on it deletes it (same as the server sim)
+        switch g.state {
+        case .began:
+            model.simDragging = true
+            model.simDragHot = false
+        case .changed:
+            let hot = SimTrash.hit(x: Double(pt.x), y: Double(pt.y), viewWidth: Double(arView.bounds.width),
+                                   viewHeight: Double(arView.bounds.height))
+            if hot != model.simDragHot { model.simDragHot = hot }
+        case .ended, .cancelled, .failed:
+            let hot = model.simDragHot && g.state == .ended
+            model.simDragging = false
+            model.simDragHot = false
+            if hot, let id = grab?.id ?? dragging?.id {
+                if grab != nil { endGrab(throwIt: false) }
+                dragging = nil
+                model.log.event("sim_delete_request", ["id": .int(id), "via": .string("trash"), "mode": .string("local")])
+                delete(id)
+                onEntitiesChanged?()
+                return
+            }
+        default: break
+        }
         let now = CACurrentMediaTime()
         switch g.state {
         case .began:

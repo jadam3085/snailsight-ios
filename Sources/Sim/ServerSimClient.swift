@@ -33,15 +33,17 @@ struct ServerSimSelection: Equatable {
     var rover: Bool
     var drone: Bool
     var animal = false
+    var role: SimKind.Role = .animal
+    var symbol: String { drone ? "airplane" : rover ? "car.side" : role == .object ? "cube" : "pawprint" }
 }
 
 /// The shared sim's HUD state (its own ObservableObject: no AppModel churn at 10 Hz).
 final class ServerSimUI: ObservableObject {
-    enum Pending: Equatable { case goTo, patrol, droneAssist }
     @Published var active = false              // server authoritative right now
-    @Published var status = ""                 // "Shared sim · 3 bodies" / "Shared sim: connecting"
+    @Published var status = ""                 // "Server sim · 3 bodies" / "Local sim (server: …)"
     @Published var selection: ServerSimSelection?
-    @Published var pending: Pending?
+    @Published var pending: SimCommand?        // goTo / patrol / move: waiting for a floor tap
+    @Published var droneAssistPending = false
     @Published var patrolPoints = 0
     @Published var showGoToLabel = false
 }
@@ -55,12 +57,16 @@ final class ServerSimClient {
     private var statics: [String: SimEntitySnap] = [:]      // entity docs: name, cat, dims, scale
     private var clock = SimServerClock()
     private var drag: (id: String, start: TimeInterval, point: [Double]?)?
+    private var dragHot = false
     private var held: [String: [Double]] = [:]              // dropped by a drag: drawn there until the server agrees
     private var lastMessageAt: Double?
     private var teleop = TeleopSender()
     private var stick = V2.zero
     private let shaper = StickShaper()
     private var cmdInFlight = 0
+    private var acks = SimAcks()                             // WS commands waiting for the server's ack
+    private var followers: [String: TimeInterval] = [:]      // bodies following this phone (Follow me) -> since
+    private var labelGoals: [String: String] = [:]           // "Go to…" labels waiting for the server's ack
     private var patrol: [[Double]] = []
     private var markers: [Entity] = []
     // socket
@@ -130,6 +136,15 @@ final class ServerSimClient {
             }
         }
         layer.simNode.isEnabled = isActive
+        for (ref, p) in acks.expired(now: t) {
+            model.log.event("sim_cmd", ["cmd": .string(p.cmd), "id": .string(p.id), "ack": .string("timeout"),
+                                        "ref": .string(ref), "via": .string("ws")])
+        }
+        if isActive, !followers.isEmpty, let cam = layer.cameraMap, let tk = task, connected {   // Follow me: my pose
+            followers = followers.filter { tracks[$0.key] != nil && t - $0.value < 1800 }
+            let d = SimServerAPI.wsAgentPose(agentID: model.agentID, x: cam[0], y: cam[1], z: cam.count > 2 ? cam[2] : 0)
+            tk.send(.string(String(decoding: d, as: UTF8.self))) { _ in }
+        }
         if t - lastStatus >= 1 {
             lastStatus = t
             let s: String
@@ -213,6 +228,8 @@ final class ServerSimClient {
         if !server {
             ui.selection = nil
             ui.pending = nil
+            ui.droneAssistPending = false
+            followers = [:]
             clearMarkers()
         }
         model.log.event("sim_authority", ["mode": .string(authority.mode.rawValue), "reason": .string(authority.reason),
@@ -311,6 +328,21 @@ final class ServerSimClient {
             if granted == false, owner != model.agentID, ui.selection?.id == id {
                 model.flash("\(title(id)) is driven by \(owner ?? "another device")", seconds: 2)
             }
+        case .ack(let ref, let ok, let status, let detail):
+            guard let p = acks.resolve(ref) else { break }
+            var ev: [String: LogValue] = ["cmd": .string(p.cmd), "id": .string(p.id), "ack": .string(ok ? "ok" : "refused"),
+                                          "ms": .int(Int((now - p.sentAt) * 1000)), "via": .string("ws")]
+            if let status { ev["status"] = .int(status) }
+            if let detail { ev["detail"] = .string(String(detail.prefix(80))) }
+            model.log.event("sim_cmd", ev)
+            if p.cmd == "goto_label", let l = labelGoals.removeValue(forKey: p.id) {
+                if ok { model.flash("\(title(p.id)) → \(l)", seconds: 2) } else { goToLocally(label: l, id: p.id) }
+            } else if !ok {
+                model.flash(status == 409 ? "Another device is driving it" : "The map server refused \(p.cmd) (\(status ?? 0))",
+                            seconds: 2)
+                if p.cmd == "follow" { followers[p.id] = nil }
+                if p.cmd == "place" { held[p.id] = nil }
+            }
         case .error(let s):
             model.log.event("sim_server_error", ["detail": .string(s)])
         case .other:
@@ -360,8 +392,20 @@ final class ServerSimClient {
 
     private func redraw(_ s: SimEntitySnap) {
         bodies[s.id]?.remove()
-        let b = ServerSimBody(id: s.id, visual: visual(s), snap: s, library: model.controller.sim.library,
-                              catalog: model.controller.sim.catalog, label: layer.makeLabel(title(s.id), size: 0.03))
+        let v = visual(s)
+        let b = ServerSimBody(id: s.id, visual: v, snap: s, library: model.controller.sim.library,
+                              catalog: model.controller.sim.catalog, label: layer.makeLabel(title(s.id), size: 0.03),
+                              log: { [weak self] e, d in self?.model.log.event(e, d) })
+        let drawn: String
+        switch v {
+        case .animal: drawn = "model"
+        case .object: drawn = "model"
+        case .robot: drawn = "robot_model"
+        case .drone: drawn = "drone"
+        case .box: drawn = "box"
+        }
+        model.log.event("sim_server_body", ["id": .string(s.id), "kind": .string(s.kind), "drawn": .string(drawn),
+                                            "scale": .double(s.scale ?? 0)])
         layer.simNode.addChild(b.root)
         bodies[s.id] = b
         if let tr = tracks[s.id] {
@@ -379,8 +423,9 @@ final class ServerSimClient {
         if let b = s.behaviour, b != d, !["teleop", "idle"].contains(b) { d += " · \(b)" }
         if let o = s.owner, o != model.agentID, !o.isEmpty { d += " · \(o)" }
         if s.isDrone { d += String(format: " · %.1f m up", s.pose.z - ((layer.cameraMap?[2] ?? 1.4) - 1.4)) }
+        if followers[s.id] != nil { d += " · following you" }
         return ServerSimSelection(id: s.id, title: title(s.id), detail: d, rover: s.isRover, drone: s.isDrone,
-                                  animal: s.cat == "animal" || (!s.isRover && !s.isDrone && !s.isObject))
+                                  animal: s.role == .animal, role: s.role)
     }
 
     // MARK: picking (map frame, z up, heading +x)
@@ -400,30 +445,46 @@ final class ServerSimClient {
     /// true = consumed (in server mode every tap is ours: the local bodies are hidden).
     func handleTap(_ pt: CGPoint, arView: ARView) -> Bool {
         guard isActive else { return false }
+        if ui.droneAssistPending {
+            guard let g = floorPoint(pt, arView: arView) else { model.flash("Aim at the floor"); return true }
+            if let s = ui.selection {
+                postTask(SimServerAPI.taskBody(task: "drone_assist", goal: g, agentID: model.agentID), on: s.id,
+                     what: "drone assist")
+                addMarker(g)
+            }
+            ui.droneAssistPending = false
+            return true
+        }
         if let p = ui.pending {
             guard let g = floorPoint(pt, arView: arView) else { model.flash("Aim at the floor"); return true }
+            guard let s = ui.selection else { ui.pending = nil; return true }
             switch p {
-            case .goTo:
-                if let s = ui.selection { send(.goal(x: g[0], y: g[1], z: g[2]), to: s.id); addMarker(g) }
-                ui.pending = nil
             case .patrol:
                 patrol.append([g[0], g[1]])
                 addMarker(g)
                 ui.patrolPoints = patrol.count
-            case .droneAssist:
-                if let s = ui.selection {
-                    task(SimServerAPI.taskBody(task: "drone_assist", goal: g, agentID: model.agentID), on: s.id,
-                         what: "drone assist")
-                    addMarker(g)
-                }
-                ui.pending = nil
+                return true
+            case .move:
+                held[s.id] = g
+                send(.place(x: g[0], y: g[1], z: g[2]), to: s.id)
+            default:                                            // Go to
+                followers[s.id] = nil
+                send(.goal(x: g[0], y: g[1], z: g[2]), to: s.id)
+                addMarker(g)
             }
+            ui.pending = nil
             return true
         }
-        if let id = pickBody(pt), let tr = tracks[id] {
-            ui.selection = ui.selection?.id == id ? nil : selection(tr.snap)
+        let hit = pickBody(pt)
+        if let id = hit, let tr = tracks[id] {
+            let again = ui.selection?.id == id
+            ui.selection = again ? nil : selection(tr.snap)
             stick = .zero
+            model.log.event("sim_select", ["id": .string(id), "kind": .string(tr.snap.kind), "mode": .string("server"),
+                                           "cleared": .bool(again)])
         } else {
+            model.log.event("sim_tap", ["hit": .bool(false), "mode": .string("server"), "bodies": .int(tracks.count),
+                                        "selected": .bool(ui.selection != nil)])
             ui.selection = nil
         }
         return true
@@ -449,14 +510,30 @@ final class ServerSimClient {
             let start = CGPoint(x: pt.x - tr0.x, y: pt.y - tr0.y)
             guard let id = pickBody(start) ?? pickBody(pt), let tr = tracks[id] else { drag = nil; return }
             drag = (id, now, nil)
-            if ui.selection?.id != id { ui.selection = selection(tr.snap) }
+            dragHot = false
+            model.simDragging = true
+            if ui.selection?.id != id {
+                ui.selection = selection(tr.snap)
+                model.log.event("sim_select", ["id": .string(id), "kind": .string(tr.snap.kind), "mode": .string("server"),
+                                               "via": .string("drag")])
+            }
         case .changed:
+            dragHot = SimTrash.hit(x: Double(pt.x), y: Double(pt.y), viewWidth: Double(arView.bounds.width),
+                                   viewHeight: Double(arView.bounds.height))
+            if model.simDragHot != dragHot { model.simDragHot = dragHot }
             guard var d = drag, let p = floorPoint(pt, arView: arView) else { return }
             d.point = p
             drag = d
         case .ended, .cancelled, .failed:
+            model.simDragging = false
+            model.simDragHot = false
             guard let d = drag else { return }
             drag = nil
+            if g.state == .ended && dragHot {                   // dropped on the trash can: delete for everyone
+                dragHot = false
+                despawn(d.id, via: "trash")
+                return
+            }
             guard g.state == .ended, let tr = tracks[d.id] else { return }
             let tr2 = g.translation(in: arView), v = g.velocity(in: arView)
             let short = (tr2.x * tr2.x + tr2.y * tr2.y).squareRoot() < 160
@@ -469,7 +546,7 @@ final class ServerSimClient {
                 model.log.event("sim_server_kick", ["id": .string(d.id)])
             } else if let q = d.point {
                 held[d.id] = q
-                send(.place(x: q[0], y: q[1], z: q[2]), to: d.id) { [weak self] ok in if !ok { self?.held[d.id] = nil } }
+                send(.place(x: q[0], y: q[1], z: q[2]), to: d.id)
                 model.log.event("sim_server_move", ["id": .string(d.id), "to": .doubles(q)])
             }
         default: break
@@ -481,15 +558,25 @@ final class ServerSimClient {
         return layer.toMap(world: Geo.position(hit.worldTransform))
     }
 
-    func command(_ c: SimServerAPI.Command) {
+    /// The ONE bar's commands (SimBarView), all sent to the server (WS + ack).
+    func command(_ c: SimCommand) {
         guard let s = ui.selection else { return }
-        send(c, to: s.id)
+        if c.needsPoint { startPending(c); return }
+        if c == .delete { despawnSelected(); return }
+        guard let sc = c.serverCommand(agentID: model.agentID, phone: layer.cameraMap) else {
+            model.flash("\(c.label): not available here", seconds: 1.5)
+            return
+        }
+        if c == .follow { followers[s.id] = now } else { followers[s.id] = nil }
+        send(sc, to: s.id)
+        if c == .follow { model.flash("\(s.title) follows you", seconds: 1.5) }
     }
 
-    func startPending(_ p: ServerSimUI.Pending) {
+    func startPending(_ p: SimCommand) {
         clearMarkers()
         patrol = []
         ui.patrolPoints = 0
+        ui.droneAssistPending = false
         ui.pending = p
     }
 
@@ -501,6 +588,7 @@ final class ServerSimClient {
 
     func cancelPending() {
         ui.pending = nil
+        ui.droneAssistPending = false
         patrol = []
         ui.patrolPoints = 0
         clearMarkers()
@@ -510,9 +598,8 @@ final class ServerSimClient {
     /// AR layer's objects of this map version and sends a spot beside it.
     func goTo(label: String) {
         guard let s = ui.selection else { return }
-        send(.goToLabel(label), to: s.id, quiet: true) { [weak self] ok in
-            if ok { self?.model.flash("\(s.title) → \(label)", seconds: 2) } else { self?.goToLocally(label: label, id: s.id) }
-        }
+        labelGoals[s.id] = label
+        send(.goToLabel(label), to: s.id)                    // ack ok: flash; refused: the phone's own pick (below)
     }
 
     private func goToLocally(label: String, id: String) {
@@ -531,7 +618,7 @@ final class ServerSimClient {
     /// S3 rover tasks (deter deer; drone assist goes through the floor-tap pending action).
     func deterDeer() {
         guard let s = ui.selection, s.rover else { return }
-        task(SimServerAPI.taskBody(task: "deter", kinds: ["deer"], agentID: model.agentID), on: s.id, what: "deter deer")
+        postTask(SimServerAPI.taskBody(task: "deter", kinds: ["deer"], agentID: model.agentID), on: s.id, what: "deter deer")
     }
 
     func startDroneAssist() {
@@ -539,14 +626,30 @@ final class ServerSimClient {
             model.flash("Select a sim rover first, then Drone assist", seconds: 2.5)
             return
         }
-        startPending(.droneAssist)
+        clearMarkers()
+        ui.pending = nil
+        ui.droneAssistPending = true
     }
 
-    private func task(_ body: Data, on id: String, what: String) {
+    private func postTask(_ body: Data, on id: String, what: String) {
         post(SimServerAPI.taskPath(map: mapID, id: id), body: body, what: what)
     }
 
+    /// 10.6: commands go over the sim WebSocket (the server acks the ref: sim_cmd {cmd, id, ack}); REST only when the
+    /// socket is down or the caller needs the result (`done`).
     private func send(_ c: SimServerAPI.Command, to id: String, quiet: Bool = false, done: ((Bool) -> Void)? = nil) {
+        if done == nil, connected, let tk = task {
+            let ref: String? = quiet ? nil : acks.register(cmd: c.name, id: id, now: now)
+            let d = SimServerAPI.wsCommand(c, id: id, agentID: model.agentID, ref: ref)
+            tk.send(.string(String(decoding: d, as: UTF8.self))) { [weak self] err in
+                guard let err else { return }
+                DispatchQueue.main.async {
+                    self?.model.log.event("sim_cmd", ["cmd": .string(c.name), "id": .string(id), "ack": .string("send_failed"),
+                                                      "detail": .string(err.localizedDescription), "via": .string("ws")])
+                }
+            }
+            return
+        }
         guard cmdInFlight < 3 else { done?(false); return }
         cmdInFlight += 1
         let link = model.link!, path = SimServerAPI.cmdPath(map: mapID, id: id)
@@ -558,8 +661,9 @@ final class ServerSimClient {
                 self.cmdInFlight -= 1
                 let st = r?.1 ?? 0
                 if !quiet || !(200..<300).contains(st) {
-                    self.model.log.event("sim_server_cmd", ["id": .string(id), "status": .int(st),
-                                                            "cmd": .string(String(describing: c).prefix(60).description)])
+                    self.model.log.event("sim_cmd", ["id": .string(id), "cmd": .string(c.name), "via": .string("rest"),
+                                                     "ack": .string((200..<300).contains(st) ? "ok" : "refused"),
+                                                     "status": .int(st)])
                 }
                 if st == 409 { self.model.flash("Another device is driving it", seconds: 2) }
                 else if !quiet && !(200..<300).contains(st) { self.model.flash("The map server refused (\(st))", seconds: 2) }
@@ -568,12 +672,23 @@ final class ServerSimClient {
         }
     }
 
-    /// Spawn at the reticle (screen centre) on the floor.
-    func spawn(_ kind: String, arView: ARView) {
-        let c = CGPoint(x: arView.bounds.midX, y: arView.bounds.midY)
-        guard let g = floorPoint(c, arView: arView), let cam = layer.cameraMap else { model.flash("Aim the + at the floor"); return }
+    /// Spawn at the reticle (screen centre) or at a tapped floor point (Spawn mode). Animals / objects / the robot at
+    /// the phone's Sim scale; sent over the WS (ack logged), REST when the socket is down.
+    func spawn(_ kind: String, arView: ARView, at pt: CGPoint? = nil) {
+        let c = pt ?? CGPoint(x: arView.bounds.midX, y: arView.bounds.midY)
+        guard let g = floorPoint(c, arView: arView), let cam = layer.cameraMap else { model.flash("Aim at the floor"); return }
         let z = kind == "sim-drone" ? g[2] + 1.0 : g[2]
         let theta = atan2(cam[1] - g[1], cam[0] - g[0])          // face the phone
+        let agent = kind == "sim-rover" || kind == "sim-drone"
+        let scale: Double? = agent ? nil : SimScale.clampGlobal(model.simScale)
+        model.log.event("sim_spawn_request", ["kind": .string(kind), "mode": .string("server"), "at": .doubles(g)])
+        if connected, let tk = task {
+            let ref = acks.register(cmd: "spawn \(kind)", id: kind, now: now)
+            let d = SimServerAPI.wsSpawn(kind: kind, x: g[0], y: g[1], z: z, theta: theta, scale: scale,
+                                         agentID: model.agentID, ref: ref)
+            tk.send(.string(String(decoding: d, as: UTF8.self))) { _ in }
+            return
+        }
         let body = SimServerAPI.spawnBody(kind: kind, x: g[0], y: g[1], z: z, theta: theta, agentID: model.agentID)
         post(SimServerAPI.entitiesPath(map: mapID), body: body, what: "spawn \(kind)")
     }
@@ -581,11 +696,25 @@ final class ServerSimClient {
 
     func despawnSelected() {
         guard let s = ui.selection else { return }
+        despawn(s.id, via: "bar")
+    }
+
+    /// Delete for everyone (authoritative + tombstoned on the server); gone here at once.
+    func despawn(_ id: String, via: String) {
+        model.log.event("sim_delete_request", ["id": .string(id), "via": .string(via), "mode": .string("server")])
+        followers[id] = nil
+        if ui.selection?.id == id { ui.selection = nil }
+        forgetLocally(id)
+        if connected, let tk = task {
+            let ref = acks.register(cmd: "delete", id: id, now: now)
+            let d = SimServerAPI.wsDelete(id: id, agentID: model.agentID, ref: ref)
+            tk.send(.string(String(decoding: d, as: UTF8.self))) { _ in }
+            return
+        }
+        let s = (id: id, kind: "")
         let link = model.link!
         let path = SimServerAPI.entityPath(map: mapID, id: s.id)
         let q = [URLQueryItem(name: "agent_id", value: model.agentID)]
-        ui.selection = nil
-        forgetLocally(s.id)                          // gone here at once; the server tombstones it for everyone
         Task { [weak self] in
             let r = try? await link.request("DELETE", path, query: q, timeout: 10)
             await MainActor.run {
@@ -626,80 +755,57 @@ final class ServerSimClient {
     }
 }
 
-/// The shared sim's floating bar (selected body + commands), in the slim 9.8 style.
+/// The shared sim's adapter of the ONE bar (SimBarView): same commands as the local bar (SimCommand.offered), the
+/// rover's S3 extras, and the Go to… object sheet.
 struct ServerSimBar: View {
     @ObservedObject var ui: ServerSimUI
     let sim: ServerSimClient
     @State private var label = ""
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 5) {
-            if let p = ui.pending { pendingRow(p) }
-            if let s = ui.selection { selected(s) } else { idle }
+        SimBarView(prompt: prompt, pending: ui.pending, patrolPoints: ui.patrolPoints,
+                   selection: ui.selection.map { s in
+                       SimBarModel(title: s.title, detail: s.detail, symbol: s.symbol,
+                                   commands: SimCommand.offered(role: s.role, drone: s.drone, server: true),
+                                   extras: extras(s))
+                   },
+                   hint: [ui.status.isEmpty ? "Server sim" : ui.status, "tap a body"].joined(separator: " · "),
+                   scaleRef: nil) { a in
+            switch a {
+            case .command(let c): sim.command(c)
+            case .cancel: sim.cancelPending()
+            case .start: sim.startPatrol()
+            case .extra(let x):
+                switch x {
+                case "goto_label": label = ""; ui.showGoToLabel = true
+                case "deter": sim.deterDeer()
+                case "drone_assist": sim.startDroneAssist()
+                default: break
+                }
+            case .scale: break
+            }
         }
         .sheet(isPresented: $ui.showGoToLabel) { goToSheet.presentationDetents([.height(200)]) }
     }
 
-    private var idle: some View {
-        HStack(spacing: 6) {
-            Image(systemName: "server.rack").font(.caption2)
-            Text(ui.status.isEmpty ? "Shared sim" : ui.status).font(.caption2).lineLimit(1).minimumScaleFactor(0.8)
-            Text("· tap a body").font(.caption2).foregroundStyle(.secondary)
+    private var prompt: String? {
+        if ui.droneAssistPending { return "Tap where the drone should fly ahead" }
+        switch ui.pending {
+        case .goTo?: return "Tap the floor where it should go"
+        case .move?: return "Tap the floor where it should stand (or drag it)"
+        case .patrol?: return "Tap patrol points (\(ui.patrolPoints)), then Start"
+        default: return nil
         }
-        .padding(.horizontal, 10).padding(.vertical, 4)
-        .background(.ultraThinMaterial, in: Capsule())
     }
 
-    private func pendingRow(_ p: ServerSimUI.Pending) -> some View {
-        HStack(spacing: 8) {
-            Image(systemName: "hand.tap.fill").foregroundStyle(.cyan)
-            Text(p == .goTo ? "Tap the floor where it should go"
-                 : p == .droneAssist ? "Tap where the drone should fly ahead"
-                 : "Tap patrol points (\(ui.patrolPoints)), then Start")
-                .font(.caption.weight(.semibold)).lineLimit(1).minimumScaleFactor(0.8)
-            Spacer(minLength: 0)
-            if p == .patrol { Button("Start") { sim.startPatrol() }.font(.caption.weight(.bold)).disabled(ui.patrolPoints < 2) }
-            Button { sim.cancelPending() } label: { Image(systemName: "xmark.circle.fill") }
+    private func extras(_ s: ServerSimSelection) -> [SimBarExtra] {
+        guard s.rover || s.drone else { return [] }
+        var x = [SimBarExtra(id: "goto_label", symbol: "magnifyingglass", label: "Go to…")]
+        if s.rover && !s.drone {
+            x.append(SimBarExtra(id: "deter", symbol: "hare", label: "Deter deer"))
+            x.append(SimBarExtra(id: "drone_assist", symbol: "airplane.departure", label: "Drone assist"))
         }
-        .padding(.horizontal, 10).padding(.vertical, 6)
-        .background(.ultraThinMaterial, in: Capsule())
-    }
-
-    private func selected(_ s: ServerSimSelection) -> some View {
-        HStack(spacing: 6) {
-            Image(systemName: s.drone ? "airplane" : s.rover ? "car.side" : "pawprint").font(.caption).foregroundStyle(.cyan)
-            VStack(alignment: .leading, spacing: 0) {
-                Text(s.title).font(.caption.weight(.bold)).lineLimit(1)
-                Text(s.detail).font(.caption2).foregroundStyle(.secondary).lineLimit(1).minimumScaleFactor(0.75)
-            }
-            Spacer(minLength: 4)
-            if s.animal {
-                icon("mappin.and.ellipse", "Go to") { sim.startPending(.goTo) }
-                icon("arrow.triangle.2.circlepath", "Roam") { sim.command(.behaviour("roam")) }
-                icon("hand.raised.fill", "Stay") { sim.command(.stop) }
-            }
-            if s.rover || s.drone {
-                icon("mappin.and.ellipse", "Go to") { sim.startPending(.goTo) }
-                icon("magnifyingglass", "Go to object") { label = ""; ui.showGoToLabel = true }
-                icon("point.3.connected.trianglepath.dotted", "Patrol") { sim.startPending(.patrol) }
-                if s.rover {
-                    icon("hare", "Deter deer") { sim.deterDeer() }
-                    icon("airplane.departure", "Drone assist") { sim.startDroneAssist() }
-                }
-                icon("stop.fill", "Stop") { sim.command(.stop) }
-            }
-            icon("trash", "Remove") { sim.despawnSelected() }
-        }
-        .padding(.horizontal, 10).padding(.vertical, 5)
-        .frame(maxWidth: 420)
-        .background(.ultraThinMaterial, in: Capsule())
-        .overlay(Capsule().stroke(Color.cyan.opacity(0.35)))
-    }
-
-    private func icon(_ name: String, _ a11y: String, _ action: @escaping () -> Void) -> some View {
-        Button(action: action) { Image(systemName: name).font(.caption.weight(.semibold)).frame(width: 28, height: 26) }
-            .buttonStyle(.plain)
-            .accessibilityLabel(a11y)
+        return x
     }
 
     private var goToSheet: some View {

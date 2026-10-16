@@ -58,6 +58,38 @@ final class AppModel: ObservableObject {
     /// Spawn picker "Recent" row (P2a's "last species", generalised).
     @Published var simRecents = SimRecents(keys: UserDefaults.standard.stringArray(forKey: "sim.recents") ?? [])
     @Published var showSpawn = false
+    // 10.6 Spawn mode: Spawn → pick an animal / object (or the robot) → tap the floor to place (repeatable) → ✕ ends
+    @Published var spawnMode = false
+    @Published var spawnPick: String?                // catalog key, or "robot"
+    // 10.6 drag a body onto the trash can (bottom centre) to delete it
+    @Published var simDragging = false
+    @Published var simDragHot = false
+
+    func startSpawnMode() {
+        spawnMode = true
+        showSpawn = true
+        log.event("sim_spawn_mode", ["on": .bool(true)])
+    }
+
+    func endSpawnMode() {
+        guard spawnMode else { return }
+        spawnMode = false
+        spawnPick = nil
+        log.event("sim_spawn_mode", ["on": .bool(false)])
+    }
+
+    /// Spawn mode: a floor tap places the picked kind there (shared server sim when it is in charge, else local).
+    func spawnPicked(at pt: CGPoint) {
+        guard let k = spawnPick else { showSpawn = true; return }
+        if serverSim.isActive {
+            serverSim.spawn(k == "robot" ? "robot" : k, arView: controller.arView, at: pt)
+        } else if k == "robot" {
+            controller.sim.spawnRobot(at: pt)
+        } else if let it = controller.sim.catalog.item(k) {
+            controller.sim.spawn(it, at: pt)
+        }
+        noteSpawned(k)
+    }
     // 9.9 easy cube delete: the selected placed cube (its floating bar), the Cubes list, the 5 s Undo toast
     @Published var cubeSel: CubeSelection?
     @Published var showCubes = false

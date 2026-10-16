@@ -64,8 +64,7 @@ struct SpawnPickerView: View {
         VStack(alignment: .leading, spacing: 6) {
             Text("Robot").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
             Button {
-                model.controller.sim.spawnRobot()
-                dismiss()
+                pick("robot")
             } label: {
                 HStack(spacing: 10) {
                     Image(systemName: "car.side.fill").font(.title3).foregroundStyle(.purple)
@@ -82,6 +81,20 @@ struct SpawnPickerView: View {
         }
     }
 
+    /// 10.6 Spawn mode: the pick is remembered, then each floor tap places one (server sim when it is in charge).
+    /// Outside Spawn mode (older entry points) it places one at the + right away, as before.
+    private func pick(_ key: String) {
+        if model.spawnMode {
+            model.spawnPick = key
+            model.log.event("sim_spawn_pick", ["kind": .string(key)])
+        } else if key == "robot" {
+            model.controller.sim.spawnRobot()
+        } else if let it = model.controller.sim.catalog.item(key) {
+            model.controller.sim.spawn(it)
+        }
+        dismiss()
+    }
+
     private func section(_ title: String, _ items: [SimCatalogItem]) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(title).font(.caption.weight(.semibold)).foregroundStyle(.secondary)
@@ -93,8 +106,7 @@ struct SpawnPickerView: View {
 
     private func tile(_ it: SimCatalogItem) -> some View {
         Button {
-            model.controller.sim.spawn(it)
-            dismiss()
+            pick(it.key)
         } label: {
             VStack(spacing: 3) {
                 SimThumb(item: it).frame(width: 52, height: 52)

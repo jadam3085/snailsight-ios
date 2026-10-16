@@ -235,4 +235,79 @@ final class SimServerTests: XCTestCase {
         let old = try JSONDecoder().decode(MapEntitiesDoc.self, from: Data(#"{"map_id":"site","revision":3,"entities":[]}"#.utf8))
         XCTAssertNil(old.deleted)
     }
+
+    // MARK: 10.6 — reachable, not only green
+
+    /// Every kind in the app's bundled catalog must draw as its model on the server path, and every file it names must
+    /// be in Resources/SimModels (the IPA bundles that folder). A box for a bundled kind fails here.
+    func testEveryBundledKindResolvesToItsModelNotABox() throws {
+        let dir = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("Resources/SimModels")
+        let cat = try SimCatalog.decode(Data(contentsOf: dir.appendingPathComponent("catalog.json")))
+        XCTAssertGreaterThan(cat.items.count, 10)
+        let animals = Set(cat.items.filter(\.isAnimal).map(\.key)), objects = Set(cat.items.filter { !$0.isAnimal }.map(\.key))
+        for it in cat.items {
+            let cat = it.isAnimal ? "animal" : "object"
+            let sn = try snap(#"{"id":"x","kind":"\#(it.key)","cat":"\#(cat)","pose":{"x":0,"y":0},"scale":0.5}"#)
+            let v = SimServerVisual.of(sn, animalKeys: animals, objectKeys: objects)
+            XCTAssertNotEqual(v, .box, "\(it.key) would draw as a box")
+            XCTAssertFalse((it.files ?? [:]).isEmpty, "\(it.key) has no model files")
+            for f in (it.files ?? [:]).values {
+                XCTAssertTrue(FileManager.default.fileExists(atPath: dir.appendingPathComponent(f).path), "\(f) not bundled")
+            }
+            if it.isAnimal {
+                XCTAssertNotNil(SimSharedClip.key("walk", available: Set((it.files ?? [:]).keys)), it.key)
+            }
+        }
+        // the owner's 10.4.212 / 10.5.213 bodies (server docs: cat animal, no files on the wire)
+        for k in ["sheep", "deer", "fox", "rabbit", "chicken", "wolf"] where animals.contains(k) {
+            XCTAssertEqual(SimServerVisual.of(try snap(#"{"id":"s","kind":"\#(k)","pose":{"x":0,"y":0}}"#),
+                                              animalKeys: animals, objectKeys: objects), .animal(key: k, scale: 1.0))
+        }
+    }
+
+    func testAckParsingAndWsCommands() throws {
+        XCTAssertEqual(SimStreamMessage.parse(Data(#"{"type":"ack","ref":"c3","ok":true,"id":"F1","lease":null}"#.utf8)),
+                       .ack(ref: "c3", ok: true, status: nil, detail: nil))
+        XCTAssertEqual(SimStreamMessage.parse(Data(#"{"type":"ack","ref":"c4","ok":false,"status":409,"detail":{"detail":"leased","by":"x"}}"#.utf8)),
+                       .ack(ref: "c4", ok: false, status: 409, detail: "detail"))
+        func o(_ d: Data) throws -> [String: Any] { try JSONSerialization.jsonObject(with: d) as! [String: Any] }
+        let c = try o(SimServerAPI.wsCommand(.flee(fromX: 1, fromY: 2, seconds: 4), id: "F1", agentID: "phone-1", ref: "c1"))
+        XCTAssertEqual(c["type"] as? String, "cmd"); XCTAssertEqual(c["id"] as? String, "F1"); XCTAssertEqual(c["ref"] as? String, "c1")
+        XCTAssertEqual(c["flee"] as? [Double], [1, 2]); XCTAssertEqual(c["seconds"] as? Double, 4)
+        let f = try o(SimServerAPI.wsCommand(.followAgent("phone-1"), id: "F1", agentID: "phone-1", ref: nil))
+        XCTAssertEqual((f["follow"] as? [String: String])?["agent"], "phone-1"); XCTAssertNil(f["ref"])
+        let d = try o(SimServerAPI.wsDelete(id: "F1", agentID: "phone-1", ref: "c2"))
+        XCTAssertEqual(d["type"] as? String, "delete")
+        let sp = try o(SimServerAPI.wsSpawn(kind: "sheep", x: 1, y: 2, z: 0, theta: 0, scale: 0.5, agentID: "phone-1", ref: "c5"))
+        XCTAssertEqual(sp["type"] as? String, "spawn"); XCTAssertEqual(sp["scale"] as? Double, 0.5); XCTAssertEqual(sp["kind"] as? String, "sheep")
+        let ap = try o(SimServerAPI.wsAgentPose(agentID: "phone-1", x: 1, y: 2, z: 0))
+        XCTAssertEqual(ap["type"] as? String, "agent_pose")
+    }
+
+    func testOneCommandListForBothModes() {
+        let animal = SimCommand.offered(role: .animal, server: true)
+        for c in [SimCommand.goTo, .roam, .stay, .flee, .follow, .delete] { XCTAssertTrue(animal.contains(c), c.rawValue) }
+        XCTAssertTrue(SimCommand.offered(role: .animal, server: false).contains(.delete))
+        XCTAssertEqual(SimCommand.offered(role: .object, server: true), [.delete])
+        XCTAssertEqual(SimCommand.stay.serverCommand(agentID: "p", phone: nil), .stop)
+        XCTAssertEqual(SimCommand.roam.serverCommand(agentID: "p", phone: nil), .behaviour("roam"))
+        XCTAssertEqual(SimCommand.flee.serverCommand(agentID: "p", phone: [1, 2, 0]), .flee(fromX: 1, fromY: 2, seconds: 4))
+        XCTAssertNil(SimCommand.flee.serverCommand(agentID: "p", phone: nil))
+        XCTAssertEqual(SimCommand.follow.serverCommand(agentID: "p", phone: nil), .followAgent("p"))
+        XCTAssertNil(SimCommand.goTo.serverCommand(agentID: "p", phone: nil))           // needs a floor tap
+    }
+
+    func testAcksAndTrash() {
+        var a = SimAcks()
+        let r1 = a.register(cmd: "flee", id: "F1", now: 10)
+        let r2 = a.register(cmd: "roam", id: "F2", now: 11)
+        XCTAssertNotEqual(r1, r2)
+        XCTAssertEqual(a.resolve(r1)?.cmd, "flee"); XCTAssertNil(a.resolve(r1))
+        XCTAssertTrue(a.expired(now: 12).isEmpty)
+        XCTAssertEqual(a.expired(now: 14.5).map(\.1.id), ["F2"]); XCTAssertEqual(a.count, 0)
+        XCTAssertTrue(SimTrash.hit(x: 200, y: 800, viewWidth: 400, viewHeight: 850))
+        XCTAssertFalse(SimTrash.hit(x: 20, y: 800, viewWidth: 400, viewHeight: 850))
+        XCTAssertFalse(SimTrash.hit(x: 200, y: 400, viewWidth: 400, viewHeight: 850))
+    }
 }

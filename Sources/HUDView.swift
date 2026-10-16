@@ -59,6 +59,7 @@ struct HUDView: View {
                 ARStatusChip(status: model.arStatus)               // 10.1 AR 1:1: finding / correcting / dimmed
             }
             if let c = model.cubeSel, !model.recording { CubeBar(cube: c) }
+            if model.simOn && !model.recording && model.spawnMode { SpawnModeBanner() }
             if model.simOn && !model.recording {
                 SimArea(shared: model.serverSim.ui)               // 10.1: shared (S2) or local (S1) sim controls
             }
@@ -230,8 +231,11 @@ private struct BottomToolbar: View {
             }
             .disabled(model.recording && !model.simAllowWhileRecording)
             if model.simOn {
-                ToolButton(icon: "plus.circle.fill", label: "Spawn", tint: .cyan) { model.showSpawn = true }
-                    .disabled(model.recording)
+                ToolButton(icon: model.spawnMode ? "plus.circle.fill" : "plus.circle", label: "Spawn",
+                           active: model.spawnMode, tint: .cyan) {
+                    if model.spawnMode { model.endSpawnMode() } else { model.startSpawnMode() }
+                }
+                .disabled(model.recording)
             } else {
                 ToolButton(icon: "map", label: "Places") { model.showPlaces = true }
             }
@@ -280,6 +284,7 @@ private struct ToolLabel: View {
             Text(label).font(.system(size: 9, weight: .medium)).lineLimit(1).foregroundStyle(.secondary)
         }
         .frame(width: 46, height: 40)
+        .background(active ? Color.cyan.opacity(0.22) : Color.clear, in: RoundedRectangle(cornerRadius: 10))
         .contentShape(Rectangle())
     }
 }
@@ -336,7 +341,7 @@ private struct MoreMenu: View {
             Section("Sim") {
                 Toggle(isOn: $model.simOn) { Label("Sim", systemImage: "pawprint") }
                 if model.simOn {
-                    Button { model.showSpawn = true } label: { Label("Spawn…", systemImage: "plus.circle") }
+                    Button { model.startSpawnMode() } label: { Label("Spawn…", systemImage: "plus.circle") }
                     Toggle(isOn: Binding(get: { model.controller.sim.ui.scaleRef },
                                          set: { model.controller.sim.ui.scaleRef = $0 })) {
                         Label("1 m reference", systemImage: "ruler")
@@ -760,7 +765,8 @@ private struct SimArea: View {
                         if shared.active { model.serverSim.setStick(v) } else { model.controller.sim.setStick(v) }
                     }
                 }
-                let text = shared.active ? shared.status
+                // 10.6: ONE status chip — in server mode the bar's own chip carries "Server sim · N bodies"
+                let text = shared.active ? ""
                     : [shared.status, model.simStatus].filter { !$0.isEmpty }.joined(separator: " · ")
                 if !text.isEmpty {
                     Text(text).font(.caption2.weight(.semibold)).monospacedDigit().lineLimit(1)
@@ -770,5 +776,53 @@ private struct SimArea: View {
                 Spacer(minLength: 0)
             }
         }
+    }
+}
+
+
+/// 10.6 Spawn mode banner: what to do, which kind is picked, change it, or end the mode.
+private struct SpawnModeBanner: View {
+    @EnvironmentObject var model: AppModel
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "plus.circle.fill").foregroundStyle(.cyan)
+            VStack(alignment: .leading, spacing: 0) {
+                Text("Spawn mode").font(.caption.weight(.bold))
+                Text(model.spawnPick.map { "\(name($0)): tap the floor to place · drag to move · drop on the trash to delete" }
+                     ?? "Pick an animal, then tap the floor to place")
+                    .font(.caption2).foregroundStyle(.secondary).lineLimit(2).minimumScaleFactor(0.8)
+            }
+            Spacer(minLength: 4)
+            Button(model.spawnPick == nil ? "Pick" : "Change") { model.showSpawn = true }
+                .font(.caption.weight(.semibold)).buttonStyle(.bordered).controlSize(.small)
+            Button { model.endSpawnMode() } label: { Image(systemName: "xmark.circle.fill").font(.title3) }
+                .buttonStyle(.plain).accessibilityLabel("End spawn mode")
+        }
+        .padding(.horizontal, 10).padding(.vertical, 6)
+        .frame(maxWidth: 440)
+        .background(.ultraThinMaterial, in: Capsule())
+        .overlay(Capsule().stroke(Color.cyan.opacity(0.6), lineWidth: 1.5))
+    }
+
+    private func name(_ k: String) -> String {
+        k == "robot" ? "RobosnailBob" : (model.controller.sim.catalog.item(k)?.label ?? k.capitalized)
+    }
+}
+
+/// 10.6 trash can while a body is dragged: drop it here to delete it (red = will delete).
+struct SimTrashCan: View {
+    let hot: Bool
+
+    var body: some View {
+        Image(systemName: hot ? "trash.fill" : "trash")
+            .font(.system(size: hot ? 30 : 24, weight: .semibold))
+            .foregroundStyle(hot ? Color.white : Color.red)
+            .frame(width: hot ? 72 : 60, height: hot ? 72 : 60)
+            .background(hot ? Color.red : Color.black.opacity(0.45), in: Circle())
+            .overlay(Circle().stroke(Color.red, lineWidth: 2))
+            .animation(.snappy(duration: 0.15), value: hot)
+            .accessibilityLabel(hot ? "Release to delete" : "Drag here to delete")
+            .allowsHitTesting(false)
     }
 }
