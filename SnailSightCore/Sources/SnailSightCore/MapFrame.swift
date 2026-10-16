@@ -177,8 +177,9 @@ public struct MapEntitiesDoc: Codable, Equatable {
     public var revision: Int
     public var mapVersion: Int?
     public var entities: [MapEntity]
+    public var deleted: [String]?               // tombstoned ids (API §5.9.9): drop any cached copy, never re-upload
     enum CodingKeys: String, CodingKey {
-        case revision, entities
+        case revision, entities, deleted
         case mapID = "map_id", mapVersion = "map_version"
     }
 }

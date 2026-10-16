@@ -339,6 +339,7 @@ final class MapLocalizer {
                     self.model.log.event("map_entities_error", ["status": .int(r?.1 ?? 0)])
                     return
                 }
+                self.dropDeleted(doc.deleted ?? [])
                 if reason != "realign", self.migrateOrphans(doc, alignment: al, reason: reason) { return }
                 self.reconcile(doc, alignment: al, reason: reason)
             }
@@ -353,8 +354,9 @@ final class MapLocalizer {
         MapKnownIDs.add(present)
         var list = PlaceMigration.orphans(places: model.placeCtl.store.all, alignments: MapFrameCache.all(),
                                           mapID: al.mapID, present: present, known: known, agentID: model.agentID)
-        list.removeAll { migrateTried.contains($0.id) }
-        var seen = present.union(known).union(migrateTried).union(list.map { $0.id })
+        let dead = MapDeletedIDs.get()
+        list.removeAll { migrateTried.contains($0.id) || dead.contains($0.id) }
+        var seen = present.union(known).union(migrateTried).union(dead).union(list.map { $0.id })
         let records = model.controller.sim.snapshot()
         for (id, b) in currentBodies() where !seen.contains(id) {
             guard let rec = records.first(where: { $0.id == id }) else { continue }
@@ -420,6 +422,16 @@ final class MapLocalizer {
         publish()
     }
 
+    /// 10.5 (API §5.9.9): ids the map server deleted (tombstoned) — by this phone in server mode or by any other
+    /// client — leave the local sim / saved place too, and are never uploaded again.
+    func dropDeleted(_ ids: [String]) {
+        guard !ids.isEmpty else { return }
+        MapDeletedIDs.add(Set(ids))
+        var n = 0
+        for id in ids where model.controller.sim.removeBody(uid: id) { n += 1 }
+        if n > 0 { model.log.event("map_entities_dropped", ["bodies": .int(n)]) }
+    }
+
     /// Spawn every map entity at its pose in this ARKit session: one named anchor each ("sim.<id>", yaw = the body's
     /// home heading frame), then SimController.restore (records keep their anchor-relative home / pace loop).
     private func restore(_ list: [MapEntity], alignment al: MapAlignment) {
@@ -469,7 +481,8 @@ final class MapLocalizer {
     func localEntities(ids: Set<String>) -> (mapID: String, list: [MapEntity])? {
         guard let al = alignment else { return nil }
         let bodies = currentBodies()
-        let list = model.controller.sim.snapshot().filter { ids.contains($0.id) }.map { r -> MapEntity in
+        let dead = MapDeletedIDs.get()
+        let list = model.controller.sim.snapshot().filter { ids.contains($0.id) && !dead.contains($0.id) }.map { r -> MapEntity in
             let b = bodies[r.id] ?? (position: r.anchor, yaw: 0.0)
             return MapEntity.from(r, pose: al.mapPose(arkit: b.position, groundYaw: b.yaw), mapVersion: al.version,
                                   agentID: model.agentID, placeID: model.placeCtl.activeID)
@@ -479,7 +492,10 @@ final class MapLocalizer {
 
     /// Sim changed (spawn / move / delete / new order): write the map copy a few seconds later.
     func entitiesChanged() {
-        guard alignment != nil, restoredFromMap else { return }
+        // 10.5: while the shared server sim is in charge it owns the map entities; this phone's local copy is hidden
+        // and frozen, and a bulk save of it would undo server-side deletes / moves (owner 10.4.212: the deleted
+        // robot came back 6 s later via this PUT).
+        guard alignment != nil, restoredFromMap, !model.controller.sim.remoteAuthority else { return }
         syncWork?.cancel()
         let w = DispatchWorkItem { [weak self] in self?.push(reason: "changed") }
         syncWork = w
@@ -487,8 +503,9 @@ final class MapLocalizer {
     }
 
     private func push(reason: String) {
-        guard let al = alignment, !syncing else { return }
-        let records = model.controller.sim.snapshot()
+        guard let al = alignment, !syncing, !model.controller.sim.remoteAuthority else { return }
+        let dead = MapDeletedIDs.get()
+        let records = model.controller.sim.snapshot().filter { !dead.contains($0.id) }
         let bodies = currentBodies()
         let place = model.placeCtl.activeID
         let list = records.map { r -> MapEntity in
@@ -647,6 +664,28 @@ enum LastFixStore {
 
 /// 10.3: entity ids this phone has seen in the house map (or migrated into it): a body deleted from the map is never
 /// resurrected from an old place file. Documents/places/map_known.json.
+/// 10.5: ids the map server tombstoned (API §5.9.9), persisted: never re-uploaded by a migration, bulk save or
+/// hand-off import, whatever a saved place still holds.
+enum MapDeletedIDs {
+    private static var url: URL? { PlaceStore.directory?.appendingPathComponent("map_deleted.json") }
+    private static var memo: Set<String>?
+
+    static func get() -> Set<String> {
+        if let m = memo { return m }
+        let m = url.flatMap { try? Data(contentsOf: $0) }.flatMap { try? JSONDecoder().decode(Set<String>.self, from: $0) } ?? []
+        memo = m
+        return m
+    }
+
+    static func add(_ ids: Set<String>) {
+        let cur = get()
+        guard !ids.isSubset(of: cur) else { return }
+        let m = cur.union(ids)
+        memo = m
+        if let u = url, let d = try? JSONEncoder().encode(m) { try? d.write(to: u, options: .atomic) }
+    }
+}
+
 enum MapKnownIDs {
     private static var url: URL? { PlaceStore.directory?.appendingPathComponent("map_known.json") }
     private static var memo: Set<String>?

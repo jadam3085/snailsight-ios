@@ -73,10 +73,21 @@ public struct SimEntitySnap: Equatable {
     public var path: [[Double]]?
     public var cat: String?                       // robot | drone | animal | object (entity docs)
     public var dims: [Double]?                    // L, W, H metres (entity docs)
+    // protocol snailsight-sim/2 (API §5.9.10): ONE master world; every client draws the same clip at the same phase
+    public var scale: Double?                     // body sim scale (catalog size × scale)
+    public var behaviour: String?                 // the order (entity docs)
+    public var clip: String?                      // idle | walk | run | eat · drive | idle · fly | landed · rest | move
+    public var clipT0: Double?                    // server time the clip started
+    public var clipRate: Double?                  // playback rate (1.0)
+    public var action: String?                    // flee | graze | walk | run | idle · goto | patrol | teleop | …
+    public var t: Double?                         // server time of this state
 }
 
 extension SimEntitySnap: Decodable {
-    enum K: String, CodingKey { case id, kind, pose, vel, state, owner, name, goal, path, cat, dims, tMono = "t_mono", agentType = "agent_type" }
+    enum K: String, CodingKey {
+        case id, kind, pose, vel, state, owner, name, goal, path, cat, dims, scale, behaviour, clip, action, t
+        case tMono = "t_mono", agentType = "agent_type", clipT0 = "clip_t0", clipRate = "clip_rate"
+    }
     public init(from d: Decoder) throws {
         let c = try d.container(keyedBy: K.self)
         if let s = try? c.decode(String.self, forKey: .id) { id = s } else { id = String(try c.decode(Int.self, forKey: .id)) }
@@ -93,7 +104,17 @@ extension SimEntitySnap: Decodable {
         path = opt([[Double]].self, .path)
         cat = opt(String.self, .cat)
         dims = opt([Double].self, .dims)
+        scale = opt(Double.self, .scale)
+        behaviour = opt(String.self, .behaviour)
+        clip = opt(String.self, .clip)
+        clipT0 = opt(Double.self, .clipT0)
+        clipRate = opt(Double.self, .clipRate)
+        action = opt(String.self, .action)
+        t = opt(Double.self, .t)
     }
+
+    /// The clip to draw: the server's shared clip (protocol 2), else its older `state` hint.
+    public var serverClip: String? { clip ?? state }
 
     /// Keep what only the entity docs carry (name, cat, dims) when a 10 Hz snapshot (dynamic state only) arrives.
     public func merged(withStatic d: SimEntitySnap?) -> SimEntitySnap {
@@ -103,6 +124,8 @@ extension SimEntitySnap: Decodable {
         if s.cat == nil { s.cat = d.cat }
         if s.dims == nil { s.dims = d.dims }
         if s.agentType == nil { s.agentType = d.agentType }
+        if s.scale == nil { s.scale = d.scale }
+        if s.behaviour == nil { s.behaviour = d.behaviour }
         return s
     }
 
@@ -316,6 +339,9 @@ public enum SimServerAPI {
         case goToLabel(String)
         case patrol([[Double]])
         case stop
+        case place(x: Double, y: Double, z: Double?)         // move (drag / Move): the server puts it there
+        case kick(fromX: Double, fromY: Double)              // animals: bolt away from this map point
+        case behaviour(String)                               // an order without params (roam, graze, hold, wander)
     }
 
     static func json(_ o: [String: Any]) -> Data { (try? JSONSerialization.data(withJSONObject: o, options: [.sortedKeys])) ?? Data() }
@@ -338,6 +364,12 @@ public enum SimServerAPI {
             return json(["patrol": pts.map { [r($0[0]), r($0[1])] }, "loop": true, "owner": agentID])
         case .stop:
             return json(["v": 0, "w": 0, "ttl": TeleopSender.ttl, "stop": true, "owner": agentID])
+        case .place(let x, let y, let z):
+            return json(["place": z.map { [r(x), r(y), r($0)] } ?? [r(x), r(y)], "owner": agentID])
+        case .kick(let x, let y):
+            return json(["kick": [r(x), r(y)], "owner": agentID])
+        case .behaviour(let b):
+            return json(["behaviour": b, "params": [String: Any](), "owner": agentID])
         }
     }
 
@@ -371,4 +403,74 @@ public enum SemanticGoal {
         if n < 1e-6 { dx = 1; dy = 0 } else { dx /= n; dy /= n }
         return [c[0] + dx * (half + clearance), c[1] + dy * (half + clearance)]
     }
+}
+
+
+// MARK: - protocol snailsight-sim/2: one master world, shared clips (API §5.9.10)
+
+/// Server clock estimate: offset = server − local. Each snapshot gives `t − receivedAt` (true offset minus the
+/// delivery delay); the largest recent sample is the least delayed, so keep the max over a window and let it decay
+/// slowly (a server clock step backwards is followed within `window` s).
+public struct SimServerClock: Equatable {
+    public private(set) var offset: Double?
+    private var samples: [(at: Double, off: Double)] = []
+    public static let window = 5.0
+    public init() {}
+
+    public static func == (a: SimServerClock, b: SimServerClock) -> Bool { a.offset == b.offset }
+
+    public mutating func observe(serverTime t: Double, receivedAt local: Double) {
+        samples.append((local, t - local))
+        samples.removeAll { local - $0.at > Self.window }
+        offset = samples.map(\.off).max()
+    }
+
+    /// Server time now (nil until the first snapshot).
+    public func serverNow(local: Double) -> Double? { offset.map { local + $0 } }
+}
+
+/// Which clip file to show for the server's clip, and where in it (the same phase on every client).
+public enum SimSharedClip {
+    /// Server clip name → the app's clip key among those loaded (eat / idle / walk / run / static), with the local
+    /// sim's fallbacks (SimClips.candidates).
+    public static func key(_ serverClip: String?, available: Set<String>) -> String? {
+        let gait: AnimalGait
+        switch serverClip ?? "idle" {
+        case "eat", "graze": gait = .graze
+        case "walk", "move", "drive": gait = .walk
+        case "run", "flee": gait = .run
+        default: gait = .still
+        }
+        return SimClips.pick(gait, available: available) ?? available.sorted().first
+    }
+
+    /// Seconds into the clip: ((serverNow − clipT0) × rate) mod duration; 0 when unknown.
+    public static func time(clipT0: Double?, rate: Double?, serverNow: Double?, duration: Double) -> Double {
+        guard let t0 = clipT0, let now = serverNow, duration > 1e-6 else { return 0 }
+        let x = (now - t0) * (rate ?? 1)
+        let m = x.truncatingRemainder(dividingBy: duration)
+        return m < 0 ? m + duration : m
+    }
+}
+
+/// What a server body is drawn as (the local sim's own models; a box only for an unknown kind).
+public enum SimServerVisual: Equatable {
+    case animal(key: String, scale: Double)
+    case object(key: String, scale: Double)
+    case robot(scale: Double)
+    case drone
+    case box
+
+    /// `animalKeys` / `objectKeys`: the bundled catalog's keys.
+    public static func of(_ s: SimEntitySnap, animalKeys: Set<String>, objectKeys: Set<String>) -> SimServerVisual {
+        let sc = min(2.0, max(0.1, s.scale ?? SimServerVisual.defaultScale(s)))
+        if s.isDrone { return .drone }
+        if s.isRover { return .robot(scale: sc) }
+        if animalKeys.contains(s.kind) { return .animal(key: s.kind, scale: sc) }
+        if objectKeys.contains(s.kind) { return .object(key: s.kind, scale: sc) }
+        return .box
+    }
+
+    /// An older server without `scale`: 1.0 (what it simulated with).
+    static func defaultScale(_ s: SimEntitySnap) -> Double { 1.0 }
 }

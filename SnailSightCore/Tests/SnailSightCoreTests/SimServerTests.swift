@@ -169,4 +169,70 @@ final class SimServerTests: XCTestCase {
         XCTAssertNil(SemanticGoal.pick(bad.objects, query: "lamp", from: [0, 0]))      // malformed: never indexed
         XCTAssertEqual(ARBoxItem(id: "a", label: "a", center: [0, 0, 0], size: [1, 1, 1], yaw: 0, movable: true, confidence: 1).id, "a")
     }
+
+    // MARK: protocol snailsight-sim/2 (one master world, API §5.9.10)
+
+    func testSharedClipFieldsDecodeAndMerge() throws {
+        let j = #"{"id":"F1","kind":"fox","pose":{"x":1,"y":2,"z":0,"theta":0.5,"yaw":0.5},"vel":{"vx":0.2,"vy":0,"vz":0,"w":0},"state":"walk","clip":"walk","clip_t0":100.0,"clip_rate":1.0,"action":"walk","scale":0.5,"t":101.25,"seq":2}"#
+        let s = try snap(j)
+        XCTAssertEqual(s.clip, "walk"); XCTAssertEqual(s.clipT0, 100.0); XCTAssertEqual(s.clipRate, 1.0)
+        XCTAssertEqual(s.action, "walk"); XCTAssertEqual(s.scale, 0.5); XCTAssertEqual(s.t, 101.25)
+        XCTAssertEqual(s.serverClip, "walk")
+        let old = try snap(#"{"id":"F1","kind":"fox","pose":{"x":0,"y":0},"state":"eat"}"#)
+        XCTAssertEqual(old.serverClip, "eat"); XCTAssertNil(old.scale)
+        let doc = try snap(#"{"id":"F1","kind":"fox","cat":"animal","pose":{"x":0,"y":0},"scale":0.5,"behaviour":"roam"}"#)
+        let m = old.merged(withStatic: doc)
+        XCTAssertEqual(m.scale, 0.5); XCTAssertEqual(m.behaviour, "roam")
+    }
+
+    func testSharedClipKeyAndPhaseMatchAcrossClients() {
+        let have: Set<String> = ["idle", "walk", "run", "eat"]
+        XCTAssertEqual(SimSharedClip.key("walk", available: have), "walk")
+        XCTAssertEqual(SimSharedClip.key("eat", available: have), "eat")
+        XCTAssertEqual(SimSharedClip.key("run", available: ["idle", "walk"]), "walk")     // local fallbacks
+        XCTAssertEqual(SimSharedClip.key(nil, available: have), "idle")
+        XCTAssertEqual(SimSharedClip.key("eat", available: ["static"]), "static")
+        // two clients with different clock offsets, same server time -> same clip time
+        var a = SimServerClock(), b = SimServerClock()
+        a.observe(serverTime: 1000.0, receivedAt: 10.05)            // phone: 50 ms late
+        a.observe(serverTime: 1000.1, receivedAt: 10.12)            // 20 ms late: the better sample wins
+        b.observe(serverTime: 1000.1, receivedAt: 500.12)           // another device, other clock
+        let ta = SimSharedClip.time(clipT0: 998.0, rate: 1, serverNow: a.serverNow(local: 11.0), duration: 1.2)
+        let tb = SimSharedClip.time(clipT0: 998.0, rate: 1, serverNow: b.serverNow(local: 501.0), duration: 1.2)
+        XCTAssertEqual(ta, tb, accuracy: 1e-9)
+        XCTAssertEqual(ta, (1000.98 - 998.0).truncatingRemainder(dividingBy: 1.2), accuracy: 1e-6)
+        XCTAssertEqual(SimSharedClip.time(clipT0: nil, rate: 1, serverNow: 5, duration: 1), 0)
+        XCTAssertEqual(SimSharedClip.time(clipT0: 10, rate: 1, serverNow: 9.5, duration: 2), 1.5, accuracy: 1e-9)
+    }
+
+    func testServerVisualsUseModelsNotBoxes() throws {
+        let animals: Set<String> = ["fox", "deer", "sheep"], objects: Set<String> = ["crate"]
+        XCTAssertEqual(SimServerVisual.of(try snap(#"{"id":"a","kind":"deer","cat":"animal","pose":{"x":0,"y":0},"scale":0.5}"#),
+                                          animalKeys: animals, objectKeys: objects), .animal(key: "deer", scale: 0.5))
+        XCTAssertEqual(SimServerVisual.of(try snap(#"{"id":"r","kind":"robot","cat":"robot","pose":{"x":0,"y":0},"scale":0.5}"#),
+                                          animalKeys: animals, objectKeys: objects), .robot(scale: 0.5))
+        XCTAssertEqual(SimServerVisual.of(try snap(#"{"id":"c","kind":"crate","cat":"object","pose":{"x":0,"y":0},"scale":3}"#),
+                                          animalKeys: animals, objectKeys: objects), .object(key: "crate", scale: 2))
+        XCTAssertEqual(SimServerVisual.of(try snap(#"{"id":"d","kind":"drone","cat":"drone","pose":{"x":0,"y":0}}"#),
+                                          animalKeys: animals, objectKeys: objects), .drone)
+        XCTAssertEqual(SimServerVisual.of(try snap(#"{"id":"u","kind":"unicorn","pose":{"x":0,"y":0}}"#),
+                                          animalKeys: animals, objectKeys: objects), .box)
+    }
+
+    func testMoveKickBehaviourBodies() throws {
+        func o(_ d: Data) throws -> [String: Any] { try JSONSerialization.jsonObject(with: d) as! [String: Any] }
+        let p = try o(SimServerAPI.body(.place(x: 1.23456, y: 2, z: 0.5), agentID: "phone-1"))
+        XCTAssertEqual(p["place"] as? [Double], [1.235, 2, 0.5]); XCTAssertEqual(p["owner"] as? String, "phone-1")
+        let k = try o(SimServerAPI.body(.kick(fromX: 0.5, fromY: -1), agentID: "phone-1"))
+        XCTAssertEqual(k["kick"] as? [Double], [0.5, -1])
+        let b = try o(SimServerAPI.body(.behaviour("roam"), agentID: "phone-1"))
+        XCTAssertEqual(b["behaviour"] as? String, "roam")
+    }
+
+    func testEntitiesDocCarriesTombstones() throws {
+        let d = try JSONDecoder().decode(MapEntitiesDoc.self, from: Data(#"{"map_id":"site","revision":3,"map_version":13,"entities":[],"deleted":["BOB"]}"#.utf8))
+        XCTAssertEqual(d.deleted, ["BOB"])
+        let old = try JSONDecoder().decode(MapEntitiesDoc.self, from: Data(#"{"map_id":"site","revision":3,"entities":[]}"#.utf8))
+        XCTAssertNil(old.deleted)
+    }
 }

@@ -117,7 +117,7 @@ final class SimController: NSObject, UIGestureRecognizerDelegate {
     private let root = AnchorEntity(world: matrix_identity_float4x4)
     private let query: SceneQuery
     let catalog = SimCatalogStore.shared
-    private let library = SimModelLibrary()
+    let library = SimModelLibrary()                     // 10.5: shared with the server sim's drawing (ServerSimClient)
     private var updateSub: Cancellable?
     private var uiSubs: [AnyCancellable] = []
     private(set) var robot: SimRobot?
@@ -1929,6 +1929,16 @@ final class SimController: NSObject, UIGestureRecognizerDelegate {
         }
     }
 
+    /// 10.5: a body deleted on the shared server sim (by this phone or any other client): the local copy goes too, so
+    /// no bulk save / hand-off import / saved place brings it back (owner 10.4.212: the robot reappeared). true = found.
+    @discardableResult
+    func removeBody(uid: String) -> Bool {
+        guard let id = persist.first(where: { $0.value.uid == uid })?.key else { return false }
+        delete(id)
+        model.log.event("sim_remove_local", ["uid": .string(uid), "id": .int(id)])
+        return true
+    }
+
     private func delete(_ id: Int) {
         if let p = persist.removeValue(forKey: id) { arView.session.remove(anchor: p.anchor) }
         if id == Self.robotID {
@@ -2044,6 +2054,10 @@ final class SimController: NSObject, UIGestureRecognizerDelegate {
     }
 
     func gestureRecognizerShouldBegin(_ g: UIGestureRecognizer) -> Bool {
+        if remoteAuthority {                            // 10.5: the shared server sim owns every body (drag / kick)
+            guard g === pan, let pg = g as? UIPanGestureRecognizer else { return false }
+            return model.serverSim.panShouldBegin(start: touchStart(pg), now: pg.location(in: arView), arView: arView)
+        }
         guard g === pan, let pg = g as? UIPanGestureRecognizer, enabled, !pausedForRecording, ui.pending == nil else {
             return false
         }
@@ -2054,6 +2068,7 @@ final class SimController: NSObject, UIGestureRecognizerDelegate {
     /// is tossed (lands on whatever it hits); a quick flick on it is a kick. The robot drags along the floor only
     /// (Move puts it on a big table). Objects: grab and throw as in 9.8.
     @objc private func handlePan(_ g: UIPanGestureRecognizer) {
+        if remoteAuthority { model.serverSim.handlePan(g, arView: arView); return }
         let pt = g.location(in: arView)
         let now = CACurrentMediaTime()
         switch g.state {

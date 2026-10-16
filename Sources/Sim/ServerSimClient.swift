@@ -14,6 +14,12 @@
 //   the drone should fly ahead: the S3 target demo, POST …/task drone_assist), Stop. Spawn rover / drone at the +.
 // Stream shapes as built by the sim lane (sim_api.py): hello {entities: docs}, snapshot {full, entities} (partial
 // snapshots leave sleeping objects out: only a full one removes absent bodies), entity {entity: doc}, event {kind}.
+// 10.5 (owner on 10.4.212 + "ONE master sim world", API §5.9.10 protocol snailsight-sim/2): bodies are drawn with the
+// local sim's bundled USDZ models (ServerSimBody) at the server's scale, playing the server's clip at the server's
+// phase (clip_t0 on the estimated server clock) — no local behaviour runs for them; boxes only for unknown kinds.
+// Every command goes to the server and the phone draws what the server then publishes: drag = place, flick = kick,
+// Go to / Stop / Roam, delete. A delete is authoritative (§5.9.9): the server tombstones the id and this phone drops
+// its hidden local copy, so neither the bulk save nor the hand-off import brings it back.
 import ARKit
 import RealityKit
 import SwiftUI
@@ -26,6 +32,7 @@ struct ServerSimSelection: Equatable {
     var detail: String
     var rover: Bool
     var drone: Bool
+    var animal = false
 }
 
 /// The shared sim's HUD state (its own ObservableObject: no AppModel churn at 10 Hz).
@@ -44,10 +51,11 @@ final class ServerSimClient {
     let ui = ServerSimUI()
     private var authority = SimAuthority()
     private var tracks: [String: RemoteTrack] = [:]
-    private var entities: [String: Entity] = [:]
-    private var tags: [String: Entity] = [:]
-    private var kinds: [String: String] = [:]
-    private var statics: [String: SimEntitySnap] = [:]      // entity docs: name, cat, dims
+    private var bodies: [String: ServerSimBody] = [:]
+    private var statics: [String: SimEntitySnap] = [:]      // entity docs: name, cat, dims, scale
+    private var clock = SimServerClock()
+    private var drag: (id: String, start: TimeInterval, point: [Double]?)?
+    private var held: [String: [Double]] = [:]              // dropped by a drag: drawn there until the server agrees
     private var lastMessageAt: Double?
     private var teleop = TeleopSender()
     private var stick = V2.zero
@@ -87,7 +95,10 @@ final class ServerSimClient {
         model.simOn && model.sharedSim && model.serverFeatures.serverSim(forced: model.forceServerSim) && !model.recording
     }
     var isActive: Bool { authority.mode == .server }
-    var tagEntities: [Entity] { isActive ? Array(tags.values) : [] }
+    var tagEntities: [Entity] {
+        guard isActive, let id = ui.selection?.id, let b = bodies[id] else { return [] }
+        return [b.tag]
+    }
 
     /// The selected rover's position in the map (Robot path starts there).
     var selectedRoverMap: [Double]? {
@@ -131,7 +142,7 @@ final class ServerSimClient {
 
     /// Ids of the local (S1) bodies: robot + animals (their SimEntityRecord ids = the map entity ids).
     private var localIDs: Set<String> {
-        Set(model.controller.sim.snapshot().map(\.id)).subtracting(deletedHere)
+        Set(model.controller.sim.snapshot().map(\.id)).subtracting(deletedHere).subtracting(MapDeletedIDs.get())
     }
 
     /// nil = the server may be (stay) in charge. Before the switch it must hold every local body: the missing ones
@@ -174,11 +185,16 @@ final class ServerSimClient {
     func frame() {
         guard isActive else { return }
         let t = now
+        let serverNow = clock.serverNow(local: t)
         for (id, tr) in tracks {
-            guard let e = entities[id] else { continue }
-            let p = tr.pose(now: t)
-            e.position = SIMD3<Float>(Float(p.x), Float(p.y), Float(p.z))
-            e.orientation = simd_quatf(angle: Float(p.theta), axis: SIMD3<Float>(0, 0, 1))
+            guard let b = bodies[id] else { continue }
+            var p = tr.pose(now: t)
+            if let d = drag, d.id == id, let q = d.point { p.x = q[0]; p.y = q[1]; p.z = q[2] }
+            else if let q = held[id] {
+                if hypot(tr.snap.pose.x - q[0], tr.snap.pose.y - q[1]) < 0.3 { held[id] = nil }
+                else { p.x = q[0]; p.y = q[1]; p.z = q[2] }
+            }
+            b.render(pose: p, snap: tr.snap, serverNow: serverNow, now: t)
         }
         if let s = ui.selection, s.rover {
             let c = shaper.command(stick, profile: RobotProfile.robosnailbob)
@@ -280,15 +296,13 @@ final class ServerSimClient {
             apply(list, full: full)
         case .entity(let doc):
             statics[doc.id] = doc
-            if entities[doc.id] != nil, let tr = tracks[doc.id] {                    // re-draw with the new description
-                entities[doc.id]?.removeFromParent()
-                let (e, tag) = makeEntity(tr.snap.merged(withStatic: doc))
-                layer.simNode.addChild(e)
-                entities[doc.id] = e
-                tags[doc.id] = tag
+            if let b = bodies[doc.id], let tr = tracks[doc.id] {                     // re-draw if it now looks different
+                let s = tr.snap.merged(withStatic: doc)
+                if visual(s) != b.visual { redraw(s) }
             }
         case .event(let kind, let text, let id):
             events += 1
+            if kind == "delete", let id, !id.isEmpty { forgetLocally(id) }       // any client's delete: for good
             model.log.event("sim_server_event", ["kind": .string(kind), "id": .string(id ?? ""), "text": .string(text ?? "")])
             if isActive, let text, !text.isEmpty { model.flash(text, seconds: 2) }
             else if isActive, kind == "arrive" || kind == "arrived" { model.flash("\(title(id ?? "")) arrived", seconds: 1.5) }
@@ -307,30 +321,51 @@ final class ServerSimClient {
     private func apply(_ raw: [SimEntitySnap], full: Bool) {
         let t = now
         let list = raw.map { $0.merged(withStatic: statics[$0.id]) }
+        if let st = list.lazy.compactMap(\.t).first { clock.observe(serverTime: st, receivedAt: t) }
         let ids = Set(list.map(\.id))
-        for id in Array(tracks.keys) where full && !ids.contains(id) {
-            tracks[id] = nil
-            entities[id]?.removeFromParent()
-            entities[id] = nil
-            tags[id] = nil
-            kinds[id] = nil
-            statics[id] = nil
-            if ui.selection?.id == id { ui.selection = nil }
-        }
+        for id in Array(tracks.keys) where full && !ids.contains(id) { drop(id) }
         for s in list {
             if var tr = tracks[s.id] { tr.update(s, now: t); tracks[s.id] = tr } else { tracks[s.id] = RemoteTrack(s, now: t) }
-            if entities[s.id] == nil || kinds[s.id] != s.kind {
-                entities[s.id]?.removeFromParent()
-                let (e, tag) = makeEntity(s)
-                layer.simNode.addChild(e)
-                entities[s.id] = e
-                tags[s.id] = tag
-                kinds[s.id] = s.kind
-            }
+            if bodies[s.id]?.visual != visual(s) { redraw(s) }
         }
         if let sel = ui.selection, let tr = tracks[sel.id] {
             let d = selection(tr.snap)
             if d != sel { ui.selection = d }
+        }
+    }
+
+    private func drop(_ id: String) {
+        tracks[id] = nil
+        bodies[id]?.remove()
+        bodies[id] = nil
+        statics[id] = nil
+        held[id] = nil
+        if ui.selection?.id == id { ui.selection = nil }
+    }
+
+    /// A body deleted on the server (by anyone): gone here too, and from the hidden local sim + saved place, and never
+    /// uploaded again (MapDeletedIDs; the server tombstones it as well).
+    private func forgetLocally(_ id: String) {
+        deletedHere.insert(id)
+        MapDeletedIDs.add([id])
+        model.controller.sim.removeBody(uid: id)
+        drop(id)
+    }
+
+    private func visual(_ s: SimEntitySnap) -> SimServerVisual {
+        let cat = model.controller.sim.catalog
+        return SimServerVisual.of(s, animalKeys: Set(cat.items.filter(\.isAnimal).map(\.key)),
+                                  objectKeys: Set(cat.items.filter { !$0.isAnimal }.map(\.key)))
+    }
+
+    private func redraw(_ s: SimEntitySnap) {
+        bodies[s.id]?.remove()
+        let b = ServerSimBody(id: s.id, visual: visual(s), snap: s, library: model.controller.sim.library,
+                              catalog: model.controller.sim.catalog, label: layer.makeLabel(title(s.id), size: 0.03))
+        layer.simNode.addChild(b.root)
+        bodies[s.id] = b
+        if let tr = tracks[s.id] {
+            b.render(pose: tr.pose(now: now), snap: tr.snap, serverNow: clock.serverNow(local: now), now: now)
         }
     }
 
@@ -340,54 +375,15 @@ final class ServerSimClient {
     }
 
     private func selection(_ s: SimEntitySnap) -> ServerSimSelection {
-        var d = s.state ?? "idle"
+        var d = s.action ?? s.state ?? "idle"
+        if let b = s.behaviour, b != d, !["teleop", "idle"].contains(b) { d += " · \(b)" }
         if let o = s.owner, o != model.agentID, !o.isEmpty { d += " · \(o)" }
         if s.isDrone { d += String(format: " · %.1f m up", s.pose.z - ((layer.cameraMap?[2] ?? 1.4) - 1.4)) }
-        return ServerSimSelection(id: s.id, title: title(s.id), detail: d, rover: s.isRover, drone: s.isDrone)
+        return ServerSimSelection(id: s.id, title: title(s.id), detail: d, rover: s.isRover, drone: s.isDrone,
+                                  animal: s.cat == "animal" || (!s.isRover && !s.isDrone && !s.isObject))
     }
 
-    // MARK: drawing (map frame, z up, heading +x)
-
-    private func makeEntity(_ s: SimEntitySnap) -> (Entity, Entity) {
-        let e = Entity()
-        let body: [(SIMD3<Float>, SIMD3<Float>, UIColor)]          // (size, offset, colour)
-        if s.isDrone {
-            let c = UIColor(red: 0.9, green: 0.9, blue: 0.95, alpha: 1)
-            body = [(SIMD3(0.18, 0.18, 0.06), SIMD3(0, 0, 0), c),
-                    (SIMD3(0.5, 0.03, 0.02), SIMD3(0, 0, 0.02), c),
-                    (SIMD3(0.03, 0.5, 0.02), SIMD3(0, 0, 0.02), c),
-                    (SIMD3(0.06, 0.04, 0.03), SIMD3(0.1, 0, 0), UIColor.systemRed)]
-        } else if s.isRover {
-            let c = UIColor(red: 0.35, green: 0.45, blue: 0.6, alpha: 1)
-            body = [(SIMD3(0.82, 0.62, 0.25), SIMD3(0, 0, 0.195), c),           // Q6 Edge base, 0.07 m clearance
-                    (SIMD3(0.08, 0.08, 0.3), SIMD3(0.15, 0, 0.47), UIColor.darkGray),
-                    (SIMD3(0.06, 0.3, 0.05), SIMD3(0.4, 0, 0.25), UIColor.systemYellow)]
-        } else if s.isObject, let d = s.dims, d.count == 3 {
-            let size = SIMD3<Float>(Float(max(d[0], 0.05)), Float(max(d[1], 0.05)), Float(max(d[2], 0.05)))
-            body = [(size, SIMD3<Float>(0, 0, size.z / 2), UIColor(red: 0.75, green: 0.7, blue: 0.6, alpha: 1))]
-        } else if let d = s.dims, d.count == 3 {
-            let c = UIColor(red: 0.6, green: 0.42, blue: 0.25, alpha: 1)
-            let L = Float(max(d[0], 0.1)), W = Float(max(d[1], 0.05)), H = Float(max(d[2], 0.1))
-            body = [(SIMD3<Float>(L * 0.75, W, H * 0.55), SIMD3<Float>(0, 0, H * 0.5), c),
-                    (SIMD3<Float>(L * 0.22, W * 0.7, H * 0.3), SIMD3<Float>(L * 0.4, 0, H * 0.85), c)]
-        } else {
-            let small = ["fox", "rabbit"].contains { s.kind.contains($0) }
-            let c = UIColor(red: 0.6, green: 0.42, blue: 0.25, alpha: 1)
-            body = small ? [(SIMD3(0.4, 0.15, 0.25), SIMD3(0, 0, 0.13), c)]
-                         : [(SIMD3(1.0, 0.3, 0.8), SIMD3(0, 0, 0.45), c), (SIMD3(0.2, 0.15, 0.25), SIMD3(0.55, 0, 0.95), c)]
-        }
-        for (size, off, colour) in body {
-            let m = ModelEntity(mesh: .generateBox(size: size, cornerRadius: min(size.x, size.y, size.z) * 0.2),
-                                materials: [SimpleMaterial(color: colour, roughness: 0.6, isMetallic: false)])
-            m.position = off
-            e.addChild(m)
-        }
-        let tag = layer.makeLabel(title(s.id), size: 0.03)
-        let top = Float(s.dims.flatMap { $0.count == 3 ? $0[2] : nil } ?? (s.isRover ? 0.6 : (s.isDrone ? 0.05 : 1.0)))
-        tag.position = SIMD3<Float>(0, 0, top + 0.15)
-        e.addChild(tag)
-        return (e, tag)
-    }
+    // MARK: picking (map frame, z up, heading +x)
 
     private var pickBoxes: [ARBoxItem] {
         tracks.values.map { tr in
@@ -424,14 +420,60 @@ final class ServerSimClient {
             }
             return true
         }
-        if let r = layer.mapRay(pt), let hit = ARMapContent.pick(origin: r.origin, direction: r.direction, boxes: pickBoxes),
-           let tr = tracks[hit.id] {
-            ui.selection = ui.selection?.id == hit.id ? nil : selection(tr.snap)
+        if let id = pickBody(pt), let tr = tracks[id] {
+            ui.selection = ui.selection?.id == id ? nil : selection(tr.snap)
             stick = .zero
         } else {
             ui.selection = nil
         }
         return true
+    }
+
+    private func pickBody(_ pt: CGPoint) -> String? {
+        guard let r = layer.mapRay(pt) else { return nil }
+        return ARMapContent.pick(origin: r.origin, direction: r.direction, boxes: pickBoxes)?.id
+    }
+
+    // MARK: drag = move, flick = kick (the local sim's gestures, sent to the server)
+
+    func panShouldBegin(start: CGPoint, now pt: CGPoint, arView: ARView) -> Bool {
+        guard isActive, ui.pending == nil else { return false }
+        return pickBody(start) != nil || pickBody(pt) != nil
+    }
+
+    func handlePan(_ g: UIPanGestureRecognizer, arView: ARView) {
+        let pt = g.location(in: arView)
+        switch g.state {
+        case .began:
+            let tr0 = g.translation(in: arView)
+            let start = CGPoint(x: pt.x - tr0.x, y: pt.y - tr0.y)
+            guard let id = pickBody(start) ?? pickBody(pt), let tr = tracks[id] else { drag = nil; return }
+            drag = (id, now, nil)
+            if ui.selection?.id != id { ui.selection = selection(tr.snap) }
+        case .changed:
+            guard var d = drag, let p = floorPoint(pt, arView: arView) else { return }
+            d.point = p
+            drag = d
+        case .ended, .cancelled, .failed:
+            guard let d = drag else { return }
+            drag = nil
+            guard g.state == .ended, let tr = tracks[d.id] else { return }
+            let tr2 = g.translation(in: arView), v = g.velocity(in: arView)
+            let short = (tr2.x * tr2.x + tr2.y * tr2.y).squareRoot() < 160
+            let fast = (v.x * v.x + v.y * v.y).squareRoot() > 600
+            if short && fast && now - d.start < 0.4 && (tr.snap.cat == "animal" || ui.selection?.animal == true) {
+                // a flick on an animal: it bolts away from where the phone is
+                let p = tr.pose(now: now)
+                let from = layer.cameraMap ?? [p.x - cos(p.theta), p.y - sin(p.theta), p.z]
+                send(.kick(fromX: from[0], fromY: from[1]), to: d.id)
+                model.log.event("sim_server_kick", ["id": .string(d.id)])
+            } else if let q = d.point {
+                held[d.id] = q
+                send(.place(x: q[0], y: q[1], z: q[2]), to: d.id) { [weak self] ok in if !ok { self?.held[d.id] = nil } }
+                model.log.event("sim_server_move", ["id": .string(d.id), "to": .doubles(q)])
+            }
+        default: break
+        }
     }
 
     private func floorPoint(_ pt: CGPoint, arView: ARView) -> [Double]? {
@@ -539,12 +581,19 @@ final class ServerSimClient {
 
     func despawnSelected() {
         guard let s = ui.selection else { return }
-        let link = model.link!, path = SimServerAPI.entityPath(map: mapID, id: s.id)
+        let link = model.link!
+        let path = SimServerAPI.entityPath(map: mapID, id: s.id)
+        let q = [URLQueryItem(name: "agent_id", value: model.agentID)]
         ui.selection = nil
-        deletedHere.insert(s.id)
+        forgetLocally(s.id)                          // gone here at once; the server tombstones it for everyone
         Task { [weak self] in
-            let r = try? await link.request("DELETE", path, timeout: 10)
-            await MainActor.run { self?.model.log.event("sim_server_despawn", ["id": .string(s.id), "status": .int(r?.1 ?? 0)]) }
+            let r = try? await link.request("DELETE", path, query: q, timeout: 10)
+            await MainActor.run {
+                guard let self else { return }
+                let st = r?.1 ?? 0
+                self.model.log.event("sim_server_despawn", ["id": .string(s.id), "status": .int(st)])
+                if !(200..<300).contains(st) { self.model.flash("Remove: the map server said \(st) (will not come back here)", seconds: 2.5) }
+            }
         }
     }
 
@@ -624,6 +673,11 @@ struct ServerSimBar: View {
                 Text(s.detail).font(.caption2).foregroundStyle(.secondary).lineLimit(1).minimumScaleFactor(0.75)
             }
             Spacer(minLength: 4)
+            if s.animal {
+                icon("mappin.and.ellipse", "Go to") { sim.startPending(.goTo) }
+                icon("arrow.triangle.2.circlepath", "Roam") { sim.command(.behaviour("roam")) }
+                icon("hand.raised.fill", "Stay") { sim.command(.stop) }
+            }
             if s.rover || s.drone {
                 icon("mappin.and.ellipse", "Go to") { sim.startPending(.goTo) }
                 icon("magnifyingglass", "Go to object") { label = ""; ui.showGoToLabel = true }
