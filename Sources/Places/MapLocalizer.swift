@@ -44,6 +44,7 @@ final class MapLocalizer {
     private var inFlight = false
     private var attempts = 0
     private var matches = 0
+    private var hint: String?               // 10.4: the server's search hint (geometry search, API §5.6c)
     private var refinements = 0
     private var restoredFromMap = false
     private var syncWork: DispatchWorkItem?
@@ -105,6 +106,7 @@ final class MapLocalizer {
         lockSeconds = nil
         attempts = 0
         matches = 0
+        hint = nil
         refinements = 0
         restoredFromMap = false
         source = ""
@@ -228,13 +230,18 @@ final class MapLocalizer {
     // MARK: answers
 
     private func handle(_ a: LocalizeAnswer, roundTripMs: Double, cameraPos: [Double]) {
-        if a.anyMatch { matches += 1 }
+        // 10.4: a geometry candidate (LiDAR vs the house mesh, waiting for a second agreeing one) is progress too:
+        // the room IS in the map, so never "NOT IN MAP" / the slow cadence while geometry is finding you
+        if a.anyMatch || a.geometryCandidate { matches += 1 }
+        hint = a.locked ? nil : a.hint?.text
         let f = a.frames.first
         model.log.event("maploc_try", ["n": .int(attempts), "locked": .bool(a.locked), "node": .int(f?.node ?? 0),
                                        "inliers": .int(f?.inliers ?? 0), "reason": .string(f?.reason ?? ""),
                                        "event": .string(f?.event ?? ""), "server_ms": .double(a.latencyMs ?? 0),
                                        "rtt_ms": .int(Int(roundTripMs)), "version": .int(a.mapVersion),
-                                       "method": .string(a.method ?? "")])
+                                       "method": .string(a.method ?? ""), "lock_source": .string(a.lockSource ?? ""),
+                                       "geo": .string(a.geometry?.last?.reason ?? a.geometry?.state ?? ""),
+                                       "hint": .string(a.hint?.code ?? "")])
         guard a.locked, let T = a.T_map_arkit else { return }
         if a.anyAccepted || source != "server" { lastFixAt = now }
         if let r = a.bestRmseCm { lastRmseCm = r }
@@ -528,6 +535,7 @@ final class MapLocalizer {
             streamStart = now
             attempts = 0
             matches = 0
+            hint = nil
             notFound = false
         }
         forceAttempt = true
@@ -556,7 +564,7 @@ final class MapLocalizer {
             mapID: alignment?.mapID ?? mapID, version: alignment?.version, method: alignment?.method, source: source,
             errCm: errorEstimate, searchSeconds: searchSeconds, attempts: attempts, matches: matches,
             lastFixAge: lastFixAt.map { now - $0 }, trackingCode: model.tracking.code,
-            notInMap: isNotInMap, savedPlace: model.placeCtl.note)
+            notInMap: isNotInMap, savedPlace: model.placeCtl.note, hint: hint)
         let p = LocPill.make(input)
         if model.locPill != p { model.locPill = p }
     }
@@ -573,7 +581,8 @@ final class MapLocalizer {
         } else if model.serverBase != nil {
             s.phase = .searching
             s.title = "FINDING YOU"
-            s.detail = MapLocText.searching(mapID: mapID, seconds: now - streamStart, attempts: attempts, matches: matches)
+            s.detail = MapLocText.searching(mapID: mapID, seconds: now - streamStart, attempts: attempts, matches: matches,
+                                            hint: hint)
         }
         if model.mapLoc != s { model.mapLoc = s }
         model.placeCtl.publish()

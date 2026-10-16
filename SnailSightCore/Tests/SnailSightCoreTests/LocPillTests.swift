@@ -6,10 +6,28 @@ final class LocPillTests: XCTestCase {
         let s = LocPill.make(LocPillInput(online: true, phase: .locked, mapID: "site", version: 10, method: "visual+mesh",
                                           source: "server", errCm: 1.6, lastFixAge: 4))
         XCTAssertEqual(s.tone, .good)
-        XCTAssertEqual(s.text, "LOCALIZED · whole house v10 · mesh · ±2 cm")
-        XCTAssertTrue(s.rows.contains("Method: visual + mesh (LiDAR-refined)"))
+        XCTAssertEqual(s.text, "LOCALIZED · whole house v10 · geometry+visual · ±2 cm")
+        XCTAssertTrue(s.rows.contains("Method: geometry + visual (LiDAR on the house mesh, photo match agrees)"))
         XCTAssertTrue(s.rows.contains("Last fix: 4 s ago"))
         XCTAssertTrue(s.rows.contains("Error estimate: ±2 cm"))
+    }
+
+    func testGeometryLockAndHint() {
+        // 10.4: a lock from the whole-map geometry search alone (night walk: no visual inliers)
+        let g = LocPill.make(LocPillInput(online: true, phase: .locked, version: 12, method: "geometry", source: "server",
+                                          errCm: 1.8))
+        XCTAssertEqual(g.text, "LOCALIZED · whole house v12 · geometry · ±2 cm")
+        XCTAssertTrue(g.rows.contains("Method: geometry (LiDAR on the house mesh, works in the dark)"))
+        XCTAssertEqual(LocPill.errorEstimate(spreadCm: 0.5, rmseCm: nil, method: "geometry", source: "server"), 2)
+        XCTAssertEqual(LocPill.errorEstimate(spreadCm: 0.5, rmseCm: nil, method: "both", source: "server"), 2)
+        XCTAssertEqual(LocMethod.label("mesh-global"), "geometry")
+        XCTAssertEqual(LocMethod.label("both"), "geometry+visual")
+        XCTAssertEqual(LocMethod.label(nil), "visual")
+        let f = LocPill.make(LocPillInput(online: true, phase: .searching, searchSeconds: 6, attempts: 5,
+                                          hint: "Turn to see a corner of the room"))
+        XCTAssertTrue(f.rows.contains("Tip: Turn to see a corner of the room"))
+        XCTAssertEqual(MapLocText.searching(mapID: "site", seconds: 6, attempts: 6, matches: 0, hint: "Turn to see a corner of the room"),
+                       "Finding you in the whole house map · 6 s · Turn to see a corner of the room")
     }
 
     func testLockedVisualAndCached() {

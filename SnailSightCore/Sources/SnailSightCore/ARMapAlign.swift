@@ -161,10 +161,11 @@ public struct ARMapStatus: Equatable {
             }
             var method: String?
             if case .server(let m) = lock { method = m }
-            let mesh = method?.contains("mesh") ?? false
+            let mesh = LocMethod.usesGeometry(method)
             var d = mesh ? "Aligned to the house mesh" : "Aligned to the house map"
             if ageS > 120 { d += String(format: " · last fix %.0f min ago", ageS / 60) }
-            return ARMapStatus(tone: .good, title: "1:1\(mesh ? " · mesh" : "") · whole house\(v)", detail: d, opacity: 1)
+            return ARMapStatus(tone: .good, title: "1:1\(mesh ? " · " + LocMethod.label(method) : "") · whole house\(v)",
+                               detail: d, opacity: 1)
         }
     }
 }

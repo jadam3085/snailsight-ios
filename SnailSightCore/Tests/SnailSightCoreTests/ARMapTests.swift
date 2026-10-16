@@ -98,7 +98,7 @@ final class ARMapTests: XCTestCase {
         s = ARMapStatus.make(online: true, lock: .none, version: nil, tracking: "normal", remainingCm: 0, searchingS: 4, matches: 2)
         XCTAssertEqual(s.title, "FINDING YOU"); XCTAssertTrue(s.detail.contains("2 matches")); XCTAssertEqual(s.opacity, 0)
         s = ARMapStatus.make(online: true, lock: .server(method: "visual+mesh"), version: 10, tracking: "normal", remainingCm: 0.5)
-        XCTAssertEqual(s.title, "1:1 · mesh · whole house v10"); XCTAssertEqual(s.opacity, 1); XCTAssertEqual(s.tone, .good)
+        XCTAssertEqual(s.title, "1:1 · geometry+visual · whole house v10"); XCTAssertEqual(s.opacity, 1); XCTAssertEqual(s.tone, .good)
         s = ARMapStatus.make(online: true, lock: .server(method: "visual"), version: 10, tracking: "normal", remainingCm: 12)
         XCTAssertEqual(s.title, "CORRECTING 12 cm")
         s = ARMapStatus.make(online: true, lock: .server(method: nil), version: 10, tracking: "relocalizing", remainingCm: 0)

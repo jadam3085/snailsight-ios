@@ -120,7 +120,27 @@ final class MapFrameTests: XCTestCase {
         let al = MapAlignment(mapID: a.mapID, version: a.mapVersion, T: a.T_map_arkit!, at: 0, method: a.shownMethod)
         XCTAssertTrue(al.meshAligned)
         XCTAssertEqual(MapLocText.locked(mapID: "site", version: 10, seconds: 1.8, method: al.method),
-                       "LOCALIZED · mesh · whole house v10 · 1.8 s")
+                       "LOCALIZED · geometry+visual · whole house v10 · 1.8 s")
+        // 10.4: lock_source (geometry | visual | both) wins; hint + geometry search state decode
+        let g = """
+        {"ok":true,"map_id":"site","map_version":12,"locked":false,"events":[],"method":"none","lock_method":null,
+         "lock_source":null,"hint":{"code":"degenerate","text":"Turn to see a corner of the room"},
+         "geometry":{"state":"searching","last":{"ok":true,"reason":"","ambiguity":0.55}},
+         "frames":[{"node":0,"inliers":0,"accepted":false,"reason":"no_match"}]}
+        """
+        let ga = try JSONDecoder().decode(LocalizeAnswer.self, from: Data(g.utf8))
+        XCTAssertEqual(ga.hint?.code, "degenerate")
+        XCTAssertTrue(ga.geometryCandidate)
+        XCTAssertNil(ga.shownMethod)
+        let gl = """
+        {"ok":true,"map_id":"site","map_version":12,"locked":true,"events":["locked"],"method":"mesh-global",
+         "lock_method":"mesh-global","lock_source":"geometry","frames":[{"node":0,"inliers":0}],
+         "T_map_arkit":[1,0,0,0,0,0,-1,0,0,1,0,0,0,0,0,1]}
+        """
+        let la = try JSONDecoder().decode(LocalizeAnswer.self, from: Data(gl.utf8))
+        XCTAssertEqual(la.shownMethod, "geometry")
+        XCTAssertEqual(MapLocText.locked(mapID: "site", version: 12, seconds: 6.2, method: la.shownMethod),
+                       "LOCALIZED · geometry · whole house v12 · 6.2 s")
         XCTAssertEqual(MapLocText.locked(mapID: "site", version: 10, seconds: nil, method: "visual"),
                        "LOCALIZED · whole house v10")
         // an alignment cached by an older app (no "method" key) still decodes

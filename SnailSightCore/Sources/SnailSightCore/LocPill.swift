@@ -22,7 +22,7 @@ public struct LocPillInput: Equatable {
     public var phase: LocPhase
     public var mapID: String
     public var version: Int?
-    public var method: String?          // lock method: visual | visual+mesh | mesh | nil (cached / older server)
+    public var method: String?          // lock source (10.4): geometry | visual | both, or an older method; nil = cached
     public var source: String           // "server" | "place_cache" | ""
     public var errCm: Double?           // LocPill.errorEstimate
     public var searchSeconds: Double
@@ -32,15 +32,16 @@ public struct LocPillInput: Equatable {
     public var trackingCode: String     // 10.3: ARKit TrackingStatus.code ("normal", "limited:excessiveMotion", …)
     public var notInMap: Bool           // LocPill.notInMap, or the server said 404 (other map)
     public var savedPlace: SavedPlaceNote?   // 10.3: a saved ARWorldMap tried / matched / active (secondary info)
+    public var hint: String?            // 10.4: the server's search hint ("Turn to see a corner of the room")
 
     public init(online: Bool, phase: LocPhase, mapID: String = "site", version: Int? = nil, method: String? = nil,
                 source: String = "", errCm: Double? = nil, searchSeconds: Double = 0, attempts: Int = 0,
                 matches: Int = 0, lastFixAge: Double? = nil, trackingCode: String = "normal", notInMap: Bool = false,
-                savedPlace: SavedPlaceNote? = nil) {
+                savedPlace: SavedPlaceNote? = nil, hint: String? = nil) {
         self.online = online; self.phase = phase; self.mapID = mapID; self.version = version; self.method = method
         self.source = source; self.errCm = errCm; self.searchSeconds = searchSeconds; self.attempts = attempts
         self.matches = matches; self.lastFixAge = lastFixAge; self.trackingCode = trackingCode; self.notInMap = notInMap
-        self.savedPlace = savedPlace
+        self.savedPlace = savedPlace; self.hint = hint
     }
 
     public var trackingOK: Bool { trackingCode == "normal" }
@@ -71,12 +72,12 @@ public enum LocPill {
         matches == 0 && attempts >= notInMapAttempts && searchSeconds >= notInMapSeconds
     }
 
-    /// "mesh" when the lock was checked against the house mesh (LiDAR ICP, API §5.6b), "visual" for a visual-only lock,
-    /// "saved place" for a cached alignment not yet confirmed by the server.
+    /// 10.4: "geometry" (the phone's LiDAR on the house mesh), "geometry+visual" (both agree / visual refined on the
+    /// mesh), "visual" (photo match only), "saved place" for a cached alignment not yet confirmed by the server.
     public static func methodLabel(method: String?, source: String) -> String {
         if source == "place_cache" { return "saved place" }
         if source == "carried" { return "re-anchored" }
-        return (method?.contains("mesh") ?? false) ? "mesh" : "visual"
+        return LocMethod.label(method)
     }
 
     /// ± error estimate (cm) shown on the pill: the larger of the lock's fix spread and the mesh ICP residual, never
@@ -87,7 +88,7 @@ public enum LocPill {
         let floor: Double
         if source == "place_cache" { floor = 5 }
         else if source == "carried" { floor = 8 }         // 10.3: carried over a session reset, until the server confirms
-        else if source == "server" { floor = (method?.contains("mesh") ?? false) ? 2 : 3 }
+        else if source == "server" { floor = LocMethod.usesGeometry(method) ? 2 : 3 }
         else { return nil }
         let measured = max(spreadCm ?? 0, rmseCm ?? 0)
         return max(floor, measured.isFinite ? measured : floor)
@@ -153,8 +154,9 @@ public enum LocPill {
                                            "This room may not be mapped yet: Map mesh can add it",
                                            "Still retrying slowly · Retry / Pick place below"] + placeRow)
             }
-            let rows = [MapLocText.searching(mapID: i.mapID, seconds: i.searchSeconds, attempts: i.attempts,
+            var rows = [MapLocText.searching(mapID: i.mapID, seconds: i.searchSeconds, attempts: i.attempts,
                                              matches: i.matches)]
+            if let h = i.hint, !h.isEmpty { rows.append("Tip: " + h) }
             return LocPillState(tone: .working, text: String(format: "FINDING YOU… %.0f s", max(0, i.searchSeconds)),
                                 rows: rows + placeRow)
         case .off:
@@ -167,7 +169,8 @@ public enum LocPill {
         switch methodLabel(method: method, source: source) {
         case "saved place": return "saved place (confirming with the map server)"
         case "re-anchored": return "re-anchored over an AR reset (confirming with the map server)"
-        case "mesh": return method == "mesh" ? "mesh (LiDAR on the house mesh)" : "visual + mesh (LiDAR-refined)"
+        case "geometry": return "geometry (LiDAR on the house mesh, works in the dark)"
+        case "geometry+visual": return "geometry + visual (LiDAR on the house mesh, photo match agrees)"
         default: return "visual (photo match)"
         }
     }

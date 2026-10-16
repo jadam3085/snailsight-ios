@@ -75,7 +75,8 @@ public struct MapAlignment: Codable, Equatable {
     public var at: Double                       // when it was locked / last refined (unix s)
     public var inliers: Int?
     public var spreadCm: Double?
-    public var method: String?                  // server: visual | visual+mesh | mesh (API §5.6b); nil = cached/older
+    public var method: String?                  // server: geometry | visual | both (10.4, API §5.6c), or the older
+                                                //   visual | visual+mesh | mesh (§5.6b); nil = cached/older
 
     public init(mapID: String, version: Int, T: Mat4, at: Double, inliers: Int? = nil, spreadCm: Double? = nil,
                 method: String? = nil) {
@@ -84,7 +85,7 @@ public struct MapAlignment: Codable, Equatable {
     }
 
     /// The lock was checked against the house mesh (the phone's LiDAR depth ICP-aligned to it, API §5.6b).
-    public var meshAligned: Bool { method?.contains("mesh") ?? false }
+    public var meshAligned: Bool { LocMethod.usesGeometry(method) }
 
     /// Heading of the map ← odom correction about the map's +z (rad). With X = Rx(+90°): T·X⁻¹ = correction.
     public var yaw: Double {
@@ -228,8 +229,25 @@ public struct LocalizeAnswer: Decodable {
     public var gate: Gate?
     public var frames: [Frame]
     public var versionChanged: Bool?
-    public var method: String?                  // this answer's newest accepted fix: visual | visual+mesh | mesh | none
+    public var method: String?                  // this answer's newest accepted fix: visual | visual+mesh | mesh | mesh-global | none
     public var lockMethod: String?              // the method of the fix that last set / refined the lock
+    public var lockSource: String?              // 10.4 (§5.6c): what the lock rests on: geometry | visual | both
+    public var hint: Hint?                      // 10.4: while searching, what the user can do ("Turn to see a corner")
+    public var geometry: Geometry?              // 10.4: the whole-map geometry search's state
+
+    public struct Hint: Decodable, Equatable {
+        public var code: String
+        public var text: String
+    }
+    public struct Geometry: Decodable {
+        public var state: String?               // off | waiting | searching | locked
+        public var last: Last?
+        public struct Last: Decodable {
+            public var ok: Bool?
+            public var reason: String?
+            public var ambiguity: Double?
+        }
+    }
 
     public struct Gate: Decodable {
         public var locked: Bool
@@ -261,11 +279,14 @@ public struct LocalizeAnswer: Decodable {
         case T_map_arkit
         case mapID = "map_id", mapVersion = "map_version", timeToLockS = "time_to_lock_s"
         case matchedSession = "matched_session", latencyMs = "latency_ms", versionChanged = "version_changed"
-        case method, lockMethod = "lock_method"
+        case method, lockMethod = "lock_method", lockSource = "lock_source", hint, geometry
     }
 
-    /// What the HUD names the lock by: the lock's method, else this answer's.
-    public var shownMethod: String? { lockMethod ?? ((method == "none") ? nil : method) }
+    /// What the HUD names the lock by: what it rests on (10.4), else the lock's method, else this answer's.
+    public var shownMethod: String? { lockSource ?? lockMethod ?? ((method == "none") ? nil : method) }
+    /// The geometry search found a candidate that passed its gates (waiting for a second agreeing one): progress, so
+    /// the app must not call the room "not in map".
+    public var geometryCandidate: Bool { geometry?.last?.ok == true }
 
     public var bestInliers: Int { frames.map(\.inliers).max() ?? 0 }
     /// A frame of this answer was accepted into the stream's gate (a fix, visual or mesh).
@@ -313,25 +334,51 @@ public enum MapRestorePlan: Equatable {
     }
 }
 
+/// 10.4: what a lock rests on. The server (API §5.6c) runs a whole-map GEOMETRY search (the phone's LiDAR against the
+/// house mesh, light-independent) beside visual photo matching and says `lock_source`: geometry | visual | both. Older
+/// servers / cached alignments carry a fix method instead (visual | visual+mesh | mesh | mesh-global).
+public enum LocMethod {
+    /// "geometry", "visual", "both" or nil (unknown).
+    public static func kind(_ m: String?) -> String? {
+        switch m {
+        case "geometry", "mesh", "mesh-global": return "geometry"
+        case "both", "visual+mesh": return "both"
+        case "visual": return "visual"
+        default: return nil
+        }
+    }
+    public static func usesGeometry(_ m: String?) -> Bool { let k = kind(m); return k == "geometry" || k == "both" }
+    /// Short label: "geometry", "geometry+visual", "visual".
+    public static func label(_ m: String?) -> String {
+        switch kind(m) {
+        case "geometry": return "geometry"
+        case "both": return "geometry+visual"
+        default: return "visual"
+        }
+    }
+}
+
 /// HUD wording.
 public enum MapLocText {
     public static func mapName(_ id: String) -> String { id == "site" ? "whole house" : id }
 
-    /// "LOCALIZED · whole house v7 · 1.8 s"; "LOCALIZED · mesh · whole house v10 · 1.8 s" when the lock was aligned to
-    /// the house mesh by the phone's LiDAR (method visual+mesh or mesh, API §5.6b)
+    /// "LOCALIZED · whole house v7 · 1.8 s"; "LOCALIZED · geometry · whole house v10 · 1.8 s" when the lock rests on
+    /// the phone's LiDAR against the house mesh (10.4: geometry / geometry+visual, API §5.6c)
     public static func locked(mapID: String, version: Int, seconds: Double?, method: String? = nil) -> String {
         var s = "LOCALIZED"
-        if method?.contains("mesh") ?? false { s += " · mesh" }
+        if LocMethod.usesGeometry(method) { s += " · " + LocMethod.label(method) }
         s += " · \(mapName(mapID)) v\(version)"
         if let t = seconds { s += String(format: " · %.1f s", t) }
         return s
     }
 
-    /// "Finding you in the whole house map · 4 s · 2 matches"
-    public static func searching(mapID: String, seconds: Double, attempts: Int, matches: Int) -> String {
+    /// "Finding you in the whole house map · 4 s · 2 matches"; 10.4: the server's hint (geometry search: "Turn to see a
+    /// corner of the room") replaces the generic advice
+    public static func searching(mapID: String, seconds: Double, attempts: Int, matches: Int, hint: String? = nil) -> String {
         var s = String(format: "Finding you in the %@ map · %.0f s", mapName(mapID), seconds)
         if matches > 0 { s += " · \(matches) match\(matches == 1 ? "" : "es")" }
-        else if attempts >= 5 { s += " · look at furniture / walls with detail" }
+        if let h = hint, !h.isEmpty { s += " · " + h }
+        else if matches == 0 && attempts >= 5 { s += " · look at furniture / walls with detail" }
         return s
     }
 }
