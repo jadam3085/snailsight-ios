@@ -347,6 +347,7 @@ private struct MoreMenu: View {
                                          set: { model.controller.sim.ui.scaleRef = $0 })) {
                         Label("1 m reference", systemImage: "ruler")
                     }
+                    Toggle(isOn: $model.simXRay) { Label("X-ray (see bodies through walls)", systemImage: "eye.circle") }
                     Button(role: .destructive) { model.controller.sim.clear() } label: {
                         Label("Clear sim", systemImage: "xmark.circle")
                     }

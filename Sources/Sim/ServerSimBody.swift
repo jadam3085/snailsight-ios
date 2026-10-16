@@ -17,6 +17,15 @@ final class ServerSimBody {
     let tag: Entity
     private lazy var rig = SimClipRig(body: body)            // the SAME model / clip player as the local SimAnimal
     private var robot: SimRobot?
+    // 10.8 X-ray (API §5.9.11): while hidden behind a wall / on another storey the body's own (animated) model draws
+    // with a see-through unlit material that ignores depth; a distance / storey badge floats above it.
+    private(set) var height = 0.5
+    private var originals: [ObjectIdentifier: [any Material]] = [:]
+    private(set) var ghosted = false
+    private var ghostedClip: String?
+    private var ghostedParts = 0
+    private(set) var badge: Entity?
+    private(set) var badgeText: String?
 
     /// `label`: the tag drawn above it (shown while selected). `height`: its drawn height (m) for the tag.
     init(id: String, visual: SimServerVisual, snap s: SimEntitySnap, library: SimModelLibrary, catalog: SimCatalog,
@@ -65,6 +74,75 @@ final class ServerSimBody {
         tag.position = SIMD3<Float>(0, 0, Float(height) + 0.12)
         tag.isEnabled = false
         root.addChild(tag)
+        self.height = height
+    }
+
+    // MARK: X-ray ghost + badge
+
+    /// The ghost look: unlit cyan, 45 % opaque, drawn on top of walls / floors (no depth test, no depth write).
+    static let ghostMaterial: UnlitMaterial = {
+        var m = UnlitMaterial(color: UIColor(red: 0.35, green: 0.92, blue: 1.0, alpha: 1))
+        m.blending = .transparent(opacity: 0.45)
+        m.readsDepth = false
+        m.writesDepth = false
+        return m
+    }()
+
+    /// Ghost on / off. Re-applied when the clip model changed (each clip is its own model under `body`).
+    func setGhost(_ on: Bool) {
+        let parts = Self.modelCount(root)
+        guard on != ghosted || (on && (rig.current != ghostedClip || parts != ghostedParts)) else { return }
+        ghosted = on
+        ghostedClip = rig.current
+        ghostedParts = parts
+        for c in root.children where c !== tag && c !== badge { apply(c, on) }
+    }
+
+    private func apply(_ e: Entity, _ on: Bool) {
+        if var mc = e.components[ModelComponent.self] {
+            let k = ObjectIdentifier(e)
+            if on {
+                if originals[k] == nil { originals[k] = mc.materials }
+                mc.materials = Array(repeating: Self.ghostMaterial, count: max(1, mc.materials.count))
+                e.components.set(mc)
+            } else if let m = originals.removeValue(forKey: k) {
+                mc.materials = m
+                e.components.set(mc)
+            }
+        }
+        for c in e.children { apply(c, on) }
+    }
+
+    private static func modelCount(_ e: Entity) -> Int {
+        (e.components[ModelComponent.self] != nil ? 1 : 0) + e.children.reduce(0) { $0 + modelCount($1) }
+    }
+
+    /// The badge ("4.5 m", "↑ L2 · 6 m"); nil removes it. `make` builds a label entity (MapARLayer.makeLabel).
+    func setBadge(_ text: String?, make: (String) -> Entity) {
+        guard text != badgeText else { return }
+        badgeText = text
+        badge?.removeFromParent()
+        badge = nil
+        guard let text else { return }
+        let b = make(text)
+        Self.drawOnTop(b)
+        b.position = SIMD3<Float>(0, 0, Float(height) + 0.3)
+        root.addChild(b)
+        badge = b
+    }
+
+    /// Every unlit material under `e` ignores depth (a label readable through walls).
+    static func drawOnTop(_ e: Entity) {
+        if var mc = e.components[ModelComponent.self] {
+            mc.materials = mc.materials.map { (m: any Material) -> any Material in
+                guard var u = m as? UnlitMaterial else { return m }
+                u.readsDepth = false
+                u.writesDepth = false
+                return u
+            }
+            e.components.set(mc)
+        }
+        for c in e.children { drawOnTop(c) }
     }
 
     /// Place + animate at local time `now` (server time `serverNow`): the server's clip, at the server's phase.

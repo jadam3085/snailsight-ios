@@ -51,6 +51,7 @@ struct SettingsView: View {
                     Toggle("Allow sim while recording", isOn: $model.simAllowWhileRecording)
                     Toggle("Shared sim on the map server", isOn: $model.sharedSim)
                     Toggle("Force shared sim (beta)", isOn: $model.forceServerSim)
+                    Toggle("X-ray: see sim bodies through walls", isOn: $model.simXRay)
                 } header: { Text("Sim (robot, animals, objects in AR)") } footer: {
                     Text("Sim scale shrinks every robot, animal and object together (looks, collisions, paths and speeds); a body can have its own size in its action bar. 100 % = real size. Sim quality Auto eases off shadows, mesh updates and sim rate as iOS reports heat, and pauses only when iOS says critical; Battery saver always runs light. A recording pauses and hides the sim unless allowed here.")
                 }

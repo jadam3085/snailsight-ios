@@ -311,6 +311,69 @@ final class MapARLayer {
         return (chunks, note)
     }
 
+    // MARK: 10.8 X-ray: the house mesh as a CPU ray index (map frame) - is a sim body behind a wall?
+
+    /// The newest house mesh as a ray index (nil until built; built only while Sim X-ray is on).
+    private(set) var occluder: TriangleIndex?
+    private var occluderScene: String?
+    private var occluderLoading = false
+
+    /// Build (in the background) the ray index of the shown scene's collision mesh, once per scene.
+    func ensureOccluder() {
+        guard let scene = sceneID, scene != occluderScene, !occluderLoading, let link = model.link else { return }
+        occluderLoading = true
+        let enc = scene.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? scene
+        Task { [weak self] in
+            let data = await Self.meshData(scene: scene, enc: enc, link: link)
+            let idx: TriangleIndex? = await Task.detached(priority: .utility) { () -> TriangleIndex? in
+                guard let d = data else { return nil }
+                let m = ObjReader.parse(d)
+                guard m.triangleCount > 0 else { return nil }
+                var pts = [SIMD3<Float>]()
+                pts.reserveCapacity(m.vertexCount)
+                var i = 0
+                while i + 2 < m.positions.count {
+                    pts.append(SIMD3<Float>(m.positions[i], m.positions[i + 1], m.positions[i + 2]))
+                    i += 3
+                }
+                return TriangleIndex(positions: pts, indices: m.indices)
+            }.value
+            await MainActor.run {
+                guard let self else { return }
+                self.occluderLoading = false
+                self.occluderScene = scene
+                self.occluder = idx
+                self.model.log.event("sim_xray_occluder", ["scene": .string(scene), "triangles": .int(idx?.triangleCount ?? -1)])
+            }
+        }
+    }
+
+    /// Is the straight line from the camera to this map point blocked by the house mesh (a wall, a floor)?
+    /// nil = no index yet. `margin`: ignore hits this close to the point (the body's own floor / furniture).
+    func blocked(from cam: [Double], to p: [Double], margin: Float = 0.3) -> Bool? {
+        guard let idx = occluder, cam.count >= 3, p.count >= 3 else { return nil }
+        let o = SIMD3<Float>(Float(cam[0]), Float(cam[1]), Float(cam[2]))
+        let d = SIMD3<Float>(Float(p[0]), Float(p[1]), Float(p[2])) - o
+        let dist = simd_length(d)
+        guard dist > margin + 0.1 else { return false }
+        return idx.raycast(origin: o, dir: d, maxT: dist - margin) != nil
+    }
+
+    /// The scene's collision.obj bytes (Caches/armap/ first, else downloaded and cached).
+    private static func meshData(scene: String, enc: String, link: ServerLink) async -> Data? {
+        let fm = FileManager.default
+        guard let dir = fm.urls(for: .cachesDirectory, in: .userDomainMask).first?.appendingPathComponent("armap", isDirectory: true)
+        else { return nil }
+        let file = dir.appendingPathComponent(scene.replacingOccurrences(of: "@", with: "-v") + "-collision.obj")
+        if let d = try? Data(contentsOf: file) { return d }
+        try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        guard let r = try? await link.request("GET", "/v1/scenes/\(enc)/files/collision.obj", timeout: 90), r.1 == 200 else {
+            return nil
+        }
+        try? r.0.write(to: file, options: .atomic)
+        return r.0
+    }
+
     /// 10.7: the first mesh goes up at once; a newer version replaces the one on screen at a still moment (≤ 10 s),
     /// so the house never changes under a walking owner.
     private var staged: (chunks: [MeshChunker.Chunk], scene: String, at: TimeInterval)?

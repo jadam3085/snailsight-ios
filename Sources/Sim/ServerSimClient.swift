@@ -20,6 +20,10 @@
 // Every command goes to the server and the phone draws what the server then publishes: drag = place, flick = kick,
 // Go to / Stop / Roam, delete. A delete is authoritative (§5.9.9): the server tombstones the id and this phone drops
 // its hidden local copy, so neither the bulk save nor the hand-off import brings it back.
+// 10.8 (API §5.9.11, server 0.4.7): the server plans over every storey (stairs from the mesh): the selected body's
+// planned route draws as a cyan ribbon; a refused command flashes the server's reason ("no path: …", "target on an
+// unmapped level"); the selection line shows the storey + planner status. More ▸ Sim ▸ X-ray: bodies behind walls /
+// on another storey draw as a see-through ghost (their own animated model, unlit, no depth test) with a badge.
 import ARKit
 import RealityKit
 import SwiftUI
@@ -102,9 +106,18 @@ final class ServerSimClient {
     }
     var isActive: Bool { authority.mode == .server }
     var tagEntities: [Entity] {
-        guard isActive, let id = ui.selection?.id, let b = bodies[id] else { return [] }
-        return [b.tag]
+        guard isActive else { return [] }
+        var out = bodies.values.compactMap(\.badge)                 // X-ray badges face the camera too
+        if let id = ui.selection?.id, let b = bodies[id] { out.append(b.tag) }
+        return out
     }
+    // 10.8 X-ray + path preview (API §5.9.11)
+    private var lastXRay: TimeInterval = 0
+    private var occluded: [String: Bool] = [:]
+    private var pathEntity: ModelEntity?
+    private var pathKey: String?
+    private var lastPathDraw: TimeInterval = 0
+    private var navFlashed: [String: String] = [:]               // body -> the problem status already flashed
 
     /// The selected rover's position in the map (Robot path starts there).
     var selectedRoverMap: [Double]? {
@@ -219,6 +232,14 @@ final class ServerSimClient {
             }
             b.render(pose: p, snap: tr.snap, serverNow: serverNow, now: t)
         }
+        if t - lastXRay >= 0.2 {                                 // 5 Hz: who is hidden, ghosts, badges
+            lastXRay = t
+            updateXRay(now: t)
+        }
+        if t - lastPathDraw >= 0.25 {
+            lastPathDraw = t
+            drawSelectedPath(now: t)
+        }
         if let s = ui.selection, s.rover {
             let c = shaper.command(stick, profile: RobotProfile.robosnailbob)
             if let cmd = teleop.next(v: c.v, w: c.omega, now: t) {
@@ -239,6 +260,7 @@ final class ServerSimClient {
             ui.droneAssistPending = false
             followers = [:]
             clearMarkers()
+            clearPath()
         }
         model.log.event("sim_authority", ["mode": .string(authority.mode.rawValue), "reason": .string(authority.reason),
                                           "bodies": .int(tracks.count)])
@@ -346,9 +368,11 @@ final class ServerSimClient {
             if p.cmd == "goto_label", let l = labelGoals.removeValue(forKey: p.id) {
                 if ok { model.flash("\(title(p.id)) → \(l)", seconds: 2) } else { goToLocally(label: l, id: p.id) }
             } else if !ok {
-                model.flash(status == 409 ? "Another device is driving it" : "The map server refused \(p.cmd) (\(status ?? 0))",
-                            seconds: 2)
-                if p.cmd == "follow" { followers[p.id] = nil }
+                // 10.8: the server says WHY (no path / unmapped level / no free floor …): show it
+                let why = status == 409 ? "Another device is driving it"
+                    : detail.map { "\(title(p.id)): \($0)" } ?? "The map server refused \(p.cmd) (\(status ?? 0))"
+                model.flash(why, seconds: detail == nil ? 2 : 4)
+                if p.cmd == "follow" { followers[p.id] = nil; refreshSelection() }
                 if p.cmd == "place" { held[p.id] = nil }
             }
         case .error(let s):
@@ -367,6 +391,9 @@ final class ServerSimClient {
         for s in list {
             if var tr = tracks[s.id] { tr.update(s, now: t); tracks[s.id] = tr } else { tracks[s.id] = RemoteTrack(s, now: t) }
             if bodies[s.id]?.visual != visual(s) { redraw(s) }
+            // 10.8: a follow the server ended (lost / no path / another order) is no longer "following you"
+            if followers[s.id] != nil, let b = s.behaviour, b != "follow" { followers[s.id] = nil }
+            noteNav(s)
         }
         if let sel = ui.selection, let tr = tracks[sel.id] {
             let d = selection(tr.snap)
@@ -374,7 +401,24 @@ final class ServerSimClient {
         }
     }
 
+    /// A planner problem (no path, stuck, lost) on a body following me or selected: say it once.
+    private func noteNav(_ s: SimEntitySnap) {
+        guard let n = s.nav else { navFlashed[s.id] = nil; return }
+        guard n.isProblem else { navFlashed[s.id] = nil; return }
+        guard isActive, navFlashed[s.id] != n.status, ui.selection?.id == s.id || followers[s.id] != nil,
+              n.reason != nil else { return }
+        navFlashed[s.id] = n.status
+        model.flash("\(title(s.id)): \(n.text)", seconds: 4)
+        model.log.event("sim_nav", ["id": .string(s.id), "status": .string(n.status), "reason": .string(n.reason ?? "")])
+    }
+
+    private func refreshSelection() {
+        if let sel = ui.selection, let tr = tracks[sel.id] { ui.selection = selection(tr.snap) }
+    }
+
     private func drop(_ id: String) {
+        occluded[id] = nil
+        navFlashed[id] = nil
         tracks[id] = nil
         bodies[id]?.remove()
         bodies[id] = nil
@@ -431,9 +475,101 @@ final class ServerSimClient {
         if let b = s.behaviour, b != d, !["teleop", "idle"].contains(b) { d += " · \(b)" }
         if let o = s.owner, o != model.agentID, !o.isEmpty { d += " · \(o)" }
         if s.isDrone { d += String(format: " · %.1f m up", s.pose.z - ((layer.cameraMap?[2] ?? 1.4) - 1.4)) }
-        if followers[s.id] != nil { d += " · following you" }
+        if let lv = s.level { d += " · L\(lv)" }
+        if let n = s.nav, !(n.status == "walking" && n.targetLevel == s.level) { d += " · \(n.text)" }
+        if followers[s.id] != nil && s.behaviour == "follow" && s.nav?.isProblem != true { d += " · following you" }
         return ServerSimSelection(id: s.id, title: title(s.id), detail: d, rover: s.isRover, drone: s.isDrone,
                                   animal: s.role == .animal, role: s.role)
+    }
+
+    // MARK: X-ray + path preview (10.8, API §5.9.11)
+
+    /// Every 0.2 s: which bodies are hidden (house mesh ray, or the live LiDAR mesh near by, or another storey) ->
+    /// ghost + badge while X-ray is on; everything normal when it is off.
+    private func updateXRay(now t: TimeInterval) {
+        let on = model.simXRay
+        guard let cam = layer.cameraMap else { return }
+        if on { layer.ensureOccluder() }
+        let ly = layer
+        for (id, b) in bodies {
+            guard let tr = tracks[id] else { continue }
+            let p = tr.pose(now: t)
+            let s = tr.snap
+            var hidden = false
+            if on {
+                let mid = [p.x, p.y, p.z + max(0.05, b.height * 0.5)]
+                let dist = hypot(hypot(mid[0] - cam[0], mid[1] - cam[1]), mid[2] - cam[2])
+                if let blocked = layer.blocked(from: cam, to: mid) {
+                    hidden = blocked
+                } else if dist < 12, let w = layer.toWorld(map: mid) {
+                    let arView = model.controller.arView
+                    let o = layer.camWorld, dir = w - o, len = simd_length(dir)    // fallback: the live LiDAR mesh
+                    hidden = len > 0.5 && !arView.scene.raycast(origin: o, direction: simd_normalize(dir),
+                                                                 length: len - 0.3, query: .any,
+                                                                 mask: .sceneUnderstanding, relativeTo: nil).isEmpty
+                }
+                occluded[id] = hidden
+                let ghost = SimXRay.ghost(enabled: true, occluded: hidden, bodyZ: p.z, cameraZ: cam[2])
+                b.setGhost(ghost)
+                b.setBadge(SimXRay.badge(enabled: true, occluded: hidden, bodyZ: p.z, bodyLevel: s.level,
+                                         cameraZ: cam[2], distance: dist)) { text in
+                    ly.makeLabel(text, size: 0.035)
+                }
+            } else {
+                b.setGhost(false)
+                b.setBadge(nil) { _ in Entity() }
+            }
+        }
+        if !on { occluded.removeAll() }
+    }
+
+    /// The selected body's planned route (server `path`, trimmed to what is ahead): a cyan ribbon on the floor and up
+    /// the stairs; drawn on top of walls while X-ray is on.
+    private func drawSelectedPath(now t: TimeInterval) {
+        guard isActive, let s = ui.selection, let tr = tracks[s.id], let path = tr.snap.path, path.count >= 2 else {
+            clearPath()
+            return
+        }
+        let p = tr.pose(now: t)
+        guard let ahead = SimPathPreview.remaining(path, from: [p.x, p.y, p.z]) else { clearPath(); return }
+        // rebuild only when it changed by a few cm (quantised key) or the X-ray mode flipped
+        let key = "\(s.id)|\(model.simXRay)|" + ahead.map { String(format: "%.1f,%.1f,%.1f", $0[0], $0[1], $0[2]) }
+            .joined(separator: ";")
+        guard key != pathKey else { return }
+        pathKey = key
+        let m = SimPathPreview.ribbon(ahead, width: 0.05, lift: 0.03)
+        guard !m.indices.isEmpty else { clearPath(); return }
+        var pos = [SIMD3<Float>]()
+        pos.reserveCapacity(m.positions.count / 3)
+        var i = 0
+        while i + 2 < m.positions.count {
+            pos.append(SIMD3<Float>(m.positions[i], m.positions[i + 1], m.positions[i + 2]))
+            i += 3
+        }
+        var d = MeshDescriptor(name: "simpath")
+        d.positions = MeshBuffers.Positions(pos)
+        d.primitives = .triangles(m.indices)
+        guard let res = try? MeshResource.generate(from: [d]) else { return }
+        var mat = UnlitMaterial(color: UIColor(red: 0.3, green: 0.95, blue: 1, alpha: 1))
+        mat.blending = .transparent(opacity: 0.8)
+        if model.simXRay {
+            mat.readsDepth = false
+            mat.writesDepth = false
+        }
+        if let e = pathEntity {
+            e.model = ModelComponent(mesh: res, materials: [mat])
+        } else {
+            let e = ModelEntity(mesh: res, materials: [mat])
+            e.name = "serversim.path"
+            layer.simNode.addChild(e)
+            pathEntity = e
+        }
+    }
+
+    private func clearPath() {
+        pathEntity?.removeFromParent()
+        pathEntity = nil
+        pathKey = nil
     }
 
     // MARK: picking (map frame, z up, heading +x)

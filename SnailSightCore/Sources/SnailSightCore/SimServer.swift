@@ -81,11 +81,14 @@ public struct SimEntitySnap: Equatable {
     public var clipRate: Double?                  // playback rate (1.0)
     public var action: String?                    // flee | graze | walk | run | idle · goto | patrol | teleop | …
     public var t: Double?                         // server time of this state
+    // API §5.9.11 (server 0.4.7): storey + planner status; `path` = [[x, y, z, level]] (level -1 = on a stair)
+    public var level: Int?
+    public var nav: SimNav?
 }
 
 extension SimEntitySnap: Decodable {
     enum K: String, CodingKey {
-        case id, kind, pose, vel, state, owner, name, goal, path, cat, dims, scale, behaviour, clip, action, t
+        case id, kind, pose, vel, state, owner, name, goal, path, cat, dims, scale, behaviour, clip, action, t, level, nav
         case tMono = "t_mono", agentType = "agent_type", clipT0 = "clip_t0", clipRate = "clip_rate"
     }
     public init(from d: Decoder) throws {
@@ -111,6 +114,8 @@ extension SimEntitySnap: Decodable {
         clipRate = opt(Double.self, .clipRate)
         action = opt(String.self, .action)
         t = opt(Double.self, .t)
+        level = opt(Int.self, .level)
+        nav = opt(SimNav.self, .nav)
     }
 
     /// The clip to draw: the server's shared clip (protocol 2), else its older `state` hint.
@@ -126,6 +131,9 @@ extension SimEntitySnap: Decodable {
         if s.agentType == nil { s.agentType = d.agentType }
         if s.scale == nil { s.scale = d.scale }
         if s.behaviour == nil { s.behaviour = d.behaviour }
+        if s.path == nil { s.path = d.path }
+        if s.level == nil { s.level = d.level }
+        s.nav = SimNav.merged(snapshot: s.nav, doc: d.nav)
         return s
     }
 
@@ -164,6 +172,7 @@ public enum SimStreamMessage: Equatable {
         var ref: String?
         var ok: Bool?
         var status: Int?
+        var reason: String?
     }
 
     /// A field that is text in some replies and an object in others (409 detail): never fails the message.
@@ -183,7 +192,7 @@ public enum SimStreamMessage: Equatable {
         case "entity": return r.entity.map { .entity($0) } ?? .other("entity")
         case "event": return .event(kind: r.event ?? r.kind ?? "event", text: r.text ?? r.message, entityID: r.entity_id ?? r.id)
         case "lease": return .lease(entityID: r.entity_id ?? r.id ?? "", owner: r.owner, granted: r.granted)
-        case "ack": return .ack(ref: r.ref ?? "", ok: r.ok ?? false, status: r.status, detail: r.detail?.text)
+        case "ack": return .ack(ref: r.ref ?? "", ok: r.ok ?? false, status: r.status, detail: r.reason ?? r.detail?.text)
         case "error": return .error(r.detail?.text ?? r.message ?? "?")
         case let t: return .other(t)
         }

@@ -167,6 +167,11 @@ final class AppModel: ObservableObject {
     @Published var sharedSim: Bool = UserDefaults.standard.object(forKey: "sim.shared") as? Bool ?? true {
         didSet { UserDefaults.standard.set(sharedSim, forKey: "sim.shared") }
     }
+    /// 10.8 More ▸ Sim ▸ X-ray: sim bodies hidden behind walls / on another storey draw as a see-through ghost with a
+    /// distance / storey badge (per device).
+    @Published var simXRay: Bool = UserDefaults.standard.bool(forKey: SimXRay.defaultsKey) {
+        didSet { UserDefaults.standard.set(simXRay, forKey: SimXRay.defaultsKey) }
+    }
 
     @Published var tracking: TrackingStatus = .notAvailable
     @Published var mapping = "—"
