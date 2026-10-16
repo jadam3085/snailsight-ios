@@ -1,3 +1,4 @@
+// 10.7: the house map the AR view follows (newest READY version) on top, older versions as "History" (plan M1).
 // 9.6 Scans screen (owner 2026-10-13: "see scans through the app, not just through the web portal"): whole-house map
 // versions (latest `site` first), walks and object scans from the map server (`GET /v1/phone/scans`, same Tailscale /
 // LAN server as everything else), with thumbnails. Opening one shows ScanViewerView. The main AR session is paused
@@ -6,12 +7,15 @@ import SwiftUI
 import SnailSightCore
 
 struct ScansView: View {
-    @StateObject private var store: ScanStore
+    @ObservedObject var store: ScanStore               // 10.7: shared with the background prefetch (AppModel)
+    /// 10.7: the house map version the AR view follows (newest READY); the rest of the list is history.
+    let followRev: Int?
     @Environment(\.dismiss) private var dismiss
     @State private var open: ScanItem?
 
-    init(services: AppServices) {
-        _store = StateObject(wrappedValue: ScanStore(link: services.link, log: services.log))
+    init(store: ScanStore, followRev: Int?) {
+        _store = ObservedObject(wrappedValue: store)
+        self.followRev = followRev
     }
 
     var body: some View {
@@ -23,9 +27,17 @@ struct ScansView: View {
                 if let last = store.lastViewedID, store.isCached(last), let it = store.cached[last]?.item {
                     Section("Last viewed (saved on this phone)") { row(it) }
                 }
-                ForEach(store.sections, id: \.title) { sec in
-                    Section(sec.title) {
+                ForEach(ScanCatalog.sections(store.items, followRev: followRev), id: \.title) { sec in
+                    Section {
                         ForEach(sec.items) { it in row(it) }
+                    } header: {
+                        Text(sec.title)
+                    } footer: {
+                        if sec.title == ScanCatalog.followTitle {
+                            Text("Nothing to pick: the AR view loads the newest ready house map by itself and swaps in a newer one when you pause. Open it here only to look at it as a model.")
+                        } else if sec.title == ScanCatalog.historyTitle {
+                            Text("Older versions, for looking back. A version still being built shows \"preparing\" and is not used anywhere until it is ready.")
+                        }
                     }
                 }
                 if store.items.isEmpty && !store.loading && store.error == nil {
@@ -73,6 +85,7 @@ struct ScansView: View {
                         badge(meshBadge(it), meshColor(it))
                         if it.splat != nil { badge("splat", .purple) }
                         if store.isCached(it.id) { badge("saved", .green) }
+                        if it.mapID == "site", let v = it.version, v == followRev { badge("in AR", .teal) }
                         if let c = it.created { Text(Date(timeIntervalSince1970: c), style: .date).font(.caption2).foregroundStyle(.secondary) }
                     }
                 }

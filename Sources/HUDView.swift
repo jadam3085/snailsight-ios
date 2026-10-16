@@ -197,6 +197,7 @@ private struct StatusCard: View {
             if !model.arStatus.title.isEmpty {
                 row("house", "\(model.arStatus.title) · \(model.arStatus.detail)", model.arStatus.tone == .good ? .secondary : .orange)
             }
+            if let m = model.mapFollower.statusLine { row("arrow.triangle.2.circlepath", m, .secondary) }   // 10.7
             Text("ar \(model.tracking.code) · map \(model.mapping) · mesh \(model.meshAnchors) \(AdaptiveCapture.meshLabel(model.meshMode, recording: model.recording)) · heat \(model.thermal) · v\(model.version)")
                 .font(.caption2).foregroundStyle(.secondary).lineLimit(1).minimumScaleFactor(0.7)
             row(model.serverBase == nil ? "wifi.slash" : "server.rack", model.serverText,

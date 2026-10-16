@@ -104,14 +104,27 @@ public enum ScanCatalog {
         public var items: [ScanItem]
     }
 
-    /// Screen order (owner: whole-house maps, latest site version first): "Whole house" = the newest version of every
-    /// map (`site` first), then "Walks" (sessions, newest first), "Objects" (newest first), then "Older map versions".
-    public static func sections(_ items: [ScanItem]) -> [Section] {
+    public static let followTitle = "House map (AR follows this)"
+    public static let historyTitle = "History: older map versions"
+
+    /// Screen order (owner: whole-house maps, latest site version first). 10.7 (plan M1): the top section is the map
+    /// version the AR view follows = `followRev` for `site` when known, else the newest version whose phone mesh is
+    /// READY (a version still being built is never on top), plus the newest ready version of every other map; then
+    /// "Walks" (sessions, newest first), "Objects" (newest first), then the history of older / unfinished versions.
+    public static func sections(_ items: [ScanItem], followRev: Int? = nil) -> [Section] {
         let maps = items.filter { $0.type == .map }
         var newest: [String: ScanItem] = [:]
         for m in maps {
             let key = m.mapID ?? m.id
-            if let cur = newest[key], (cur.version ?? 0) >= (m.version ?? 0) { continue }
+            if key == "site", let f = followRev, maps.contains(where: { ($0.mapID ?? $0.id) == "site" && $0.version == f }) {
+                if m.version == f { newest[key] = m }
+                continue
+            }
+            if let cur = newest[key] {
+                let curReady = cur.mesh?.isReady ?? false, mReady = m.mesh?.isReady ?? false
+                if curReady && !mReady { continue }
+                if curReady == mReady && (cur.version ?? 0) >= (m.version ?? 0) { continue }
+            }
             newest[key] = m
         }
         let top = newest.values.sorted { a, b in
@@ -125,12 +138,12 @@ public enum ScanCatalog {
         }
         let byNew: (ScanItem, ScanItem) -> Bool = { ($0.created ?? 0) > ($1.created ?? 0) }
         var out: [Section] = []
-        if !top.isEmpty { out.append(Section(title: "Whole house", items: top)) }
+        if !top.isEmpty { out.append(Section(title: followTitle, items: top)) }
         let sessions = items.filter { $0.type == .session }.sorted(by: byNew)
         if !sessions.isEmpty { out.append(Section(title: "Walks", items: sessions)) }
         let objects = items.filter { $0.type == .object }.sorted(by: byNew)
         if !objects.isEmpty { out.append(Section(title: "Objects", items: objects)) }
-        if !older.isEmpty { out.append(Section(title: "Older map versions", items: older)) }
+        if !older.isEmpty { out.append(Section(title: historyTitle, items: older)) }
         return out
     }
 

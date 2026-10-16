@@ -49,7 +49,7 @@ struct ContentView: View {
             CubeListView().environmentObject(model).presentationDetents([.medium, .large])
         }
         .fullScreenCover(isPresented: $model.showScans) {                  // 9.6 native scan viewer (Sources/Scans)
-            ScansView(services: model.services)
+            ScansView(store: model.sharedScanStore(), followRev: model.mapFollower.followVersion)
         }
         .onAppear {
             model.controller.start()

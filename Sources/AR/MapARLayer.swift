@@ -1,3 +1,5 @@
+// 10.7: the version drawn follows the house map's newest READY version (MapFollower, plan M1); a newer mesh swaps in
+// at a still moment.
 // SnailSight 10.1 "AR 1:1" (plan §7 P2 finish + P4 in AR): once LOCALIZED against the house map (MapLocalizer,
 // /v1/localize), the master map's content is drawn where it really is: the version's mesh (dimmed wireframe or a
 // faint ghost), room names, and the P4 detected objects (box outlines + labels). Tap tool "Objects" + tap a box to
@@ -179,11 +181,16 @@ final class MapARLayer {
                                  ageS: al.map { now - $0.at } ?? 0)
         status = s
         if model.arStatus != s { model.arStatus = s }
-        guard let sh = shown else { return }
-        if let v = mapVersion, model.serverBase != nil {
+        // 10.7 follow LATEST (plan M1): the content version = the lock's version while it is not newer than the
+        // followed head, else the head (MapFollower); before a lock the head's content is preloaded (drawn at the lock).
+        // Offline the cached collision mesh still loads (the docs simply stay as they were).
+        if let v = model.mapFollower.contentVersion(lock: mapVersion) {
             let scene = "\(mapID)@\(v)"
-            if scene != sceneID && loadingScene == nil && now - lastLoadTry > 10 { load(scene) }
+            let wait: Double = model.serverBase != nil ? 10 : 60
+            if scene != sceneID && loadingScene == nil && now - lastLoadTry > wait { load(scene) }
         }
+        applyStagedMesh(now: now)
+        guard let sh = shown else { return }
         let cam = sh.toMap(pivot)
         applyStyle()
         updateVisible(cam: cam)
@@ -269,7 +276,7 @@ final class MapARLayer {
                 if let o = objectsF { self.objectsDoc = o }
                 if let f = floorF { self.floorZ = f }
                 self.rebuildItems()
-                if let c = chunksF { self.setMesh(c, scene: scene) }
+                if let c = chunksF { self.stageMesh(c, scene: scene) }
                 self.model.log.event("armap_load", ["scene": .string(scene), "rooms": .int(roomsF?.rooms.count ?? -1),
                                                     "objects": .int(objectsF?.objects.count ?? -1),
                                                     "mesh_chunks": .int(chunksF?.count ?? -1), "mesh": .string(noteF)])
@@ -292,14 +299,9 @@ final class MapARLayer {
             }
             data = r.0
             try? r.0.write(to: file, options: .atomic)
-            // keep only the newest 3 meshes
-            let all = (try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
-            let old = all.sorted {
-                let a = (try? $0.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
-                let b = (try? $1.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
-                return a > b
-            }.dropFirst(3)
-            for u in old { try? fm.removeItem(at: u) }
+            evictMeshCache(dir)
+        } else {
+            try? fm.setAttributes([.modificationDate: Date()], ofItemAtPath: file.path)   // in use: newest for eviction
         }
         guard let d = data else { return (nil, "no data") }
         let chunks = await Task.detached(priority: .utility) { () -> [MeshChunker.Chunk] in
@@ -307,6 +309,56 @@ final class MapARLayer {
         }.value
         note += " \(chunks.reduce(0) { $0 + $1.mesh.triangleCount }) tris"
         return (chunks, note)
+    }
+
+    /// 10.7: the first mesh goes up at once; a newer version replaces the one on screen at a still moment (≤ 10 s),
+    /// so the house never changes under a walking owner.
+    private var staged: (chunks: [MeshChunker.Chunk], scene: String, at: TimeInterval)?
+    static let stageMaxWait: TimeInterval = 10
+
+    private func stageMesh(_ chunks: [MeshChunker.Chunk], scene: String) {
+        if meshScene == nil || !isAligned {
+            setMesh(chunks, scene: scene)
+        } else {
+            staged = (chunks, scene, Date().timeIntervalSince1970)
+            applyStagedMesh(now: Date().timeIntervalSince1970)
+        }
+    }
+
+    private func applyStagedMesh(now: TimeInterval) {
+        guard let st = staged else { return }
+        guard !isAligned || model.mapFollower.isStill || now - st.at >= Self.stageMaxWait else { return }
+        staged = nil
+        let from = meshScene
+        setMesh(st.chunks, scene: st.scene)
+        model.log.event("armap_mesh_swap", ["from": .string(from ?? ""), "to": .string(st.scene),
+                                            "waited_s": .double(now - st.at), "still": .bool(model.mapFollower.isStill)])
+    }
+
+    /// 10.7 prefetch (MapFollower): put a version's collision mesh into the cache `loadMesh` reads. true = cached.
+    static func cacheCollision(scene: String, url: String, link: ServerLink) async -> Bool {
+        let fm = FileManager.default
+        guard let dir = fm.urls(for: .cachesDirectory, in: .userDomainMask).first?.appendingPathComponent("armap", isDirectory: true)
+        else { return false }
+        try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        let file = dir.appendingPathComponent(scene.replacingOccurrences(of: "@", with: "-v") + "-collision.obj")
+        if fm.fileExists(atPath: file.path) { return true }
+        guard let r = try? await link.request("GET", url, timeout: 120), r.1 == 200, !r.0.isEmpty,
+              (try? r.0.write(to: file, options: .atomic)) != nil else { return false }
+        evictMeshCache(dir)
+        return true
+    }
+
+    /// Keep only the newest 3 cached collision meshes.
+    private static func evictMeshCache(_ dir: URL) {
+        let fm = FileManager.default
+        let all = (try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
+        let old = all.sorted {
+            let a = (try? $0.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+            let b = (try? $1.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+            return a > b
+        }.dropFirst(3)
+        for u in old { try? fm.removeItem(at: u) }
     }
 
     private func setMesh(_ chunks: [MeshChunker.Chunk], scene: String) {

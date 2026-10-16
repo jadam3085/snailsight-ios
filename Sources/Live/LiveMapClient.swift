@@ -271,6 +271,7 @@ final class LiveMapClient {
 
     private func handle(_ d: Data) {
         stats.msgs += 1
+        model.mapFollower.liveMessage(d)            // 10.7: `rev` (map head) rides this socket too
         guard let (m, seq) = LiveDownMessage.parseWithSeq(d) else { return }
         if let q = seq { lastSeq = max(lastSeq ?? q, q) }
         switch m {

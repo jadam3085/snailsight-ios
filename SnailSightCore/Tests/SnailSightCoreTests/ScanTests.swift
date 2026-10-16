@@ -34,11 +34,16 @@ final class ScanTests: XCTestCase {
         XCTAssertEqual(s4.mapID, "site"); XCTAssertEqual(s4.mesh?.isReady, true); XCTAssertEqual(s4.splat?.count, 1_000_000)
         XCTAssertEqual(items[1].mesh?.isPending, true); XCTAssertNil(items[2].mesh)
         let secs = ScanCatalog.sections(items)
-        XCTAssertEqual(secs.map(\.title), ["Whole house", "Walks", "Objects", "Older map versions"])
-        XCTAssertEqual(secs[0].items.map(\.id), ["site@5", "trial@2"])       // newest version per map, site first
+        XCTAssertEqual(secs.map(\.title), [ScanCatalog.followTitle, "Walks", "Objects", ScanCatalog.historyTitle])
+        // 10.7: newest READY version per map on top (site@5 is still building: history), site first
+        XCTAssertEqual(secs[0].items.map(\.id), ["site@4", "trial@2"])
         XCTAssertEqual(secs[1].items.map(\.id), ["s-2", "s-1"])
         XCTAssertEqual(secs[2].items.map(\.id), ["o-1"])
-        XCTAssertEqual(secs[3].items.map(\.id), ["site@4"])
+        XCTAssertEqual(secs[3].items.map(\.id), ["site@5"])
+        // the version the AR view follows wins when the app knows it
+        XCTAssertEqual(ScanCatalog.sections(items, followRev: 4)[0].items.map(\.id), ["site@4", "trial@2"])
+        XCTAssertEqual(ScanCatalog.sections(items, followRev: 5)[0].items.map(\.id), ["site@5", "trial@2"])
+        XCTAssertEqual(ScanCatalog.sections(items, followRev: 9)[0].items.map(\.id), ["site@4", "trial@2"])   // unknown rev
         XCTAssertTrue(ScanCatalog.sections([]).isEmpty)
     }
 

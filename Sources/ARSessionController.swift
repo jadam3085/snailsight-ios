@@ -484,6 +484,7 @@ final class ARSessionController: NSObject, ARSessionDelegate {
         model.mapLocalizer.frame(frame)                  // P2b: keyframes to /v1/localize while finding / refining
         model.liveStreamer.frame(frame)                  // 10.0 Live map: keyframes to the live uplink while on
         model.meshMapper.frame(frame)                    // 10.2 Map mesh: depth / sharp keyframes to /v1/meshmap
+        model.mapFollower.frame(t: frame.timestamp, camera: frame.camera.transform)   // 10.7 follow LATEST (still → swap)
         mapLayer.frame(frame)                            // 10.1 AR 1:1: blend the map alignment, labels face you
         model.serverSim.frame()                          // 10.1 S2: dead-reckoned shared-sim bodies + teleop
         renderer.updateBillboards(camera: Geo.position(frame.camera.transform))

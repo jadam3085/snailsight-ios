@@ -211,6 +211,17 @@ final class AppModel: ObservableObject {
     private(set) lazy var terrainLayer = TerrainARLayer(model: self)
     private(set) lazy var liveMap = LiveMapClient(model: self)
     private(set) lazy var serverSim = ServerSimClient(model: self)
+    /// 10.7 the main AR view follows the house map's newest READY version (Sources/AR/MapFollower, plan M1).
+    private(set) lazy var mapFollower = MapFollower(model: self)
+    private var scanStoreShared: ScanStore?
+
+    /// ONE Scans catalogue + offline cache for the Scans screen and the 10.7 background prefetch (one index.json writer).
+    @MainActor func sharedScanStore() -> ScanStore {
+        if let s = scanStoreShared { return s }
+        let s = ScanStore(link: services.link, log: services.log)
+        scanStoreShared = s
+        return s
+    }
     var link: ServerLink! { services.link }
     var logs: LogUploader! { services.logs }
     var queue: UploadQueue! { services.queue }
@@ -313,6 +324,7 @@ final class AppModel: ObservableObject {
             await q.kick(reason: "launch")
         }
         timer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in self?.periodicSync() }
+        mapFollower.start()                                 // 10.7: cached head now, the server's head in the background
         let nc = NotificationCenter.default
         observers.append(nc.addObserver(forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main) { [weak self] _ in
             self?.backgroundFlush()
@@ -323,6 +335,7 @@ final class AppModel: ObservableObject {
             let q = self.queue!
             // 10.6.x: every server loop resumes at once (owner: one timeout + background and it never placed him)
             self.mapLocalizer.resume(why: "foreground")
+            self.mapFollower.resume(why: "foreground")
             self.liveMap.resume(why: "foreground")
             self.serverSim.resume(why: "foreground")
             self.placeCtl.publish()
@@ -361,6 +374,7 @@ final class AppModel: ObservableObject {
     private func backgroundFlush() {
         log.event("background")
         mapLocalizer.enteredBackground()
+        mapFollower.enteredBackground()
         // ARKit stops in the background and iOS may end a suspended app: finish the capture cleanly now
         if recorder.isRecording { stopRecording(reason: "background") }
         meshMapper.appBackground()                      // 10.2: ARKit stops; the mapping upload finishes
@@ -514,6 +528,7 @@ final class AppModel: ObservableObject {
     func scansClosed() {
         controller.resumeAfterScans()
         mapLocalizer.resume(why: "scans_closed")
+        mapFollower.resume(why: "scans_closed")
         liveMap.resume(why: "scans_closed")
     }
 

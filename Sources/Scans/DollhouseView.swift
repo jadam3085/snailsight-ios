@@ -115,19 +115,17 @@ struct DollhouseView: UIViewRepresentable {
     }
 }
 
-/// 1:1 AR overlay: the scan over the real house at full size. Needs relocalization into the house map (plan P2), so
-/// this is a stub that explains what it will do.
+/// 10.7: 1:1 AR lives in the main AR view (it follows the newest ready house map by itself); this tab says so, so the
+/// Scans list is never mistaken for "the map the AR view uses".
 struct OverlayStubView: View {
     var body: some View {
         VStack(spacing: 14) {
             Image(systemName: "square.3.layers.3d.down.right").font(.system(size: 44))
-            Text("1 : 1 AR overlay").font(.title3.weight(.semibold))
-            Text("Shows the scan over the real rooms at full size, so you can see what the map got right and what it missed. It needs the phone to know where it is in the house map (relocalization, plan P2), which is not built yet.")
+            Text("1 : 1 AR is the main view").font(.title3.weight(.semibold))
+            Text("Close Scans: the main AR view draws the newest ready house map where it really is, by itself, as soon as the phone is LOCALIZED, and swaps in a newer version when you pause.")
                 .font(.callout).multilineTextAlignment(.center).foregroundStyle(.secondary)
-            Text("Later here: fly the virtual drone 1 : 1 over the real rooms, and see your room and object labels in place (they are kept in map coordinates for exactly this).")
+            Text("This screen is for looking at a scan as a model, including older versions (history). Nothing you open here changes what the AR view shows.")
                 .font(.footnote).multilineTextAlignment(.center).foregroundStyle(.secondary)
-            Text("Coming with P2").font(.caption.weight(.semibold)).padding(.horizontal, 10).padding(.vertical, 4)
-                .background(.thinMaterial, in: Capsule())
         }
         .padding(28)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
