@@ -1,4 +1,4 @@
-# SnailSight 9 (P0 + P1 capture/upload; 9.6 Scans viewer; 9.7 P2a saved places + relocalization; 9.8 P2b whole-house map localization + sim; 10.0 Live map keyframe streaming; 10.1 AR 1:1 house map, robot terrain, live agents, shared sim; 10.2 localization pill + mesh-only mapping; 10.3 master map first + one status; 11.0 localize first, then stream tiles) — XcodeGen spec; the CI runner generates SnailSight.xcodeproj from this (never committed).
+# SnailSight 9 (P0 + P1 capture/upload; 9.6 Scans viewer; 9.7 P2a saved places + relocalization; 9.8 P2b whole-house map localization + sim; 10.0 Live map keyframe streaming; 10.1 AR 1:1 house map, robot terrain, live agents, shared sim; 10.2 localization pill + mesh-only mapping; 10.3 master map first + one status; 11.0 localize first, then stream tiles; 11.1 faster first lock) — XcodeGen spec; the CI runner generates SnailSight.xcodeproj from this (never committed).
 # Bundle id stays com.example.apple-samplecode.iLiDAR: the owner's signing service re-signs it under its own team
 # prefix, so updates install in place, keep Documents and use no new free-account app-ID slot. PRODUCT_NAME stays iLiDAR (iLiDAR.app inside iLiDAR-<ver>.ipa).
 name: SnailSight
@@ -53,7 +53,7 @@ targets:
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         SWIFT_VERSION: "5.0"
         TARGETED_DEVICE_FAMILY: "1"
-        MARKETING_VERSION: "11.0.0"
+        MARKETING_VERSION: "11.1.0"
         CURRENT_PROJECT_VERSION: "0"
         SNAILSIGHT_SERVER_TAILNET: ""
         SNAILSIGHT_SERVER_LAN: ""

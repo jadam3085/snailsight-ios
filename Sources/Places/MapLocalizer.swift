@@ -18,6 +18,8 @@
 // the reset is the same physical pose), then confirmed by an immediate re-check. Every accepted fix is remembered
 // (LastFixStore: where the phone was in the map) as the evidence for trying a saved place next launch. On a lock, saved
 // places' animals the map does not have yet are written into it (PlaceMigration), so no world map is needed for them.
+// 11.1 faster first lock: the first 20 s of a search send every 0.5 s (still one request in flight); the server locks
+// on ONE visual fix its mesh ICP confirms (lock_rule "strong", API §5.6d); maploc_try logs the server's stage times.
 import ARKit
 import CoreImage
 import Foundation
@@ -161,7 +163,7 @@ final class MapLocalizer {
                                    thermalSerious: hot, recording: model.recording)
         setDepthWanted(needDepth)
         let every = LocCadence.interval(locked: serverLocked, refinements: refinements, thermalSerious: hot,
-                                        recording: model.recording, notInMap: isNotInMap)
+                                        recording: model.recording, notInMap: isNotInMap, searchSeconds: t - streamStart)
         guard forceAttempt || since >= every else { return }
         switch f.camera.trackingState {
         case .normal: break
@@ -272,7 +274,10 @@ final class MapLocalizer {
                                        "level": .int(a.level ?? -99), "sigma_cm": .double(a.confidence?.sigmaCm ?? -1),
                                        "sigma_deg": .double(a.confidence?.sigmaDeg ?? -1),
                                        "conf_source": .string(a.confidence?.source ?? ""),
-                                       "conf_fixes": .int(a.confidence?.fixes ?? -1)])
+                                       "conf_fixes": .int(a.confidence?.fixes ?? -1),
+                                       "srv_visual_ms": .double(a.timingMs?.visual ?? -1),
+                                       "srv_icp_ms": .double(a.timingMs?.icp ?? -1),
+                                       "lock_rule": .string(a.lockRule ?? "")])
         guard a.locked, let T = a.T_map_arkit else { return }
         if a.anyAccepted || source != "server" { lastFixAt = now }
         if let r = a.bestRmseCm { lastRmseCm = r }
@@ -307,7 +312,8 @@ final class MapLocalizer {
                                           "yaw_deg": .double(next.yaw * 180 / .pi), "tilt_deg": .double(next.tiltDeg),
                                           "method": .string(next.method ?? ""), "tile": .string(a.tile ?? ""),
                                           "level": .int(a.level ?? -99), "sigma_cm": .double(a.confidence?.sigmaCm ?? -1),
-                                          "sigma_deg": .double(a.confidence?.sigmaDeg ?? -1)]
+                                          "sigma_deg": .double(a.confidence?.sigmaDeg ?? -1),
+                                          "rule": .string(a.lockRule ?? "")]
             if let c = cross { ev["cross_cm"] = .double(c.cm); ev["cross_deg"] = .double(c.deg) }
             model.log.event("maploc_locked", ev)
             model.flash(MapLocText.locked(mapID: a.mapID, version: a.mapVersion, seconds: lockSeconds,

@@ -239,6 +239,15 @@ public struct LocalizeAnswer: Decodable {
     public var level: Int?                      // 11.0: its storey
     public var cameraMap: [Double]?             // 11.0: the camera in the map frame [x, y, z]
     public var confidence: Confidence?          // 11.0: how sure the lock is
+    public var lockRule: String?                // 11.1: "strong" (one visual fix confirmed by the mesh) | "pair"
+    public var timingMs: Timing?                // 11.1: server time per stage (API §5.6d)
+    public struct Timing: Decodable {
+        public var prepare: Double?
+        public var visual: Double?
+        public var icp: Double?
+        public var gsearch: Double?
+        public var total: Double?
+    }
 
     public struct Confidence: Decodable, Equatable {
         public var sigmaCm: Double?
@@ -294,6 +303,7 @@ public struct LocalizeAnswer: Decodable {
         case matchedSession = "matched_session", latencyMs = "latency_ms", versionChanged = "version_changed"
         case method, lockMethod = "lock_method", lockSource = "lock_source", hint, geometry
         case tile, level, cameraMap = "camera_map", confidence
+        case lockRule = "lock_rule", timingMs = "timing_ms"
     }
 
     /// What the HUD names the lock by: what it rests on (10.4), else the lock's method, else this answer's.

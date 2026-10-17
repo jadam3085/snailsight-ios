@@ -189,6 +189,10 @@ public enum LocPill {
 /// a short burst of refinements, then an occasional refresh. nil = no attempt (never: the pill must stay truthful).
 public enum LocCadence {
     public static let searching = 1.0           // s between attempts until locked
+    /// 11.1: the first seconds of a search go twice as fast (one request in flight, so the server's answer time still
+    /// paces it): a visual match on a live visit comes ~1 in 5-15 attempts, so more distinct views early = a sooner lock.
+    public static let searchingFast = 0.5
+    public static let fastWindowS = 20.0
     public static let notInMap = 6.0            // after LocPill.notInMap: still retrying, slowly
     public static let refining = 8.0            // the first LocalizeCadence.refineCount refinements after a lock
     public static let refresh = 60.0            // then one refresh a minute
@@ -196,11 +200,14 @@ public enum LocCadence {
     public static let hotFactor = 3.0           // thermal serious
 
     public static func interval(locked: Bool, refinements: Int, thermalSerious: Bool, recording: Bool,
-                                notInMap: Bool) -> Double {
+                                notInMap: Bool, searchSeconds: Double = .infinity) -> Double {
         var f = 1.0
         if thermalSerious { f *= hotFactor }
         if recording { f *= recordingFactor }
-        if !locked { return (notInMap ? Self.notInMap : searching) * f }
+        if !locked {
+            if notInMap { return Self.notInMap * f }
+            return (searchSeconds < fastWindowS && f == 1 ? searchingFast : searching) * f
+        }
         if refinements < LocalizeCadence.refineCount && !thermalSerious { return refining * (recording ? recordingFactor : 1) }
         return refresh * f
     }

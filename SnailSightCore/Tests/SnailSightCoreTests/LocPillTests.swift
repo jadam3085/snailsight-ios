@@ -75,6 +75,15 @@ final class LocPillTests: XCTestCase {
         XCTAssertEqual(LocCadence.interval(locked: false, refinements: 0, thermalSerious: false, recording: true, notInMap: false), 2)
         XCTAssertEqual(LocCadence.interval(locked: false, refinements: 0, thermalSerious: true, recording: false, notInMap: false), 3)
         XCTAssertEqual(LocCadence.interval(locked: false, refinements: 0, thermalSerious: false, recording: false, notInMap: true), 6)
+        // 11.1: the first 20 s of a search go at 0.5 s (never while recording / hot / not in map)
+        XCTAssertEqual(LocCadence.interval(locked: false, refinements: 0, thermalSerious: false, recording: false, notInMap: false,
+                                           searchSeconds: 3), 0.5)
+        XCTAssertEqual(LocCadence.interval(locked: false, refinements: 0, thermalSerious: false, recording: false, notInMap: false,
+                                           searchSeconds: 25), 1)
+        XCTAssertEqual(LocCadence.interval(locked: false, refinements: 0, thermalSerious: false, recording: true, notInMap: false,
+                                           searchSeconds: 3), 2)
+        XCTAssertEqual(LocCadence.interval(locked: true, refinements: 3, thermalSerious: false, recording: false, notInMap: false,
+                                           searchSeconds: 3), 8)
         // refinements, then an occasional refresh (never "stop": the pill must stay truthful)
         XCTAssertEqual(LocCadence.interval(locked: true, refinements: 3, thermalSerious: false, recording: false, notInMap: false), 8)
         XCTAssertEqual(LocCadence.interval(locked: true, refinements: 12, thermalSerious: false, recording: false, notInMap: false), 60)
@@ -99,5 +108,19 @@ final class LocPillTests: XCTestCase {
         XCTAssertTrue(a.anyAccepted)
         XCTAssertEqual(a.bestRmseCm, 1.42)                  // the refused ICP does not count
         XCTAssertEqual(a.frames.first?.method, "visual+mesh")
+    }
+
+    func testAnswerTimingAndLockRule() throws {
+        let json = """
+        {"ok":true,"map_id":"site","map_version":14,"locked":true,"events":["locked"],"lock_rule":"strong",
+         "timing_ms":{"prepare":8.1,"visual":352.0,"icp":171.5,"gsearch":0.4,"mesh":0,"total":540.2,
+                      "native":{"posterior":150.2,"memory_update":98.0}},
+         "frames":[{"node":12,"inliers":120,"accepted":true,"method":"visual+mesh"}]}
+        """
+        let a = try JSONDecoder().decode(LocalizeAnswer.self, from: Data(json.utf8))
+        XCTAssertEqual(a.lockRule, "strong")
+        XCTAssertEqual(a.timingMs?.visual, 352.0)
+        XCTAssertEqual(a.timingMs?.icp, 171.5)
+        XCTAssertEqual(a.timingMs?.total, 540.2)
     }
 }
