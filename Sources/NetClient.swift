@@ -183,20 +183,24 @@ actor ServerLink {
     /// One request against the current server (probing first if needed). Returns (body, HTTP status).
     /// Network failures mark the server offline so the next call re-probes; HTTP errors are returned, not thrown.
     func request(_ method: String, _ path: String, query: [URLQueryItem] = [], body: Data? = nil,
-                 contentType: String = "application/json", timeout: TimeInterval = 30) async throws -> (Data, Int) {
+                 contentType: String = "application/json", timeout: TimeInterval = 30,
+                 headers: [String: String] = [:]) async throws -> (Data, Int) {
         if base == nil { await probe() }
         guard base != nil else { throw NetError.offline }
-        return try await rawRequest(method, path, query: query, body: body, contentType: contentType, timeout: timeout)
+        return try await rawRequest(method, path, query: query, body: body, contentType: contentType, timeout: timeout,
+                                    headers: headers)
     }
 
     private func rawRequest(_ method: String, _ path: String, query: [URLQueryItem] = [], body: Data? = nil,
-                            contentType: String = "application/json", timeout: TimeInterval = 30) async throws -> (Data, Int) {
+                            contentType: String = "application/json", timeout: TimeInterval = 30,
+                            headers: [String: String] = [:]) async throws -> (Data, Int) {
         guard let b = base, var comps = URLComponents(string: b + path) else { throw NetError.offline }
         if !query.isEmpty { comps.queryItems = query }
         guard let url = comps.url else { throw NetError.offline }
         var r = URLRequest(url: url)
         r.httpMethod = method
         r.timeoutInterval = timeout
+        for (k, v) in headers { r.setValue(v, forHTTPHeaderField: k) }
         do {
             let (data, resp): (Data, URLResponse)
             if let body {

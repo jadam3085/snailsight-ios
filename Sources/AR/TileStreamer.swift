@@ -37,6 +37,10 @@ final class TileStreamer {
     private var parents: [String: String] = [:]
     private var nodes: [String: TileNode] = [:]
     private var hashes: [String: String] = [:]                 // key → usdz content hash of the current tileset
+    /// 11.2 (M4): tiles changed by a `sync` event before the tileset is refetched: key → (hash, blob URI).
+    private var syncOverride: [String: (hash: String, uri: String)] = [:]
+    /// Bumped whenever the set of loaded tiles changes (MapFollower re-sends `held`).
+    private(set) var heldGen = 0
     private var fetchingTileset = false
     private var tilesetRetryAt: TimeInterval = 0
 
@@ -148,6 +152,46 @@ final class TileStreamer {
         }
     }
 
+    // MARK: 11.2 sync (plan M4, API §5.13)
+
+    /// The loaded tiles as `held` for the rev socket ({"structure:1/0/-1": usdz hash}); empty before tiles start.
+    var held: [String: String] {
+        guard let v = variant else { return [:] }
+        return TileSync.held(variant: v, hashes: ledger.items.mapValues { $0.hash })
+    }
+
+    /// A `sync` block from the rev socket: held tiles whose content changed are re-fetched NOW (the old entity stays
+    /// drawn until the new one is loaded), removed ones are released. The tileset refetch that follows the new
+    /// tiles.rev agrees with this (same hashes), so nothing is fetched twice.
+    func applySync(_ ev: TileSyncEvent) {
+        guard let v = variant else { return }
+        let ch = ev.changes(variant: v)
+        var applied = 0
+        for (k, c) in ch where nodes[k] != nil {
+            guard hashes[k] != c.hash else { continue }
+            let old = syncOverride[k]?.uri ?? nodes[k]?.uri ?? ""
+            let prefix = old.split(separator: "/").dropLast().joined(separator: "/")
+            let uri = prefix.isEmpty ? "\(c.hash).usdz" : "\(prefix)/\(c.hash).usdz"
+            syncOverride[k] = (c.hash, uri)
+            hashes[k] = c.hash
+            failedUntil[k] = nil
+            applied += 1
+        }
+        var gone = 0
+        for k in ev.removedKeys(variant: v) where ledger.items[k] != nil {
+            hashes[k] = nil
+            release(k, reason: "removed")
+            gone += 1
+        }
+        model.log.event("tile_sync", ["kind": .string(ev.kind), "rev": .int(ev.rev ?? -1), "changed": .int(ch.count),
+                                      "applied": .int(applied), "removed": .int(gone),
+                                      "changed_total": .int(ev.changedTotal ?? -1)])
+        if applied > 0 || gone > 0 {
+            refresh()
+            if !model.recording && !model.showScans { schedule(now) }
+        }
+    }
+
     // MARK: tileset
 
     private func ensureTileset(_ t: TimeInterval) {
@@ -209,6 +253,7 @@ final class TileStreamer {
         let all = TileSet.flatten(r)
         nodes = Dictionary(all.map { ($0.key, $0) }, uniquingKeysWith: { a, _ in a })
         hashes = Dictionary(all.compactMap { n in n.hash.map { (n.key, $0) } }, uniquingKeysWith: { a, _ in a })
+        syncOverride.removeAll()
         variant = v
         tilesetRev = rev
         tilesetPath = path
@@ -236,7 +281,9 @@ final class TileStreamer {
         for w in TileSelect.fetchOrder(want, loaded: current) {
             if inFlight.count >= Self.maxConcurrent { break }
             let k = w.node.key
-            guard inFlight[k] == nil, (failedUntil[k] ?? 0) <= t, let hash = w.node.hash, let uri = w.node.uri else { continue }
+            let ov = syncOverride[k]
+            guard inFlight[k] == nil, (failedUntil[k] ?? 0) <= t, let hash = ov?.hash ?? w.node.hash,
+                  let uri = ov?.uri ?? w.node.uri else { continue }
             start(w.node, key: k, hash: hash, path: TileURL.resolve(uri, against: base))
         }
     }
@@ -343,6 +390,7 @@ final class TileStreamer {
         node.addChild(holder)
         entities[key] = holder
         ledger.add(key, .init(hash: hash, mem: n.mem, near: n.size == TileSelect.LEAF_M))
+        heldGen += 1
         disk.touch(hash, now: now)
         style(key, model.houseStyle)
         refresh()
@@ -351,6 +399,7 @@ final class TileStreamer {
 
     private func release(_ key: String, reason: String) {
         guard let it = ledger.remove(key) else { return }
+        heldGen += 1
         entities.removeValue(forKey: key)?.removeFromParent()
         originals[key] = nil
         drawnKeys.remove(key)

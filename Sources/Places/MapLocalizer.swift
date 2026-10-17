@@ -556,20 +556,99 @@ final class MapLocalizer {
                                   agentID: model.agentID, placeID: place)
         }
         guard let body = try? JSONEncoder().encode(MapEntitiesPut(list, agentID: model.agentID, reason: reason)) else { return }
+        // 11.2 (plan M4): through the offline edit queue - kept on disk until the server answers, sent with an
+        // Idempotency-Key (applied once however often it is resent); a newer whole-set save replaces a queued one
+        editQueue.enqueue(EditOp(key: "ss-\(UUID().uuidString)", method: "PUT", path: "/v1/maps/\(al.mapID)/entities",
+                                 body: body, created: Date().timeIntervalSince1970, coalesce: "bulk:\(al.mapID)"))
+        saveEditQueue()
+        pendingPutLog[reason] = (list.count, al.version)
+        flushEdits(why: reason)
+    }
+
+    // MARK: 11.2 offline edit queue (EditQueue, API §5.13)
+
+    static let editQueueKey = "editqueue.v1"
+    private lazy var editQueue = EditQueue.decode(UserDefaults.standard.data(forKey: Self.editQueueKey))
+    private var flushing = false
+    private var onlineHooked = false
+    private var pendingPutLog: [String: (Int, Int)] = [:]
+
+    private func saveEditQueue() {
+        UserDefaults.standard.set(editQueue.encoded(), forKey: Self.editQueueKey)
+    }
+
+    /// Send queued edits in order until one cannot be delivered (offline / 5xx: kept for the next try).
+    func flushEdits(why: String) {
+        guard !flushing, !editQueue.isEmpty, let link = model.link else { return }
+        if !onlineHooked {
+            onlineHooked = true
+            link.whenOnline { [weak self] in DispatchQueue.main.async { self?.flushEdits(why: "online") } }
+        }
+        flushing = true
         syncing = true
-        let link = model.link!
         Task { [weak self] in
-            let r = try? await link.request("PUT", "/v1/maps/\(al.mapID)/entities", body: body, timeout: 15)
+            var sent = 0, conflicts = 0, dropped = 0
+            var lastStatus = 0
+            var lastRev: Int?
+            while let s = self, let op = await MainActor.run(body: { s.editQueue.next }) {
+                await MainActor.run { s.editQueue.bumpAttempt(op.key) }
+                let r = try? await link.request(op.method, op.path, body: op.body, timeout: 15,
+                                                headers: ["Idempotency-Key": op.key])
+                lastStatus = r?.1 ?? 0
+                switch EditQueue.outcome(status: r?.1) {
+                case .done:
+                    lastRev = r.flatMap { JSON.int(JSON.object($0.0), "revision") }
+                    await MainActor.run { s.editQueue.complete(op.key); s.saveEditQueue() }
+                    sent += 1
+                    continue
+                case .retryLater:
+                    break
+                case .drop(let why):
+                    await MainActor.run {
+                        s.editQueue.complete(op.key); s.saveEditQueue()
+                        s.model.log.event("edit_dropped", ["path": .string(op.path), "why": .string(why)])
+                    }
+                    dropped += 1
+                    continue
+                case .stale:
+                    // 409: re-read, re-apply this one change on the current revision (same key)
+                    let g = try? await link.request("GET", op.path.components(separatedBy: "/entities").first.map { $0 + "/entities" } ?? op.path,
+                                                    query: [URLQueryItem(name: "include", value: "all")], timeout: 15)
+                    let obj = g.flatMap { JSON.object($0.0) }
+                    let rev = obj.flatMap { JSON.int($0, "revision") }
+                    var serverUpdated: Double?
+                    if let id = op.entityID, let ents = obj?["entities"] as? [[String: Any]],
+                       let e = ents.first(where: { ($0["id"] as? String) == id }) { serverUpdated = e["updated"] as? Double }
+                    let conflict = EditQueue.isConflict(op, serverUpdated: serverUpdated)
+                    if conflict { conflicts += 1 }
+                    guard let rv = rev else { break }
+                    await MainActor.run {
+                        let cur = s.editQueue.ops.first(where: { $0.key == op.key }) ?? op
+                        s.editQueue.replace(EditQueue.rebased(cur, revision: rv)); s.saveEditQueue()
+                        s.model.log.event("edit_conflict", ["path": .string(op.path), "revision": .int(rv),
+                                                            "theirs_changed": .bool(conflict), "kept": .string("mine")])
+                        if conflict { s.model.flash("Map edit conflict: someone changed it too - kept yours", seconds: 4) }
+                    }
+                    if op.attempts < 3 { continue }
+                }
+                break
+            }
             await MainActor.run {
                 guard let self else { return }
+                self.flushing = false
                 self.syncing = false
-                let rev = r.flatMap { JSON.int(JSON.object($0.0), "revision") }
-                self.model.log.event("map_entities_put", ["reason": .string(reason), "entities": .int(list.count),
-                                                          "status": .int(r?.1 ?? 0), "revision": .int(rev ?? -1),
-                                                          "version": .int(al.version)])
-                if reason.hasPrefix("migrate"), r?.1 == 200 {
-                    self.model.flash("Moved \(list.count) animal\(list.count == 1 ? "" : "s") into the house map", seconds: 3)
+                for (reason, (n, ver)) in self.pendingPutLog where sent > 0 {
+                    self.model.log.event("map_entities_put", ["reason": .string(reason), "entities": .int(n),
+                                                              "status": .int(lastStatus), "revision": .int(lastRev ?? -1),
+                                                              "version": .int(ver)])
+                    if reason.hasPrefix("migrate") {
+                        self.model.flash("Moved \(n) animal\(n == 1 ? "" : "s") into the house map", seconds: 3)
+                    }
                 }
+                if sent > 0 { self.pendingPutLog.removeAll() }
+                self.model.log.event("edit_queue_flush", ["why": .string(why), "sent": .int(sent), "left": .int(self.editQueue.count),
+                                                          "conflicts": .int(conflicts), "dropped": .int(dropped),
+                                                          "status": .int(lastStatus)])
             }
         }
     }

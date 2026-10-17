@@ -33,6 +33,9 @@ final class MapFollower {
     private var wsOpen = false
     private var reconnectAt: TimeInterval = 0
     private var attempt = 0
+    /// 11.2 (M4): the TileStreamer's held-set generation last sent on the socket, and when.
+    private var heldSentGen = -1
+    private var heldSentAt: TimeInterval = 0
     private let session: URLSession = {
         let c = URLSessionConfiguration.default
         c.timeoutIntervalForRequest = 60
@@ -104,14 +107,25 @@ final class MapFollower {
         guard !checking, let link = model.link else { return }
         checking = true
         lastHeadCheck = now
+        // 11.2 (M4): at launch / foreground ask what changed in the living map since the tiles rev this phone last saw
+        let since = (why == "launch" || why.hasPrefix("fore")) ? tiles?.rev : nil
+        let q = since.map { [URLQueryItem(name: "since_rev", value: String($0))] } ?? []
         Task { [weak self] in
-            let r = try? await link.request("GET", "/v1/maps/site/head", timeout: 15)
+            let r = try? await link.request("GET", "/v1/maps/site/head", query: q, timeout: 15)
             await MainActor.run {
                 guard let self else { return }
                 self.checking = false
                 guard let rr = r else { return }
                 let (d, s) = rr
-                if s == 200, let h = MapHead.decode(d) { self.offer(h, via: "http:\(why)") }
+                if s == 200, let h = MapHead.decode(d) {
+                    self.offer(h, via: "http:\(why)")
+                    if let sv = since, let o = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
+                       let ts = o["tiles_since"] as? [String: Any] {
+                        self.model.log.event("tiles_since", ["since_rev": .int(sv), "rev": .int((ts["rev"] as? Int) ?? -1),
+                                                             "full": .bool((ts["full"] as? Bool) ?? false),
+                                                             "changed": .int((ts["changed"] as? [Any])?.count ?? -1)])
+                    }
+                }
                 else if s != 404 { self.model.log.event("mapfollow_head_failed", ["status": .int(s), "why": .string(why)]) }
             }
         }
@@ -171,6 +185,15 @@ final class MapFollower {
             return
         }
         if task == nil && now >= reconnectAt { connect() }
+        // 11.2: the loaded tiles changed -> tell the server (it only announces changes of held tiles), <= every 2 s
+        if wsOpen, let tk = task, now - heldSentAt >= 2 {
+            let ts = model.controller.mapLayer.tiles
+            if ts.heldGen != heldSentGen {
+                heldSentGen = ts.heldGen
+                heldSentAt = now
+                tk.send(.string(TileSync.heldJSON(ts.held))) { _ in }
+            }
+        }
     }
 
     private func connect() {
@@ -184,7 +207,11 @@ final class MapFollower {
         let tk = session.webSocketTask(with: url)
         task = tk
         tk.resume()
-        let sub = #"{"type":"subscribe","map_id":"site","layers":["rev"]}"#
+        // 11.2: the subscribe carries the held tiles; the server answers with the ones that changed meanwhile
+        let ts = model.controller.mapLayer.tiles
+        heldSentGen = ts.heldGen
+        heldSentAt = now
+        let sub = TileSync.subscribeJSON(mapID: mapID, held: ts.held)
         tk.send(.string(sub)) { [weak self] err in
             guard let err else { return }
             DispatchQueue.main.async { if self?.gen == g { self?.fail("send: \(err.localizedDescription)") } }
@@ -205,7 +232,10 @@ final class MapFollower {
                     case .data(let x): d = x
                     @unknown default: d = nil
                     }
-                    if let d, let h = MapHead.decode(d) { self.offer(h, via: "rev_ws") }
+                    if let d, let h = MapHead.decode(d) {
+                        self.offer(h, via: "rev_ws")
+                        if let ev = TileSyncEvent.decode(message: d) { self.model.controller.mapLayer.tiles.applySync(ev) }
+                    }
                     self.receive(g)
                 case .failure(let e):
                     self.fail("receive: \(e.localizedDescription)")
