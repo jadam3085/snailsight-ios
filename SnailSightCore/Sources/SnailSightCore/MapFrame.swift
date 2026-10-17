@@ -235,6 +235,18 @@ public struct LocalizeAnswer: Decodable {
     public var lockSource: String?              // 10.4 (§5.6c): what the lock rests on: geometry | visual | both
     public var hint: Hint?                      // 10.4: while searching, what the user can do ("Turn to see a corner")
     public var geometry: Geometry?              // 10.4: the whole-map geometry search's state
+    public var tile: String?                    // 11.0 (M2): the locked camera's 4 m tile "L/tx/ty"
+    public var level: Int?                      // 11.0: its storey
+    public var cameraMap: [Double]?             // 11.0: the camera in the map frame [x, y, z]
+    public var confidence: Confidence?          // 11.0: how sure the lock is
+
+    public struct Confidence: Decodable, Equatable {
+        public var sigmaCm: Double?
+        public var sigmaDeg: Double?
+        public var source: String?
+        public var fixes: Int?
+        enum CodingKeys: String, CodingKey { case source, fixes, sigmaCm = "sigma_cm", sigmaDeg = "sigma_deg" }
+    }
 
     public struct Hint: Decodable, Equatable {
         public var code: String
@@ -281,6 +293,7 @@ public struct LocalizeAnswer: Decodable {
         case mapID = "map_id", mapVersion = "map_version", timeToLockS = "time_to_lock_s"
         case matchedSession = "matched_session", latencyMs = "latency_ms", versionChanged = "version_changed"
         case method, lockMethod = "lock_method", lockSource = "lock_source", hint, geometry
+        case tile, level, cameraMap = "camera_map", confidence
     }
 
     /// What the HUD names the lock by: what it rests on (10.4), else the lock's method, else this answer's.

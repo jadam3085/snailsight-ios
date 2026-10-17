@@ -162,3 +162,27 @@ same time? Usually when it's like this, I need to select the map again."
   (matched, or saved here) — 10.2 could cache an alignment from a session that was still relocalizing. Bodies placed
   while the house map holds a lock no longer auto-create "Area N" places. Logs: `reloc_try`, `reloc_abort`
   (reason timeout / server_locked / cancelled, keep_lock), `maploc_carried`, `maploc_confirmed`, `map_migrate`.
+
+**11.0 (localize first, then stream tiles: live shared-map plan M2, 2026-10-17)**: the house in AR no longer comes as
+one whole-house mesh. After a real server lock the app streams only the tiles near you from the map server's living-map
+tileset (3D Tiles 1.1, map frame; per-tile USDZ blobs, content-addressed and immutable).
+- **No map bytes before the lock.** Nothing (tileset, tiles, rooms / objects docs) is fetched until `/v1/localize`
+  locks. MapFollower only tracks the head (tiny JSON) and swaps / toasts as before; it no longer prefetches the
+  collision mesh or the whole-house usdz. The whole-house `collision.obj` is used only for the Sim X-ray occluder
+  (after a lock, while X-ray is on). Scans still downloads a version's usdz when the owner opens it.
+- **Tile selection** = `SnailSightCore.TileSelect`, an exact port of the server's reference (`tileselect.py`): distance
+  to each tile's box with the vertical part × 3, refine while closer than the tile size (4 m leaves ≤ 8 m, parents
+  farther, nothing past 40 m), heading prefetch (lookahead min(speed × 5 s, 10 m)), 600 MB budget (near ≤ 350 MB,
+  mid ≤ 150 MB by the tiles' `mem`, farthest cut first), REPLACE with the parent kept until its children are loaded.
+- `Sources/AR/TileStreamer.swift`: every 0.5 s select; download nearest first, ≤ 3 at a time, sha256-checked into
+  `Caches/tiles/<sha256>.usdz` (2 GB LRU, `TileDiskLRU`), load off the main thread, attach under the map frame turned
+  Y-up → Z-up; release what is neither wanted nor drawn. A new `head.tiles.rev` refetches the tileset; unchanged hashes
+  cost nothing (old content stays on screen until the new one is loaded).
+- **House overlay Model** (textured tiles, unlit) is the new default (one-time migration `ar.house.v11`); Wire / Ghost
+  put their materials on the same tiles. **Settings ▸ Raw scan** (default off) draws the raw scan tiles instead of the
+  structure variant (walls / floors / ceilings + furniture).
+- Localize requests carry `hints` {last_tile, last_level, last_xy, last_pose_age_s} from the last lock (persisted);
+  answers' `tile`, `level`, `confidence` are logged.
+- Logs: `tiles_start` (variant, rev, since_lock_s), `tile_fetch` (key, bytes, ms, cached), `tile_drawn_first_near`
+  (since_lock_s), `tiles_status` every 10 s (drawn, loaded, mem_mb, disk_mb, dl_mb_total, footprint_mb, avail_mb),
+  `tile_evict`, `tile_error`, `tiles_unavailable`; `maploc_try` / `maploc_locked` gain tile, level, sigma_cm, sigma_deg.

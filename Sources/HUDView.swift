@@ -388,6 +388,7 @@ private struct MoreMenu: View {
                     ForEach(HouseStyle.allCases) { Text($0.rawValue).tag($0) }
                 } label: { Label("House overlay: \(model.houseStyle.rawValue)", systemImage: "house") }
                 .pickerStyle(.menu)
+                Toggle(isOn: $model.rawScan) { Label("Raw scan", systemImage: "cube.transparent") }   // 11.0 tiles variant
                 Toggle(isOn: $model.arObjects) { Label("Objects", systemImage: "shippingbox") }
                 Toggle(isOn: $model.arTerrain) { Label("Robot terrain", systemImage: "square.grid.3x3.topleft.filled") }
                 Toggle(isOn: $model.arAgents) { Label("Other agents", systemImage: "person.2.wave.2") }

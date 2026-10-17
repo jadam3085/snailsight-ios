@@ -37,6 +37,8 @@ final class MapLocalizer {
     let mapID = "site"
     private(set) var alignment: MapAlignment?          // this ARKit session's map ← ARKit (nil until locked)
     private(set) var lockSeconds: Double?
+    /// 11.0: when this run's server lock arrived (the tile streamer's `since_lock_s` clock); nil while unlocked.
+    private(set) var lockedAt: Double?
     private var placedWith: MapAlignment?               // the alignment the bodies on screen were placed with
     private(set) var streamID = MapLocalizer.newStream()
     private var streamStart = Date().timeIntervalSince1970
@@ -108,6 +110,7 @@ final class MapLocalizer {
         streamID = Self.newStream()
         streamStart = now
         alignment = nil
+        if !(carryLock && pendingCarry != nil) { lockedAt = nil }
         placedWith = nil
         lockSeconds = nil
         attempts = 0
@@ -180,6 +183,7 @@ final class MapLocalizer {
         let conf = depth.confidenceMap.map { CaptureRecorder.copyBytes($0) }
         let img = CIImage(cvPixelBuffer: f.capturedImage)
         let stream = streamID, frameNo = attempts, stamp = f.timestamp
+        let locHint = LocHintStore.get()
         let link = model.link!
         enc.async { [weak self] in
             guard let self else { return }
@@ -194,8 +198,10 @@ final class MapLocalizer {
                                      "K": [Double(K[0][0]), Double(K[1][1]), Double(K[2][0]), Double(K[2][1])],
                                      "image_size": [Int(res.width), Int(res.height)], "T_arkit_cam": cm]
             if let cp { fr["conf_png"] = cp.base64EncodedString() }
-            let body: [String: Any] = ["agent_id": self.model.agentID, "stream_id": stream, "map_id": self.mapID,
+            var body: [String: Any] = ["agent_id": self.model.agentID, "stream_id": stream, "map_id": self.mapID,
                                        "frames": [fr]]
+            // 11.0: the last lock's tile as a geometry-search prior (never a placement)
+            if let h = locHint?.body(mapID: self.mapID, now: Date().timeIntervalSince1970) { body["hints"] = h }
             self.send(body, link: link, stream: stream, timeout: timeout,
                       cameraPos: [Double(T.columns.3.x), Double(T.columns.3.y), Double(T.columns.3.z)])
         }
@@ -262,7 +268,11 @@ final class MapLocalizer {
                                        "rtt_ms": .int(Int(roundTripMs)), "version": .int(a.mapVersion),
                                        "method": .string(a.method ?? ""), "lock_source": .string(a.lockSource ?? ""),
                                        "geo": .string(a.geometry?.last?.reason ?? a.geometry?.state ?? ""),
-                                       "hint": .string(a.hint?.code ?? "")])
+                                       "hint": .string(a.hint?.code ?? ""), "tile": .string(a.tile ?? ""),
+                                       "level": .int(a.level ?? -99), "sigma_cm": .double(a.confidence?.sigmaCm ?? -1),
+                                       "sigma_deg": .double(a.confidence?.sigmaDeg ?? -1),
+                                       "conf_source": .string(a.confidence?.source ?? ""),
+                                       "conf_fixes": .int(a.confidence?.fixes ?? -1)])
         guard a.locked, let T = a.T_map_arkit else { return }
         if a.anyAccepted || source != "server" { lastFixAt = now }
         if let r = a.bestRmseCm { lastRmseCm = r }
@@ -278,6 +288,9 @@ final class MapLocalizer {
         alignment = next
         source = "server"
         LastFixStore.put(LastMapFix(mapID: a.mapID, position: next.toMap(arkit: cameraPos), at: now))
+        LocHintStore.put(LocHint.from(answer: a.tile, level: a.level, cameraMap: a.cameraMap,
+                                      fallbackMap: next.toMap(arkit: cameraPos), mapID: a.mapID, now: now))
+        if lockedAt == nil { lockedAt = now }
         if firstServerLock && wasCarried {
             // 10.3: the carried lock confirmed by the server in the new frame (bodies move only if it is > 10 cm off)
             model.log.event("maploc_confirmed", ["cm": .double(cross?.cm ?? -1), "deg": .double(cross?.deg ?? -1),
@@ -292,7 +305,9 @@ final class MapLocalizer {
                                           "attempts": .int(attempts), "session": .string(a.matchedSession ?? ""),
                                           "spread_cm": .double(a.gate?.spreadCm ?? 0),
                                           "yaw_deg": .double(next.yaw * 180 / .pi), "tilt_deg": .double(next.tiltDeg),
-                                          "method": .string(next.method ?? "")]
+                                          "method": .string(next.method ?? ""), "tile": .string(a.tile ?? ""),
+                                          "level": .int(a.level ?? -99), "sigma_cm": .double(a.confidence?.sigmaCm ?? -1),
+                                          "sigma_deg": .double(a.confidence?.sigmaDeg ?? -1)]
             if let c = cross { ev["cross_cm"] = .double(c.cm); ev["cross_deg"] = .double(c.deg) }
             model.log.event("maploc_locked", ev)
             model.flash(MapLocText.locked(mapID: a.mapID, version: a.mapVersion, seconds: lockSeconds,
@@ -696,6 +711,17 @@ enum MapFrameCache {
         m[place] = a
         memo = m
         if let u = url, let d = try? JSONEncoder().encode(m) { try? d.write(to: u, options: .atomic) }
+    }
+}
+
+/// 11.0: the last lock's tile / level / position, sent as `hints` with every localize request (persisted across launches).
+enum LocHintStore {
+    private static let key = "snailsight.locHint"
+    static func get() -> LocHint? {
+        UserDefaults.standard.data(forKey: key).flatMap { try? JSONDecoder().decode(LocHint.self, from: $0) }
+    }
+    static func put(_ h: LocHint) {
+        if let d = try? JSONEncoder().encode(h) { UserDefaults.standard.set(d, forKey: key) }
     }
 }
 

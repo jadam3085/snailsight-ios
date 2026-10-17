@@ -51,9 +51,11 @@ public struct MapHead: Codable, Equatable {
     public var collision: Collision?
     public var pending: Pending?
     public var serverTime: Double?
+    /// 11.0 (plan M2): the living map's tilesets (nil until the server has built them).
+    public var tiles: MapTiles?
 
     enum CodingKeys: String, CodingKey {
-        case rev, ready, version, scene, etag, phone, collision, pending
+        case rev, ready, version, scene, etag, phone, collision, pending, tiles
         case mapID = "map_id", latestVersion = "latest_version", serverTime = "server_time"
     }
 

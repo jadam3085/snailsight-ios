@@ -1,3 +1,6 @@
+// 11.0 (plan M2): the follower only tracks the head (tiny JSON) and applies the swap + toast. It no longer prefetches the
+// collision mesh or the whole-house usdz: the AR view streams tiles after the lock (TileStreamer reads `tiles`, the
+// head's tileset block), and Scans downloads a version's usdz only when the owner opens it.
 // SnailSight 10.7 "follow LATEST" (live shared-map plan M1, API §5.11; owner 2026-10-16: "I selected the newest map,
 // it wasn't loaded until I loaded it"). The main AR view always shows the house map's newest READY version:
 //  - launch: the last head this phone saw (UserDefaults) is shown at once; its collision mesh is in Caches/armap, so the
@@ -20,7 +23,8 @@ final class MapFollower {
     private var lastTick: TimeInterval = 0
     private var lastHeadCheck: TimeInterval = 0
     private var checking = false
-    private var prefetching: String?                     // etag being downloaded
+    /// 11.0: the newest head's `tiles` block (the living map's tilesets); nil until the server has built them.
+    private(set) var tiles: MapTiles?
     private var launchT = ProcessInfo.processInfo.systemUptime
     private var firstShownLogged = false
     // rev WebSocket
@@ -44,6 +48,7 @@ final class MapFollower {
         var cached: MapHead?
         if let d = UserDefaults.standard.data(forKey: Self.headKey) { cached = MapHead.decode(d) }
         state = MapFollow(cached: cached)
+        tiles = cached?.tiles
     }
 
     private var now: TimeInterval { Date().timeIntervalSince1970 }
@@ -114,11 +119,16 @@ final class MapFollower {
 
     /// A head from HTTP, the rev WS or the Live map downlink (main thread).
     func offer(_ h: MapHead, via: String) {
+        if let tb = h.tiles, !tb.tilesets.isEmpty, tb != tiles {
+            tiles = tb
+            if let d = try? JSONEncoder().encode(h), state.shown?.etag == h.etag { UserDefaults.standard.set(d, forKey: Self.headKey) }
+        }
         let wanted = state.offer(h)
         model.log.event("mapfollow_head", ["via": .string(via), "rev": h.rev.map { LogValue.int($0) } ?? LogValue.string("none"),
                                            "etag": .string(h.etag ?? ""), "latest": .int(h.latestVersion ?? -1),
                                            "pending": .int(h.pending?.version ?? -1),
-                                           "shown": .int(state.followVersion ?? -1), "fetch": .bool(wanted)])
+                                           "shown": .int(state.followVersion ?? -1), "fetch": .bool(wanted),
+                                           "tiles_rev": .int(h.tiles?.rev ?? -1)])
         if wanted { prefetch(h) }
     }
 
@@ -128,47 +138,12 @@ final class MapFollower {
         offer(h, via: "live_downlink")
     }
 
+    /// 11.0: nothing to download any more (tiles stream after the lock): the head is staged at once and swaps in at a
+    /// still moment as before (the docs / labels follow the swapped version).
     private func prefetch(_ h: MapHead) {
-        guard let etag = h.etag, prefetching != etag, let scene = h.sceneID, let link = model.link else { return }
-        prefetching = etag
-        let t0 = now
-        Task { [weak self] in
-            // 1. the AR collision mesh (what the main view draws), into the same cache MapARLayer reads
-            var arOK = true
-            if let c = h.collision {
-                arOK = await MapARLayer.cacheCollision(scene: scene, url: c.url, link: link)
-            }
-            // 2. the usdz for Scans (the newest map opens there without a download); best effort
-            var usdzNote = "skipped"
-            if h.phone != nil {
-                usdzNote = await MapFollower.prefetchUsdz(scene: scene, model: self?.model)
-            }
-            await MainActor.run {
-                guard let self else { return }
-                if self.prefetching == etag { self.prefetching = nil }
-                self.model.log.event("mapfollow_prefetch", ["rev": .int(h.rev ?? -1), "etag": .string(etag),
-                                                             "ar": .bool(arOK), "usdz": .string(usdzNote),
-                                                             "s": .double(self.now - t0)])
-                guard arOK else { return }                   // retried by the next poll / rev
-                self.state.didPrefetch(h, now: self.now)
-                if let s = self.state.swapDue(now: self.now, still: self.stillNow) { self.applySwap(s, still: self.stillNow) }
-            }
-        }
-    }
-
-    @MainActor
-    private static func prefetchUsdz(scene: String, model: AppModel?) async -> String {
-        guard let model else { return "no model" }
-        if model.recording { return "skipped (recording: the capture upload owns the bandwidth)" }
-        let store = model.sharedScanStore()
-        do {
-            let it = try await store.fetch(scene)
-            guard it.mesh?.isReady == true else { return "not ready" }
-            _ = try await store.file(it, .mesh) { _ in }
-            return "cached"
-        } catch {
-            return "failed: \(error.localizedDescription)"
-        }
+        state.didPrefetch(h, now: now)
+        model.log.event("mapfollow_staged", ["rev": .int(h.rev ?? -1), "etag": .string(h.etag ?? "")])
+        if let s = state.swapDue(now: now, still: stillNow) { applySwap(s, still: stillNow) }
     }
 
     private func applySwap(_ h: MapHead, still: Bool) {

@@ -19,7 +19,7 @@ on:
       app_version:
         description: "Marketing version prefix (the phone sees <prefix>.<run# + 200>)"
         type: string
-        default: "10.6"
+        default: "11.0"
 
 permissions:
   contents: read
@@ -47,7 +47,7 @@ jobs:
     runs-on: macos-15          # Xcode 16.4 / iOS 18.5 SDK; move to macos-26 deliberately
     timeout-minutes: 30
     env:
-      APP_VERSION: ${{ inputs.app_version || '10.6' }}
+      APP_VERSION: ${{ inputs.app_version || '11.0' }}
       # Optional default map servers for forks (repo variables). Empty = none compiled in (README "Map server address").
       SNAILSIGHT_SERVER_TAILNET: ${{ vars.SNAILSIGHT_SERVER_TAILNET }}
       SNAILSIGHT_SERVER_LAN: ${{ vars.SNAILSIGHT_SERVER_LAN }}

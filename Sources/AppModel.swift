@@ -140,8 +140,24 @@ final class AppModel: ObservableObject {
     @Published var liveGood = false
 
     // 10.1 AR 1:1 (Sources/AR): the house map drawn where it really is once LOCALIZED
-    @Published var houseStyle: HouseStyle = HouseStyle(rawValue: UserDefaults.standard.string(forKey: "ar.house") ?? "") ?? .wire {
+    // 11.0: Model (the streamed textured tiles) is the default, once for everyone (key ar.house.v11), then the owner's pick.
+    @Published var houseStyle: HouseStyle = AppModel.initialHouseStyle() {
         didSet { UserDefaults.standard.set(houseStyle.rawValue, forKey: "ar.house") }
+    }
+    /// 11.0 Settings ▸ Raw scan: draw the raw scan mesh tiles instead of the structure variant (walls / floors /
+    /// ceilings + furniture), which is the default.
+    @Published var rawScan: Bool = UserDefaults.standard.bool(forKey: "ar.tiles.raw") {
+        didSet { UserDefaults.standard.set(rawScan, forKey: "ar.tiles.raw") }
+    }
+
+    static func initialHouseStyle() -> HouseStyle {
+        let d = UserDefaults.standard
+        if !d.bool(forKey: "ar.house.v11") {
+            d.set(true, forKey: "ar.house.v11")
+            d.set(HouseStyle.model.rawValue, forKey: "ar.house")
+            return .model
+        }
+        return HouseStyle(rawValue: d.string(forKey: "ar.house") ?? "") ?? .model
     }
     @Published var arObjects: Bool = UserDefaults.standard.object(forKey: "ar.objects") as? Bool ?? true {
         didSet { UserDefaults.standard.set(arObjects, forKey: "ar.objects") }

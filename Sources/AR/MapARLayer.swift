@@ -1,3 +1,7 @@
+// 11.0 (live shared-map plan M2): the house itself is drawn from streamed per-tile USDZ (TileStreamer, `tileNode`)
+// after the lock: Model = the textured tiles (default), Wire / Ghost = their materials on the same tiles. The
+// whole-house collision.obj is no longer downloaded for drawing (only for the Sim X-ray occluder, after a lock, while
+// X-ray is on). Rooms / objects docs are fetched only after a lock too: no map bytes before the lock.
 // 10.7: the version drawn follows the house map's newest READY version (MapFollower, plan M1); a newer mesh swaps in
 // at a still moment.
 // SnailSight 10.1 "AR 1:1" (plan §7 P2 finish + P4 in AR): once LOCALIZED against the house map (MapLocalizer,
@@ -17,7 +21,7 @@ import UIKit
 import SnailSightCore
 
 enum HouseStyle: String, CaseIterable, Identifiable {
-    case off = "Off", labels = "Labels", wire = "Wire", ghost = "Ghost"
+    case off = "Off", labels = "Labels", model = "Model", wire = "Wire", ghost = "Ghost"
     var id: String { rawValue }
 }
 
@@ -46,7 +50,6 @@ final class MapARLayer {
     let root = AnchorEntity(world: matrix_identity_float4x4)
     /// Child of `root` carrying T_arkit_map (the anchor itself stays at identity, as MeshOverlay / SimController do).
     private let mapFrame = Entity()
-    private let meshNode = Entity()
     private let labelNode = Entity()
     private let objectNode = Entity()
     /// Other layers draw in the map frame under these.
@@ -69,11 +72,6 @@ final class MapARLayer {
     // content of the current scene ("site@10")
     private(set) var sceneID: String?
     private var loadingScene: String?
-    private var meshScene: String?
-    private var chunkCenters: [String: [Double]] = [:]
-    private var chunkEntities: [String: ModelEntity] = [:]
-    private var pendingChunks: [MeshChunker.Chunk] = []
-    private var meshStyleApplied: HouseStyle?
     private(set) var objectsDoc: ARObjectsDoc?
     private var roomsDoc: ARRoomsDoc?
     private var floorZ: Double?
@@ -88,10 +86,11 @@ final class MapARLayer {
     static let maxLabels = 30
     static let boxRange: Double = 6
     static let maxBoxes = 25
-    static let meshRange: Double = 14
-    static let meshLift: Float = 0.01
+    /// 11.0: the streamed house tiles (Model / Wire / Ghost) under the map frame.
+    private(set) lazy var tiles = TileStreamer(model: model, layer: self)
+    private(set) var camForwardWorld = SIMD3<Float>(0, 0, -1)
 
-    private lazy var wireMaterial: UnlitMaterial = {
+    lazy var wireMaterial: UnlitMaterial = {
         var m = UnlitMaterial(color: UIColor(red: 0.35, green: 0.85, blue: 1, alpha: 1))
         if #available(iOS 18.0, *) {
             m.triangleFillMode = .lines
@@ -101,7 +100,7 @@ final class MapARLayer {
         }
         return m
     }()
-    private lazy var ghostMaterial: UnlitMaterial = {
+    lazy var ghostMaterial: UnlitMaterial = {
         var m = UnlitMaterial(color: UIColor(red: 0.35, green: 0.85, blue: 1, alpha: 1))
         m.blending = .transparent(opacity: 0.12)
         return m
@@ -112,7 +111,8 @@ final class MapARLayer {
         self.arView = arView
         root.name = "map.root"
         root.addChild(mapFrame)
-        for n in [meshNode, labelNode, objectNode, terrainNode, pathNode, agentNode, liveNode, simNode] { mapFrame.addChild(n) }
+        for n in [labelNode, objectNode, terrainNode, pathNode, agentNode, liveNode, simNode] { mapFrame.addChild(n) }
+        mapFrame.addChild(tiles.node)
         root.isEnabled = false
         arView.scene.addAnchor(root)
     }
@@ -144,6 +144,8 @@ final class MapARLayer {
         lastFrameT = t
         let c = f.camera.transform.columns.3
         camWorld = SIMD3<Float>(c.x, c.y, c.z)
+        let fw = f.camera.transform.columns.2                   // the camera looks along -z
+        camForwardWorld = SIMD3<Float>(-fw.x, -fw.y, -fw.z)
         let pivot = [Double(c.x), Double(c.y), Double(c.z)]
         let tg = target
         if tg != blender.target { blender.setTarget(tg) }
@@ -161,7 +163,6 @@ final class MapARLayer {
         let show = shown != nil && status.opacity > 0 && t >= hiddenUntil && !model.recording && !model.showScans
         if root.isEnabled != show { root.isEnabled = show }
         guard show else { return }
-        buildPendingChunks(max: 2)
         for e in labelEntities.values.filter({ $0.isEnabled }) + model.liveMap.tagEntities + model.serverSim.tagEntities {
             let p = e.position(relativeTo: nil)
             e.setOrientation(Geo.billboardRotation(position: p, camera: camWorld), relativeTo: nil)
@@ -182,18 +183,20 @@ final class MapARLayer {
         status = s
         if model.arStatus != s { model.arStatus = s }
         // 10.7 follow LATEST (plan M1): the content version = the lock's version while it is not newer than the
-        // followed head, else the head (MapFollower); before a lock the head's content is preloaded (drawn at the lock).
-        // Offline the cached collision mesh still loads (the docs simply stay as they were).
-        if let v = model.mapFollower.contentVersion(lock: mapVersion) {
+        // followed head, else the head (MapFollower).
+        // 11.0: only after a lock (no map bytes before it), and only the small docs (rooms, objects): the house mesh
+        // itself streams as tiles (TileStreamer).
+        if al != nil, model.serverBase != nil, let v = model.mapFollower.contentVersion(lock: mapVersion) {
             let scene = "\(mapID)@\(v)"
-            let wait: Double = model.serverBase != nil ? 10 : 60
-            if scene != sceneID && loadingScene == nil && now - lastLoadTry > wait { load(scene) }
+            if scene != sceneID && loadingScene == nil && now - lastLoadTry > 10 { load(scene) }
         }
-        applyStagedMesh(now: now)
         guard let sh = shown else { return }
         let cam = sh.toMap(pivot)
+        let ahead = sh.toMap([pivot[0] + Double(camForwardWorld.x), pivot[1] + Double(camForwardWorld.y),
+                              pivot[2] + Double(camForwardWorld.z)])
         applyStyle()
         updateVisible(cam: cam)
+        tiles.tick(cam: cam, forward: [ahead[0] - cam[0], ahead[1] - cam[1], ahead[2] - cam[2]])
         model.terrainLayer.tick(cameraMap: cam)
     }
 
@@ -246,7 +249,6 @@ final class MapARLayer {
         loadingScene = scene
         lastLoadTry = Date().timeIntervalSince1970
         let link = model.link!
-        let wantMesh = !docsOnly && meshScene != scene
         loadTask?.cancel()
         loadTask = Task { [weak self] in
             let enc = scene.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? scene
@@ -262,12 +264,7 @@ final class MapARLayer {
             if let r = try? await link.request("GET", "/v1/phone/scans/\(enc)", timeout: 15), r.1 == 200 {
                 floor = (JSON.object(r.0)["floor_z"] as? NSNumber)?.doubleValue
             }
-            var chunks: [MeshChunker.Chunk]?
-            var meshNote = ""
-            if wantMesh {
-                (chunks, meshNote) = await Self.loadMesh(scene: scene, enc: enc, link: link)
-            }
-            let roomsF = rooms, objectsF = objects, floorF = floor, chunksF = chunks, noteF = meshNote
+            let roomsF = rooms, objectsF = objects, floorF = floor
             await MainActor.run {
                 guard let self, self.loadingScene == scene else { return }
                 self.loadingScene = nil
@@ -276,39 +273,10 @@ final class MapARLayer {
                 if let o = objectsF { self.objectsDoc = o }
                 if let f = floorF { self.floorZ = f }
                 self.rebuildItems()
-                if let c = chunksF { self.stageMesh(c, scene: scene) }
                 self.model.log.event("armap_load", ["scene": .string(scene), "rooms": .int(roomsF?.rooms.count ?? -1),
-                                                    "objects": .int(objectsF?.objects.count ?? -1),
-                                                    "mesh_chunks": .int(chunksF?.count ?? -1), "mesh": .string(noteF)])
+                                                    "objects": .int(objectsF?.objects.count ?? -1)])
             }
         }
-    }
-
-    /// collision.obj of the scene (≤ 120 k triangles, map frame), cached in Caches/armap/, parsed + chunked off main.
-    private static func loadMesh(scene: String, enc: String, link: ServerLink) async -> ([MeshChunker.Chunk]?, String) {
-        let fm = FileManager.default
-        guard let dir = fm.urls(for: .cachesDirectory, in: .userDomainMask).first?.appendingPathComponent("armap", isDirectory: true)
-        else { return (nil, "no caches dir") }
-        try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
-        let file = dir.appendingPathComponent(scene.replacingOccurrences(of: "@", with: "-v") + "-collision.obj")
-        var data = try? Data(contentsOf: file)
-        var note = data == nil ? "downloaded" : "cached"
-        if data == nil {
-            guard let r = try? await link.request("GET", "/v1/scenes/\(enc)/files/collision.obj", timeout: 90), r.1 == 200 else {
-                return (nil, "download failed")
-            }
-            data = r.0
-            try? r.0.write(to: file, options: .atomic)
-            evictMeshCache(dir)
-        } else {
-            try? fm.setAttributes([.modificationDate: Date()], ofItemAtPath: file.path)   // in use: newest for eviction
-        }
-        guard let d = data else { return (nil, "no data") }
-        let chunks = await Task.detached(priority: .utility) { () -> [MeshChunker.Chunk] in
-            MeshChunker.split(ObjReader.parse(d).liftedAlongNormals(MapARLayer.meshLift), cell: 4)
-        }.value
-        note += " \(chunks.reduce(0) { $0 + $1.mesh.triangleCount }) tris"
-        return (chunks, note)
     }
 
     // MARK: 10.8 X-ray: the house mesh as a CPU ray index (map frame) - is a sim body behind a wall?
@@ -318,9 +286,11 @@ final class MapARLayer {
     private var occluderScene: String?
     private var occluderLoading = false
 
-    /// Build (in the background) the ray index of the shown scene's collision mesh, once per scene.
+    /// Build (in the background) the ray index of the shown scene's collision mesh, once per scene. 11.0: the ONLY use
+    /// of collision.obj left: fetched after a server lock, while Sim X-ray is on (callers check the toggle).
     func ensureOccluder() {
-        guard let scene = sceneID, scene != occluderScene, !occluderLoading, let link = model.link else { return }
+        guard model.mapLocalizer.alignment != nil, let scene = sceneID, scene != occluderScene, !occluderLoading,
+              let link = model.link else { return }
         occluderLoading = true
         let enc = scene.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? scene
         Task { [weak self] in
@@ -371,48 +341,11 @@ final class MapARLayer {
             return nil
         }
         try? r.0.write(to: file, options: .atomic)
+        evictMeshCache(dir)
         return r.0
     }
 
-    /// 10.7: the first mesh goes up at once; a newer version replaces the one on screen at a still moment (≤ 10 s),
-    /// so the house never changes under a walking owner.
-    private var staged: (chunks: [MeshChunker.Chunk], scene: String, at: TimeInterval)?
-    static let stageMaxWait: TimeInterval = 10
-
-    private func stageMesh(_ chunks: [MeshChunker.Chunk], scene: String) {
-        if meshScene == nil || !isAligned {
-            setMesh(chunks, scene: scene)
-        } else {
-            staged = (chunks, scene, Date().timeIntervalSince1970)
-            applyStagedMesh(now: Date().timeIntervalSince1970)
-        }
-    }
-
-    private func applyStagedMesh(now: TimeInterval) {
-        guard let st = staged else { return }
-        guard !isAligned || model.mapFollower.isStill || now - st.at >= Self.stageMaxWait else { return }
-        staged = nil
-        let from = meshScene
-        setMesh(st.chunks, scene: st.scene)
-        model.log.event("armap_mesh_swap", ["from": .string(from ?? ""), "to": .string(st.scene),
-                                            "waited_s": .double(now - st.at), "still": .bool(model.mapFollower.isStill)])
-    }
-
-    /// 10.7 prefetch (MapFollower): put a version's collision mesh into the cache `loadMesh` reads. true = cached.
-    static func cacheCollision(scene: String, url: String, link: ServerLink) async -> Bool {
-        let fm = FileManager.default
-        guard let dir = fm.urls(for: .cachesDirectory, in: .userDomainMask).first?.appendingPathComponent("armap", isDirectory: true)
-        else { return false }
-        try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
-        let file = dir.appendingPathComponent(scene.replacingOccurrences(of: "@", with: "-v") + "-collision.obj")
-        if fm.fileExists(atPath: file.path) { return true }
-        guard let r = try? await link.request("GET", url, timeout: 120), r.1 == 200, !r.0.isEmpty,
-              (try? r.0.write(to: file, options: .atomic)) != nil else { return false }
-        evictMeshCache(dir)
-        return true
-    }
-
-    /// Keep only the newest 3 cached collision meshes.
+    /// Keep only the newest 3 cached collision meshes (the X-ray occluder's cache).
     private static func evictMeshCache(_ dir: URL) {
         let fm = FileManager.default
         let all = (try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
@@ -424,46 +357,10 @@ final class MapARLayer {
         for u in old { try? fm.removeItem(at: u) }
     }
 
-    private func setMesh(_ chunks: [MeshChunker.Chunk], scene: String) {
-        for e in chunkEntities.values { e.removeFromParent() }
-        chunkEntities.removeAll()
-        chunkCenters = Dictionary(uniqueKeysWithValues: chunks.map { ($0.key, $0.center) })
-        pendingChunks = chunks
-        meshScene = scene
-        meshStyleApplied = nil
-    }
-
-    /// A few chunks per frame so building ~30 meshes never stalls the AR view.
-    private func buildPendingChunks(max n: Int) {
-        guard !pendingChunks.isEmpty, model.houseStyle == .wire || model.houseStyle == .ghost else { return }
-        for _ in 0..<n {
-            guard let c = pendingChunks.popLast() else { break }
-            var pos = [SIMD3<Float>]()
-            pos.reserveCapacity(c.mesh.vertexCount)
-            var i = 0
-            while i + 2 < c.mesh.positions.count {
-                pos.append(SIMD3<Float>(c.mesh.positions[i], c.mesh.positions[i + 1], c.mesh.positions[i + 2]))
-                i += 3
-            }
-            var d = MeshDescriptor(name: "house")
-            d.positions = MeshBuffers.Positions(pos)
-            d.primitives = .triangles(c.mesh.indices)
-            guard let res = try? MeshResource.generate(from: [d]) else { continue }
-            let e = ModelEntity(mesh: res, materials: [model.houseStyle == .ghost ? ghostMaterial : wireMaterial])
-            meshNode.addChild(e)
-            chunkEntities[c.key] = e
-        }
-    }
-
     private func applyStyle() {
         let st = model.houseStyle
-        meshNode.isEnabled = st == .wire || st == .ghost
         labelNode.isEnabled = st != .off
         objectNode.isEnabled = st != .off && model.arObjects
-        guard meshStyleApplied != st, st == .wire || st == .ghost else { return }
-        meshStyleApplied = st
-        let m = st == .ghost ? ghostMaterial : wireMaterial
-        for e in chunkEntities.values { e.model?.materials = [m] }
     }
 
     // MARK: labels + boxes
@@ -506,10 +403,6 @@ final class MapARLayer {
             let e = boxOutline(b)
             objectNode.addChild(e)
             boxEntities[b.id] = e
-        }
-        // mesh chunks near the camera
-        for (k, e) in chunkEntities {
-            if let c = chunkCenters[k] { e.isEnabled = hypot(c[0] - cam[0], c[1] - cam[1]) <= Self.meshRange }
         }
     }
 

@@ -1,7 +1,7 @@
 # SnailSight (iOS)
 
 Native ARKit / RealityKit LiDAR app: world-locked AR with the live scene mesh, measuring, room and object capture,
-upload to a self-hosted map server, relocalization in a whole-house map, saved places, localization status pill, mesh-only mapping, a scans viewer (mesh, Gaussian
+upload to a self-hosted map server, relocalization in a whole-house map, the house drawn from streamed tiles after the lock (11.0), saved places, localization status pill, mesh-only mapping, a scans viewer (mesh, Gaussian
 splats via MetalSplatter, AR dollhouse) and a small physics sim (robot + animals) in AR.
 
 It is built Mac-less on GitHub Actions and produces an **unsigned** `.ipa`; signing and installing happen elsewhere

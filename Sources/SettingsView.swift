@@ -85,6 +85,7 @@ struct SettingsView: View {
                     Picker("House overlay", selection: $model.houseStyle) {
                         ForEach(HouseStyle.allCases) { Text($0.rawValue).tag($0) }
                     }
+                    Toggle("Raw scan", isOn: $model.rawScan)
                     Toggle("Objects", isOn: $model.arObjects)
                     Toggle("Robot terrain", isOn: $model.arTerrain)
                     Toggle("Other agents", isOn: $model.arAgents)
@@ -94,7 +95,7 @@ struct SettingsView: View {
                     let f = model.serverFeatures.list.sorted().joined(separator: ", ")
                     Text("Server features: \(f.isEmpty ? "unknown (offline)" : f)").font(.caption2).foregroundStyle(.secondary)
                 } header: { Text("House map in AR (1:1)") } footer: {
-                    Text("Once LOCALIZED in the house map, its mesh (Wire / Ghost), room names and detected objects are drawn where they really are; corrections ease in, never jump. Robot terrain colours the floor green → red for RobosnailBob. Shared sim and live downlink switch on by themselves when the map server offers them; Force tries them anyway.")
+                    Text("Once LOCALIZED in the house map, the house near you streams in as tiles (Model = textured, Wire / Ghost = outlines; nothing is downloaded before the lock), with room names and detected objects where they really are; corrections ease in, never jump. Raw scan shows the scanned mesh instead of the cleaned-up walls, floors and furniture. Robot terrain colours the floor green → red for RobosnailBob. Shared sim and live downlink switch on by themselves when the map server offers them; Force tries them anyway.")
                 }
                 Section("Logs") {
                     Button(model.sendingLog ? "Sending…" : "Send log now") { model.sendLog() }.disabled(model.sendingLog)
