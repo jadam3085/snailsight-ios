@@ -16,6 +16,7 @@ struct HUDView: View {
             VStack(spacing: 4) {                                    // 10.2: "am I localized?" at the top edge
                 LocalizationPill()
                 if let m = model.meshMapText { MappingLine(text: m, live: model.meshMapLive) }
+                if let r = model.roomScanText { MappingLine(text: r, live: model.roomScanOn) }
                 if model.locExpanded { LocCard().transition(.move(edge: .top).combined(with: .opacity)) }
             }
             .frame(maxWidth: .infinity)
@@ -398,6 +399,10 @@ private struct MoreMenu: View {
             Section("Mapping (mesh only)") {
                 Toggle(isOn: $model.meshMapOn) { Label("Map mesh", systemImage: "cube.transparent") }
                 Toggle(isOn: $model.meshMapAuto) { Label("Auto when localized", systemImage: "location.viewfinder") }
+                Button { model.roomScanner.toggle() } label: {   // 11.3 RoomPlan walls / doors / windows → structure layer
+                    Label(model.roomScanOn ? "Stop room scan" : "Room scan", systemImage: "square.split.bottomrightquarter")
+                }
+                .disabled(!RoomScanner.supported)
             }
             Section("Live map") {
                 Toggle(isOn: $model.liveOn) { Label("Live map", systemImage: "dot.radiowaves.left.and.right") }

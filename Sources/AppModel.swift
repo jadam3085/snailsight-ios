@@ -122,6 +122,9 @@ final class AppModel: ObservableObject {
     }
     /// "mapping · 34 MB · 12 kf" under the pill (nil = hidden); live = capturing right now (not paused).
     @Published var meshMapText: String?
+    /// 11.3 Room scan (Sources/RoomScan, RoomPlan → structure layer S4): capturing now + the HUD line (nil = hidden).
+    @Published var roomScanOn = false
+    @Published var roomScanText: String?
     @Published var meshMapLive = false
     @Published var showSettings = false
     /// 10.0 Live map (Sources/Live/LiveStreamer, API §6b): stream keyframes to the map server while on. Off at launch.
@@ -229,6 +232,7 @@ final class AppModel: ObservableObject {
     private(set) lazy var mapLocalizer = MapLocalizer(model: self)
     private(set) lazy var liveStreamer = LiveStreamer(model: self)
     private(set) lazy var meshMapper = MeshMapper(model: self)
+    private(set) lazy var roomScanner = RoomScanner(model: self)
     private(set) lazy var terrainLayer = TerrainARLayer(model: self)
     private(set) lazy var liveMap = LiveMapClient(model: self)
     private(set) lazy var serverSim = ServerSimClient(model: self)
@@ -309,7 +313,7 @@ final class AppModel: ObservableObject {
         services.onLink = { [weak self] base, label in
             self?.serverBase = base
             self?.serverLabel = label
-            if base != nil { self?.placeCtl.online(); self?.refreshFeatures(); self?.meshMapper.pump() }   // places / mapping saved offline go up now
+            if base != nil { self?.placeCtl.online(); self?.refreshFeatures(); self?.meshMapper.pump(); self?.roomScanner.pump() }   // places / mapping saved offline go up now
         }
         services.onUploads = { [weak self] items, rate in
             self?.uploads = items
@@ -403,6 +407,7 @@ final class AppModel: ObservableObject {
         mapFollower.enteredBackground()
         // ARKit stops in the background and iOS may end a suspended app: finish the capture cleanly now
         if recorder.isRecording { stopRecording(reason: "background") }
+        roomScanner.appBackground()                     // 11.3: RoomPlan stops with ARKit; the room is built + spooled
         meshMapper.appBackground()                      // 10.2: ARKit stops; the mapping upload finishes
         guard bgTask == .invalid else { return }
         // short work only (log sync, packing any unpacked parts, handing them to the background session);

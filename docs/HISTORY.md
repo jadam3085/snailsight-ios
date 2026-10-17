@@ -186,3 +186,13 @@ tileset (3D Tiles 1.1, map frame; per-tile USDZ blobs, content-addressed and imm
 - Logs: `tiles_start` (variant, rev, since_lock_s), `tile_fetch` (key, bytes, ms, cached), `tile_drawn_first_near`
   (since_lock_s), `tiles_status` every 10 s (drawn, loaded, mem_mb, disk_mb, dl_mb_total, footprint_mb, avail_mb),
   `tile_evict`, `tile_error`, `tiles_unavailable`; `maploc_try` / `maploc_locked` gain tile, level, sigma_cm, sigma_deg.
+
+**11.3 (Room scan, structure layer S4)**: More ▸ Mapping ▸ **Room scan** (LiDAR iPhones, needs the map lock). Apple
+RoomPlan runs on the app's own ARSession (`RoomCaptureSession(arSession:)`), so its walls, doors, windows, openings,
+floors and furniture boxes are in the ARKit frame the localizer maps with T_map_arkit. The HUD line counts what RoomPlan
+has found; tapping again (or leaving the app) builds the room (`RoomBuilder`), and the app uploads the normalized room
+(`snailsight-roomplan/1`, `SnailSightCore/RoomScan.swift`), Apple's CapturedRoom JSON and the USDZ export when it is
+≤ 8 MB, with the current T_map_arkit, to `POST /v1/maps/site/roomplan`. Spooled to Documents/roomplan first; offline / 5xx
+→ resent when the server is back. The server lines the room up with the scanned walls and lets it replace structure
+elements only where it scores better. Parametric room only: no images, video or audio. Mesh mapping pauses meanwhile.
+Log: `roomscan_start|stop|done|upload|result`.

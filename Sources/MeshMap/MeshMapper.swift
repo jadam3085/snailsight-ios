@@ -78,6 +78,7 @@ final class MeshMapper {
     func update() {
         let localized = model.mapLocalizer.isLocked
         var want = MeshMapPolicy.wanted(toggle: model.meshMapOn, auto: model.meshMapAuto, localized: localized)
+        if model.roomScanOn { want = false }                 // 11.3: RoomPlan owns the session's configuration meanwhile
         if capturing && !want && model.meshMapAuto && !model.meshMapOn {
             if unlocalizedSince == nil { unlocalizedSince = now }
             want = now - (unlocalizedSince ?? now) < Self.autoGraceS
