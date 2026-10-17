@@ -45,9 +45,9 @@ final class TileSelectTests: XCTestCase {
         "walk_west": ("0/0/0 0/0/1 0/0/2 0/1/0 0/1/1 0/1/2 0/2/0 0/2/1 0/2/2 0/3/0 0/3/1 0/3/2 1/0/0 1/0/1 1/0/2 1/1/0 1/1/1 1/1/2 1/2/0 1/2/1 1/2/2 1/3/0 1/3/1 1/3/2", "0/8/2/0 0/8/2/1 1/8/2/0 1/8/2/1"),
         "tight_budget": ("0/0/0 0/0/1 0/1/1", "0/8/2/0 0/8/2/1"),
         "outside": ("", ""),
-        // 11.0.1 storeys (camera level = slab under the feet, other storeys + 20 m): tileselect.py camera_level/select
-        "storey_l0": ("0/0/0 0/0/1 0/0/2 0/1/0 0/1/1 0/1/2 0/2/0 0/2/1 0/3/0 0/3/1", "0/8/1/1 0/8/2/0 0/8/2/1 1/16/0/0"),
-        "storey_l1": ("1/0/0 1/0/1 1/0/2 1/1/0 1/1/1 1/1/2 1/2/0 1/2/1 1/3/0 1/3/1", "0/16/0/0 1/8/1/1 1/8/2/0 1/8/2/1"),
+        // 11.0.1 storeys (camera level = slab under the feet, other storeys + 30 m > FAR_M): tileselect.py camera_level/select
+        "storey_l0": ("0/0/0 0/0/1 0/0/2 0/1/0 0/1/1 0/1/2 0/2/0 0/2/1 0/3/0 0/3/1", "0/8/1/1 0/8/2/0 0/8/2/1"),
+        "storey_l1": ("1/0/0 1/0/1 1/0/2 1/1/0 1/1/1 1/1/2 1/2/0 1/2/1 1/3/0 1/3/1", "1/8/1/1 1/8/2/0 1/8/2/1"),
     ]
     static let slabs = [TileLevel(level: 0, zLo: -Double.infinity, zHi: 1.3), TileLevel(level: 1, zLo: 1.3, zHi: Double.infinity)]
 

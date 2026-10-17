@@ -18,7 +18,7 @@ public enum TileSelect {
     public static let REFINE_K = 1.0
     public static let FAR_M = 25.0
     public static let FEET_M = 1.0
-    public static let LEVEL_PENALTY_M = 20.0
+    public static let LEVEL_PENALTY_M = 30.0   // > FAR_M: another storey is never drawn
     public static let LOOKAHEAD_S = 5.0
     public static let LOOKAHEAD_MAX_M = 10.0
     public static let NEAR_BUDGET = 350 * (1 << 20)
