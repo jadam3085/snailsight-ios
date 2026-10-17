@@ -3,7 +3,7 @@ import XCTest
 
 final class MapSyncTests: XCTestCase {
     func testDecodeSyncBlockAndFilterVariant() throws {
-        let msg = #"{"type":"rev","map_id":"site","rev":14,"tiles":{"rev":25},"sync":{"kind":"rev","rev":25,"prev_rev":24,"changed":[{"layer":"structure","key":"1/0/-1","hash":"aa","bytes":10,"glb":"gg","lod":4},{"layer":"raw","key":"1/0/-1","hash":"bb"}],"removed":[{"layer":"structure","key":"0/9/9"}],"changed_total":7}}"#
+        let msg = #"{"type":"rev","map_id":"site","rev":14,"ready":true,"tiles":{"rev":25},"sync":{"kind":"rev","rev":25,"prev_rev":24,"changed":[{"layer":"structure","key":"1/0/-1","hash":"aa","bytes":10,"glb":"gg","lod":4},{"layer":"raw","key":"1/0/-1","hash":"bb"}],"removed":[{"layer":"structure","key":"0/9/9"}],"changed_total":7}}"#
         let ev = try XCTUnwrap(TileSyncEvent.decode(message: Data(msg.utf8)))
         XCTAssertEqual(ev.kind, "rev")
         XCTAssertEqual(ev.rev, 25)
