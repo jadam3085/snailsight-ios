@@ -85,6 +85,14 @@ public final class TileNode {
     public var hash: String? { uri.flatMap(TileURL.blobHash) }
 }
 
+/// One storey slab of the tileset (root extras `levels`: z_lo / z_hi, nil = unbounded).
+public struct TileLevel: Equatable {
+    public let level: Int
+    public let zLo: Double
+    public let zHi: Double
+    public init(level: Int, zLo: Double, zHi: Double) { self.level = level; self.zLo = zLo; self.zHi = zHi }
+}
+
 /// Codable form of the tileset JSON (only what the client uses).
 public struct TilesetDoc: Decodable {
     public struct Volume: Decodable { public var box: [Double]? }
@@ -103,11 +111,18 @@ public struct TilesetDoc: Decodable {
             case key, level, rev, triangles, mem, usdz, sizeM = "size_m", glbBytes = "glb_bytes"
         }
     }
+    public struct LevelSlab: Decodable {
+        public var level: Int
+        public var zLo: Double?
+        public var zHi: Double?
+        enum CodingKeys: String, CodingKey { case level, zLo = "z_lo", zHi = "z_hi" }
+    }
     public struct RootExtras: Decodable {
         public var mapID: String?
         public var rev: Int?
         public var variant: String?
-        enum CodingKeys: String, CodingKey { case rev, variant, mapID = "map_id" }
+        public var levels: [LevelSlab]?
+        enum CodingKeys: String, CodingKey { case rev, variant, levels, mapID = "map_id" }
     }
     public final class Node: Decodable {
         public var boundingVolume: Volume
@@ -126,6 +141,14 @@ public enum TileSet {
     public static func parse(_ data: Data) throws -> [TileNode] {
         let doc = try JSONDecoder().decode(TilesetDoc.self, from: data)
         return (doc.root.children ?? []).map(node)
+    }
+
+    /// The storey slabs of the tileset (tileselect.py `levels`).
+    public static func levels(_ data: Data) -> [TileLevel] {
+        guard let d = try? JSONDecoder().decode(TilesetDoc.self, from: data) else { return [] }
+        return (d.extras?.levels ?? []).map {
+            TileLevel(level: $0.level, zLo: $0.zLo ?? -Double.infinity, zHi: $0.zHi ?? Double.infinity)
+        }
     }
 
     /// The tileset's own rev / variant (extras), if present.

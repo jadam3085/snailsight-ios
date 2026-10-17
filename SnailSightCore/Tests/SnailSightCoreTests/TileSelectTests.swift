@@ -45,12 +45,18 @@ final class TileSelectTests: XCTestCase {
         "walk_west": ("0/0/0 0/0/1 0/0/2 0/1/0 0/1/1 0/1/2 0/2/0 0/2/1 0/2/2 0/3/0 0/3/1 0/3/2 1/0/0 1/0/1 1/0/2 1/1/0 1/1/1 1/1/2 1/2/0 1/2/1 1/2/2 1/3/0 1/3/1 1/3/2", "0/8/2/0 0/8/2/1 1/8/2/0 1/8/2/1"),
         "tight_budget": ("0/0/0 0/0/1 0/1/1", "0/8/2/0 0/8/2/1"),
         "outside": ("", ""),
+        // 11.0.1 storeys (camera level = slab under the feet, other storeys + 20 m): tileselect.py camera_level/select
+        "storey_l0": ("0/0/0 0/0/1 0/0/2 0/1/0 0/1/1 0/1/2 0/2/0 0/2/1 0/3/0 0/3/1", "0/8/1/1 0/8/2/0 0/8/2/1 1/16/0/0"),
+        "storey_l1": ("1/0/0 1/0/1 1/0/2 1/1/0 1/1/1 1/1/2 1/2/0 1/2/1 1/3/0 1/3/1", "0/16/0/0 1/8/1/1 1/8/2/0 1/8/2/1"),
     ]
+    static let slabs = [TileLevel(level: 0, zLo: -Double.infinity, zHi: 1.3), TileLevel(level: 1, zLo: 1.3, zHi: Double.infinity)]
 
     func check(_ name: String, cam: [Double], heading: (Double, Double)? = nil, speed: Double = 0,
-               near: Int = TileSelect.NEAR_BUDGET, mid: Int = TileSelect.MID_BUDGET, file: StaticString = #filePath,
-               line: UInt = #line) {
-        let w = TileSelect.select(Self.roots, cam: cam, heading: heading, speed: speed, nearBudget: near, midBudget: mid)
+               near: Int = TileSelect.NEAR_BUDGET, mid: Int = TileSelect.MID_BUDGET, storeys: Bool = false,
+               file: StaticString = #filePath, line: UInt = #line) {
+        let cl = storeys ? TileSelect.cameraLevel(z: cam[2], levels: Self.slabs) : nil
+        let w = TileSelect.select(Self.roots, cam: cam, heading: heading, speed: speed, nearBudget: near, midBudget: mid,
+                                  camLevel: cl)
         let gotNear = w.values.filter { $0.band == .near }.map(\.node.key).sorted().joined(separator: " ")
         let gotMid = w.values.filter { $0.band == .mid }.map(\.node.key).sorted().joined(separator: " ")
         XCTAssertEqual(gotNear, Self.expected[name]!.0, "\(name) near", file: file, line: line)
@@ -65,6 +71,20 @@ final class TileSelectTests: XCTestCase {
         check("walk_west", cam: [6, 6, 0.2], heading: (-1, 0), speed: 1.2)
         check("tight_budget", cam: [6, 6, 0.2], near: 12_000_000, mid: 1_500_000)
         check("outside", cam: [80, 80, 0.2])
+        check("storey_l0", cam: [2, 2, 0.2], storeys: true)
+        check("storey_l1", cam: [2, 2, 2.9], storeys: true)
+    }
+
+    func testCameraLevelUsesFeet() {
+        XCTAssertEqual(TileSelect.cameraLevel(z: 0.2, levels: Self.slabs), 0)
+        XCTAssertEqual(TileSelect.cameraLevel(z: 2.9, levels: Self.slabs), 1)
+        XCTAssertEqual(TileSelect.cameraLevel(z: 2.1, levels: Self.slabs), 0)    // standing on level-0 ground outdoors
+        XCTAssertNil(TileSelect.cameraLevel(z: 1.0, levels: []))
+        let json = #"{"root":{"boundingVolume":{"box":[0,0,0,1,0,0,0,1,0,0,0,1]},"children":[]},"extras":{"levels":[{"level":0,"z_lo":null,"z_hi":1.26},{"level":1,"z_lo":1.26,"z_hi":null}]}}"#
+        let lv = TileSet.levels(Data(json.utf8))
+        XCTAssertEqual(lv.count, 2)
+        XCTAssertEqual(lv[1].zLo, 1.26)
+        XCTAssertEqual(lv[0].zLo, -Double.infinity)
     }
 
     func testDistances() {

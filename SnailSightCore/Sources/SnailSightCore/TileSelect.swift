@@ -9,11 +9,16 @@ import Foundation
 // REFINE_K: 8 m parents open within 8 m (so leaves = the near band ≤ 8 m), 16 m parents within 16 m, … Nothing farther
 // than FAR_M is drawn. Budget (plan Q7: 600 MB): near (leaves) ≤ 350 MB, mid (parents) ≤ 150 MB by the tiles' `mem`
 // estimate; over budget the farthest go first. A parent stays drawn until all its wanted children are loaded (no holes).
+// Storeys (11.0.1): the camera's level = the slab under its feet (camera z − FEET_M: outdoors the camera's height is in
+// the main floor's slab while the ground is level 0); every other storey adds LEVEL_PENALTY_M per level of difference,
+// so the phone never pulls the floor above / below through a slab. FAR_M = 25 m = the plan's mid band.
 
 public enum TileSelect {
     public static let VZ = 3.0
     public static let REFINE_K = 1.0
-    public static let FAR_M = 40.0
+    public static let FAR_M = 25.0
+    public static let FEET_M = 1.0
+    public static let LEVEL_PENALTY_M = 20.0
     public static let LOOKAHEAD_S = 5.0
     public static let LOOKAHEAD_MAX_M = 10.0
     public static let NEAR_BUDGET = 350 * (1 << 20)
@@ -39,9 +44,18 @@ public enum TileSelect {
         return (d[0] * d[0] + d[1] * d[1] + (d[2] * VZ) * (d[2] * VZ)).squareRoot()
     }
 
-    /// Distance less the heading lookahead (only while moving faster than 5 cm/s toward the node).
-    public static func effDistance(_ cam: [Double], heading: (Double, Double)?, speed: Double, _ n: TileNode) -> Double {
-        let d = boxDistance(cam, n)
+    /// The camera's storey: the level slab containing camera z − FEET_M (nil = no slabs / outside every slab).
+    public static func cameraLevel(z: Double, levels: [TileLevel]) -> Int? {
+        let f = z - FEET_M
+        return levels.first { f >= $0.zLo && f < $0.zHi }?.level
+    }
+
+    /// Distance less the heading lookahead (only while moving faster than 5 cm/s toward the node); other storeys
+    /// than the camera's add LEVEL_PENALTY_M per level.
+    public static func effDistance(_ cam: [Double], heading: (Double, Double)?, speed: Double, _ n: TileNode,
+                                   camLevel: Int? = nil) -> Double {
+        var d = boxDistance(cam, n)
+        if let cl = camLevel, n.level != cl { d += LEVEL_PENALTY_M * Double(abs(n.level - cl)) }
         guard speed > 0.05, let hd = heading else { return d }
         let vx = n.box[0] - cam[0], vy = n.box[1] - cam[1]
         let ln = (vx * vx + vy * vy).squareRoot()
@@ -52,10 +66,11 @@ public enum TileSelect {
 
     /// The set of nodes that should be drawn (REPLACE: no ancestor together with a descendant), keyed by tile key.
     public static func select(_ roots: [TileNode], cam: [Double], heading: (Double, Double)? = nil, speed: Double = 0,
-                              nearBudget: Int = NEAR_BUDGET, midBudget: Int = MID_BUDGET) -> [String: Want] {
+                              nearBudget: Int = NEAR_BUDGET, midBudget: Int = MID_BUDGET,
+                              camLevel: Int? = nil) -> [String: Want] {
         var want: [Want] = []
         func visit(_ n: TileNode) {
-            let d = effDistance(cam, heading: heading, speed: speed, n)
+            let d = effDistance(cam, heading: heading, speed: speed, n, camLevel: camLevel)
             if d > FAR_M { return }
             if !n.children.isEmpty && d < Double(n.size) * REFINE_K {
                 for c in n.children { visit(c) }

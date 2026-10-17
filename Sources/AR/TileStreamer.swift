@@ -32,6 +32,8 @@ final class TileStreamer {
     private(set) var tilesetRev: Int?
     private var tilesetPath: String?
     private var roots: [TileNode] = []
+    /// Storey slabs of the tileset (11.0.1: other storeys are penalised in the selection).
+    private var levels: [TileLevel] = []
     private var parents: [String: String] = [:]
     private var nodes: [String: TileNode] = [:]
     private var hashes: [String: String] = [:]                 // key → usdz content hash of the current tileset
@@ -115,7 +117,8 @@ final class TileStreamer {
         guard !roots.isEmpty else { return }
         motion.add(t: t, x: cam[0], y: cam[1])
         let heading = forward.flatMap { TileMotion.heading(forward: $0) }
-        want = TileSelect.select(roots, cam: cam, heading: heading, speed: motion.speed)
+        want = TileSelect.select(roots, cam: cam, heading: heading, speed: motion.speed,
+                                 camLevel: TileSelect.cameraLevel(z: cam[2], levels: levels))
         refresh()
         if !model.recording && !model.showScans { schedule(t) }
         if t - lastStatus >= Self.statusEveryS {
@@ -174,10 +177,12 @@ final class TileStreamer {
                 err = error.localizedDescription
             }
             let dataF = data, statusF = status, errF = err
-            let parsed: [TileNode]? = await Task.detached(priority: .userInitiated) { () -> [TileNode]? in
-                guard let d = dataF else { return nil }
-                return try? TileSet.parse(d)
+            let parsedL: ([TileNode], [TileLevel])? = await Task.detached(priority: .userInitiated) { () -> ([TileNode], [TileLevel])? in
+                guard let d = dataF, let r = try? TileSet.parse(d) else { return nil }
+                return (r, TileSet.levels(d))
             }.value
+            let parsed = parsedL?.0
+            let levelsF = parsedL?.1 ?? []
             let ms = (CACurrentMediaTime() - t0) * 1000
             let bytes = dataF?.count ?? 0
             await MainActor.run {
@@ -191,6 +196,7 @@ final class TileStreamer {
                     return
                 }
                 self.dlBytes += bytes
+                self.levels = levelsF
                 self.install(r, variant: v, rev: tb.rev, path: path, why: why, bytes: bytes, ms: ms)
             }
         }
