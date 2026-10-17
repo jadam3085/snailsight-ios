@@ -582,7 +582,7 @@ final class MapLocalizer {
         guard !flushing, !editQueue.isEmpty, let link = model.link else { return }
         if !onlineHooked {
             onlineHooked = true
-            link.whenOnline { [weak self] in DispatchQueue.main.async { self?.flushEdits(why: "online") } }
+            Task { await link.whenOnline { [weak self] in DispatchQueue.main.async { self?.flushEdits(why: "online") } } }
         }
         flushing = true
         syncing = true
