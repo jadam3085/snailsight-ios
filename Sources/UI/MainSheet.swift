@@ -203,7 +203,10 @@ private struct SheetContent: View {
     }
 
     @ViewBuilder private var placesSection: some View {
-        let rooms = model.roomChips.filter { model.sheetQuery.isEmpty || NearList.filter([$0], query: model.sheetQuery).count == 1 }
+        let rooms = model.roomChips.filter { r in
+            model.sheetQuery.isEmpty
+                || !NearList.filter([NearItem(id: r.id, kind: .room, title: r.title)], query: model.sheetQuery).isEmpty
+        }
         Section("Places") {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 8) {
