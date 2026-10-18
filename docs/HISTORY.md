@@ -222,3 +222,6 @@ Log: `roomscan_start|stop|done|upload|result`.
   box to ±40 m while the Map is open. Logs: `live_mesh_first`, `live_down_stats` (+ mesh_tiles, mesh_mine, mesh_agents),
   `sheet`, `quick_action`, `near_action`, `ring_cmd`, `agent_ops`, `map_open`, `map_scene`, `map_plan`, `map_terrain`,
   `map_estimated`, `estimated_live`, `explore_gaps`, `layer`.
+- 12.0.x: drone missions LIVE on the server (`drone_missions`): the ops panel shows the mission line (phase, layer it
+  flies over, under / above canopy, AGL, takeovers) and draws the mission path (entity doc `mission`, API §5.9.12);
+  Return uses the mission's home. Sim tree statuses (sim ledger) stay out of the Map's real tree layer.

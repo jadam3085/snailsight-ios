@@ -93,3 +93,18 @@ final class AgentOpsTests: XCTestCase {
         XCTAssertNil(GapFinder.find(nx: nx, ny: ny, x0: 0, y0: 0, cell: 1, unknown: unknown, known: known, minCells: 100))
     }
 }
+
+final class SimMissionTests: XCTestCase {
+    /// The entity doc shape of API §5.9.12 (path points carry a layer tag).
+    func testMissionDecodesAndMerges() throws {
+        let j = #"{"id":"d1","kind":"sim-drone","cat":"drone","pose":{"x":1,"y":2,"z":6,"theta":0},"behaviour":"mission","mission":{"goal":[10,5],"mode":"explore","canopy":"auto","phase":"cruise","layer_now":"estimated","flight_layer":"under_canopy","speed_cap":0.8,"alt_agl":6.0,"home":[0,0,1],"takeovers":1,"replans":2,"reason":null,"path":[[1,2,6,"surveyed"],[5,3,6,"estimated"],[10,5,6,null]]}}"#
+        let doc = try JSONDecoder().decode(SimEntitySnap.self, from: Data(j.utf8))
+        let m = try XCTUnwrap(doc.mission)
+        XCTAssertEqual(m.path, [[1, 2, 6], [5, 3, 6], [10, 5, 6]])
+        XCTAssertEqual(m.home, [0, 0, 1])
+        XCTAssertEqual(m.text, "cruise · over estimated · under canopy · 6.0 m AGL · 1 takeover")
+        let snap = try JSONDecoder().decode(SimEntitySnap.self, from: Data(#"{"id":"d1","kind":"sim-drone","pose":[1,2,6,0]}"#.utf8))
+        XCTAssertNil(snap.mission)
+        XCTAssertEqual(snap.merged(withStatic: doc).mission?.phase, "cruise")
+    }
+}

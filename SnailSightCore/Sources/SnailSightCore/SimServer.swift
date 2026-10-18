@@ -84,11 +84,69 @@ public struct SimEntitySnap: Equatable {
     // API §5.9.11 (server 0.4.7): storey + planner status; `path` = [[x, y, z, level]] (level -1 = on a stair)
     public var level: Int?
     public var nav: SimNav?
+    // 12.0: drone missions (API §5.9.12 / §5.16, server flag `drone_missions`)
+    public var mission: SimMission?
+}
+
+/// A drone mission's live state (entity doc `mission`): phase, the layer it flies over, its planned path.
+public struct SimMission: Decodable, Equatable {
+    public var phase: String?                    // cruise | returning | climbing | landing | holding | arrived | landed
+    public var mode: String?
+    public var layerNow: String?                 // surveyed | estimated | unknown
+    public var flightLayer: String?              // under_canopy | above_canopy
+    public var altAgl: Double?
+    public var home: [Double]?
+    public var takeovers: Int?
+    public var replans: Int?
+    public var reason: String?
+    public var path: [[Double]]                  // x, y, z (the layer tag is dropped)
+
+    enum K: String, CodingKey {
+        case phase, mode, home, takeovers, replans, reason, path
+        case layerNow = "layer_now", flightLayer = "flight_layer", altAgl = "alt_agl"
+    }
+
+    public init(from d: Decoder) throws {
+        let c = try d.container(keyedBy: K.self)
+        phase = try? c.decodeIfPresent(String.self, forKey: .phase)
+        mode = try? c.decodeIfPresent(String.self, forKey: .mode)
+        layerNow = try? c.decodeIfPresent(String.self, forKey: .layerNow)
+        flightLayer = try? c.decodeIfPresent(String.self, forKey: .flightLayer)
+        altAgl = try? c.decodeIfPresent(Double.self, forKey: .altAgl)
+        home = try? c.decodeIfPresent([Double].self, forKey: .home)
+        takeovers = try? c.decodeIfPresent(Int.self, forKey: .takeovers)
+        replans = try? c.decodeIfPresent(Int.self, forKey: .replans)
+        reason = try? c.decodeIfPresent(String.self, forKey: .reason)
+        var out: [[Double]] = []
+        if var arr = try? c.nestedUnkeyedContainer(forKey: .path) {
+            while !arr.isAtEnd {
+                guard var p = try? arr.nestedUnkeyedContainer() else { _ = try? arr.decode(String.self); break }
+                var xyz: [Double] = []
+                while !p.isAtEnd {
+                    if let v = try? p.decode(Double.self) { if xyz.count < 3 { xyz.append(v) } }
+                    else if (try? p.decode(String.self)) != nil { continue }
+                    else { break }                                   // null / anything else: stop this point
+                }
+                if xyz.count >= 2 { out.append(xyz) }
+            }
+        }
+        path = out
+    }
+
+    /// "cruise · over estimated · under canopy · 6.0 m AGL".
+    public var text: String {
+        var parts: [String] = [phase ?? "mission"]
+        if let l = layerNow { parts.append("over \(l)") }
+        if let f = flightLayer { parts.append(f.replacingOccurrences(of: "_", with: " ")) }
+        if let a = altAgl { parts.append(String(format: "%.1f m AGL", a)) }
+        if let t = takeovers, t > 0 { parts.append("\(t) takeover\(t == 1 ? "" : "s")") }
+        return parts.joined(separator: " · ")
+    }
 }
 
 extension SimEntitySnap: Decodable {
     enum K: String, CodingKey {
-        case id, kind, pose, vel, state, owner, name, goal, path, cat, dims, scale, behaviour, clip, action, t, level, nav
+        case id, kind, pose, vel, state, owner, name, goal, path, cat, dims, scale, behaviour, clip, action, t, level, nav, mission
         case tMono = "t_mono", agentType = "agent_type", clipT0 = "clip_t0", clipRate = "clip_rate"
     }
     public init(from d: Decoder) throws {
@@ -116,6 +174,7 @@ extension SimEntitySnap: Decodable {
         t = opt(Double.self, .t)
         level = opt(Int.self, .level)
         nav = opt(SimNav.self, .nav)
+        mission = opt(SimMission.self, .mission)
     }
 
     /// The clip to draw: the server's shared clip (protocol 2), else its older `state` hint.
@@ -133,6 +192,7 @@ extension SimEntitySnap: Decodable {
         if s.behaviour == nil { s.behaviour = d.behaviour }
         if s.path == nil { s.path = d.path }
         if s.level == nil { s.level = d.level }
+        if s.mission == nil { s.mission = d.mission }
         s.nav = SimNav.merged(snapshot: s.nav, doc: d.nav)
         return s
     }

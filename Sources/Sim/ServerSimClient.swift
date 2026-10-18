@@ -1019,7 +1019,7 @@ extension ServerSimClient {
                 .joined(separator: " · ")
             return ServerSimBodyInfo(id: s.id, title: title(s.id), subtitle: sub, role: s.role, rover: s.isRover,
                                      drone: s.isDrone, pose: [p.x, p.y, p.z], yaw: p.theta, level: s.level,
-                                     path: s.path, nav: s.nav, selected: ui.selection?.id == s.id)
+                                     path: Self.route(s), nav: s.nav, selected: ui.selection?.id == s.id)
         }.sorted { $0.id < $1.id }
     }
 
@@ -1031,8 +1031,19 @@ extension ServerSimClient {
     }
 
     /// The selected body's planned route ([[x, y, z(, level)]…]) and launch point.
-    var selectedRoute: [[Double]]? { ui.selection.flatMap { tracks[$0.id]?.snap.path } }
-    var selectedHome: [Double]? { ui.selection.flatMap { homes[$0.id] } }
+    var selectedRoute: [[Double]]? {
+        guard let sel = ui.selection, let tr = tracks[sel.id] else { return nil }
+        return Self.route(tr.snap)
+    }
+    var selectedHome: [Double]? { ui.selection.flatMap { tracks[$0.id]?.snap.mission?.home ?? homes[$0.id] } }
+    /// The selected drone's mission line ("cruise · over estimated · under canopy · 6.0 m AGL"), nil = no mission.
+    var selectedMission: SimMission? { ui.selection.flatMap { tracks[$0.id]?.snap.mission } }
+
+    /// A drone mission's path wins over the planner path.
+    static func route(_ s: SimEntitySnap) -> [[Double]]? {
+        if let m = s.mission, m.path.count >= 2 { return m.path }
+        return s.path
+    }
     var selectedNav: SimNav? { ui.selection.flatMap { tracks[$0.id]?.snap.nav } }
 
     /// O2 banner for the selected body: its latest sim event (≤ 8 s old), else a planner problem.

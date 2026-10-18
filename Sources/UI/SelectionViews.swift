@@ -139,6 +139,10 @@ struct AgentOpsPanel: View {
                 Button { model.openMap(focus: sim.selectedPose) } label: { Image(systemName: "map").frame(width: 44, height: 32) }
                     .accessibilityLabel("Show the route on the map")
             }
+            if let m = sim.selectedMission {
+                Text(m.text + (m.reason.map { " · \($0)" } ?? "")).font(.caption2.weight(.semibold)).foregroundStyle(.cyan)
+                    .lineLimit(2)
+            }
             if s.drone { AltitudeStrip(samples: samples(route, pose: sim.selectedPose)).frame(height: 44) }
             HStack(spacing: 6) {
                 ForEach(AgentOpsControl.offered(drone: s.drone), id: \.self) { c in
