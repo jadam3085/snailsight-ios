@@ -50,6 +50,8 @@ final class ServerSimUI: ObservableObject {
     @Published var droneAssistPending = false
     @Published var patrolPoints = 0
     @Published var showGoToLabel = false
+    /// 12.0 O2: what the obstacle sensor / planner just said about the selected drone or rover.
+    @Published var opsBanner: ObstacleBanner?
 }
 
 final class ServerSimClient {
@@ -118,6 +120,9 @@ final class ServerSimClient {
     private var pathKey: String?
     private var lastPathDraw: TimeInterval = 0
     private var navFlashed: [String: String] = [:]               // body -> the problem status already flashed
+    // 12.0 agent ops (O2): launch point per body (Return without mission orders), last sim event per body
+    var homes: [String: [Double]] = [:]
+    var lastEvents: [String: (kind: String, text: String?, t: Double)] = [:]
 
     /// The selected rover's position in the map (Robot path starts there).
     var selectedRoverMap: [Double]? {
@@ -350,6 +355,11 @@ final class ServerSimClient {
         case .event(let kind, let text, let id):
             events += 1
             if kind == "delete", let id, !id.isEmpty { forgetLocally(id) }       // any client's delete: for good
+            if let id, !id.isEmpty {
+                lastEvents[id] = (kind, text, now)
+                if ui.selection?.id == id, let b = ObstacleBanner.make(nav: tracks[id]?.snap.nav, event: kind, eventDetail: text,
+                                                                         now: now) { ui.opsBanner = b }
+            }
             model.log.event("sim_server_event", ["kind": .string(kind), "id": .string(id ?? ""), "text": .string(text ?? "")])
             if isActive, let text, !text.isEmpty { model.flash(text, seconds: 2) }
             else if isActive, kind == "arrive" || kind == "arrived" { model.flash("\(title(id ?? "")) arrived", seconds: 1.5) }
@@ -390,6 +400,7 @@ final class ServerSimClient {
         for id in Array(tracks.keys) where full && !ids.contains(id) { drop(id) }
         for s in list {
             if var tr = tracks[s.id] { tr.update(s, now: t); tracks[s.id] = tr } else { tracks[s.id] = RemoteTrack(s, now: t) }
+            if homes[s.id] == nil { homes[s.id] = [s.pose.x, s.pose.y, s.pose.z] }
             if bodies[s.id]?.visual != visual(s) { redraw(s) }
             // 10.8: a follow the server ended (lost / no path / another order) is no longer "following you"
             if followers[s.id] != nil, let b = s.behaviour, b != "follow" { followers[s.id] = nil }
@@ -975,5 +986,109 @@ struct ServerSimBar: View {
         ui.showGoToLabel = false
         guard !l.isEmpty else { return }
         sim.goTo(label: l)
+    }
+}
+
+// MARK: - 12.0 UI shell: the near-you list, the Map, the command ring and agent ops read / drive the shared sim here
+
+/// A shared-sim body as the sheet / Map show it (map frame).
+struct ServerSimBodyInfo: Identifiable, Equatable {
+    var id: String
+    var title: String
+    var subtitle: String
+    var role: SimKind.Role
+    var rover: Bool
+    var drone: Bool
+    var pose: [Double]                  // x, y, z
+    var yaw: Double
+    var level: Int?
+    var path: [[Double]]?
+    var nav: SimNav?
+    var selected: Bool
+}
+
+extension ServerSimClient {
+    /// Every body of the shared sim (only while it is in charge), poses extrapolated to now.
+    func bodyInfos() -> [ServerSimBodyInfo] {
+        guard isActive else { return [] }
+        let t = now
+        return tracks.values.map { tr in
+            let s = tr.snap
+            let p = tr.pose(now: t)
+            let sub = [s.action ?? s.behaviour ?? s.state ?? "idle", s.level.map { "L\($0)" }].compactMap { $0 }
+                .joined(separator: " · ")
+            return ServerSimBodyInfo(id: s.id, title: title(s.id), subtitle: sub, role: s.role, rover: s.isRover,
+                                     drone: s.isDrone, pose: [p.x, p.y, p.z], yaw: p.theta, level: s.level,
+                                     path: s.path, nav: s.nav, selected: ui.selection?.id == s.id)
+        }.sorted { $0.id < $1.id }
+    }
+
+    /// The selected body's pose in the map frame.
+    var selectedPose: [Double]? {
+        guard isActive, let id = ui.selection?.id, let tr = tracks[id] else { return nil }
+        let p = tr.pose(now: now)
+        return [p.x, p.y, p.z]
+    }
+
+    /// The selected body's planned route ([[x, y, z(, level)]…]) and launch point.
+    var selectedRoute: [[Double]]? { ui.selection.flatMap { tracks[$0.id]?.snap.path } }
+    var selectedHome: [Double]? { ui.selection.flatMap { homes[$0.id] } }
+    var selectedNav: SimNav? { ui.selection.flatMap { tracks[$0.id]?.snap.nav } }
+
+    /// O2 banner for the selected body: its latest sim event (≤ 8 s old), else a planner problem.
+    func opsBanner(now t: Double) -> ObstacleBanner? {
+        guard let id = ui.selection?.id else { return nil }
+        if let e = lastEvents[id], t - e.t < 8,
+           let b = ObstacleBanner.make(nav: tracks[id]?.snap.nav, event: e.kind, eventDetail: e.text, now: e.t) { return b }
+        return ObstacleBanner.make(nav: tracks[id]?.snap.nav, event: nil, now: t)
+    }
+
+    /// Select a body by id (sheet row / Map tap); nil clears.
+    func select(id: String?) {
+        guard let id, let tr = tracks[id] else { ui.selection = nil; return }
+        ui.selection = selection(tr.snap)
+        model.log.event("sim_select", ["id": .string(id), "kind": .string(tr.snap.kind), "mode": .string("server"),
+                                       "via": .string("ui12")])
+    }
+
+    /// Map tap: the selected body goes to this map point (Go to), or is put there (Move pending).
+    func goTo(mapPoint g: [Double]) {
+        guard let s = ui.selection, g.count >= 2 else { return }
+        followers[s.id] = nil
+        if ui.pending == .move {
+            send(.place(x: g[0], y: g[1], z: g.count > 2 ? g[2] : nil), to: s.id)
+        } else {
+            send(.goal(x: g[0], y: g[1], z: g.count > 2 ? g[2] : nil), to: s.id)
+            addMarker([g[0], g[1], g.count > 2 ? g[2] : 0])
+        }
+        ui.pending = nil
+        model.flash("\(s.title) → map point", seconds: 1.5)
+    }
+
+    /// O2 control on the selected drone / rover.
+    func ops(_ c: AgentOpsControl) {
+        guard let s = ui.selection else { return }
+        let f = model.serverFeatures.list
+        guard let cmd = c.command(drone: s.drone, features: f, home: homes[s.id]) else {
+            model.flash("\(c.title): not available yet", seconds: 2)
+            return
+        }
+        model.log.event("agent_ops", ["id": .string(s.id), "control": .string(c.rawValue), "cmd": .string(cmd.name)])
+        send(cmd, to: s.id)
+        model.flash("\(s.title): \(c.title)", seconds: 1.5)
+    }
+
+    /// "Explore gaps": a drone / rover mission to a goal (explore mode where the server has missions).
+    func explore(goal g: [Double]) {
+        guard let s = ui.selection, s.rover || s.drone, g.count >= 2 else {
+            model.flash("Select a sim drone or rover first", seconds: 2)
+            return
+        }
+        if s.drone, model.serverFeatures.list.contains(AgentOpsControl.missionsFlag) {
+            send(.mission(goal: g, mode: "explore", canopy: "auto"), to: s.id)
+        } else {
+            send(.goal(x: g[0], y: g[1], z: g.count > 2 ? g[2] : nil), to: s.id)
+        }
+        model.flash("\(s.title) → explore the gap", seconds: 2)
     }
 }

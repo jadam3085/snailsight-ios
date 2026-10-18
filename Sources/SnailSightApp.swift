@@ -30,6 +30,7 @@ struct ContentView: View {
                 Image(systemName: "plus").font(.title3.weight(.light)).foregroundStyle(.white.opacity(0.8))
                     .shadow(radius: 2).allowsHitTesting(false)
             }
+            CommandRingOverlay(server: model.serverSim.ui, local: model.controller.sim.ui)   // 12.0 B2 ring
             HUDView()
             if model.simOn && model.simDragging {                // 10.6: drop a dragged body here to delete it
                 VStack { Spacer(); SimTrashCan(hot: model.simDragHot).padding(.bottom, 44) }
@@ -38,6 +39,12 @@ struct ContentView: View {
             ObjectScanOverlay(scan: model.objectScan)          // 9.3 object scan: chooser, AR box panel, Object Capture
         }
         .sheet(isPresented: $model.showSettings) { SettingsView().environmentObject(model) }
+        .sheet(isPresented: $model.showLayers) {                            // 12.0 layers button
+            LayersSheet().environmentObject(model).presentationDetents([.medium, .large])
+        }
+        .fullScreenCover(isPresented: $model.showMap) {                    // 12.0 Map (A2 / O1)
+            MapPlanView(data: model.planData, mesh: model.meshStore, serverUI: model.serverSim.ui).environmentObject(model)
+        }
         .sheet(isPresented: $model.showPlaces) { PlacesView().environmentObject(model) }   // P2a places
         .sheet(isPresented: $model.showSpawn) {                             // 9.8 spawn picker
             SpawnPickerView().environmentObject(model).presentationDetents([.medium, .large])

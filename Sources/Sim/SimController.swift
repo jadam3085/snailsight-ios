@@ -2288,3 +2288,35 @@ final class SimController: NSObject, UIGestureRecognizerDelegate {
         if model.simRobot != (robot != nil) { model.simRobot = robot != nil }
     }
 }
+
+// MARK: - 12.0 UI shell: the near-you list, the Map and the command ring read / drive the local sim here
+
+/// A local-sim body (ARKit world frame).
+struct LocalSimBodyInfo: Identifiable, Equatable {
+    var id: Int
+    var title: String
+    var role: SimKind.Role
+    var world: SIMD3<Float>
+    var selected: Bool
+}
+
+extension SimController {
+    func bodyInfos() -> [LocalSimBodyInfo] {
+        guard enabled, !pausedForRecording else { return [] }
+        return allIDs.compactMap { id in
+            guard let i = info(id) else { return nil }
+            return LocalSimBodyInfo(id: id, title: i.title, role: i.kind.role, world: i.center, selected: ui.selection?.id == id)
+        }
+    }
+
+    /// The selected body's centre in the world frame (the command ring sits around it).
+    var selectedWorld: SIMD3<Float>? { ui.selection.flatMap { info($0.id)?.center } }
+
+    func select(id: Int?) { select(id) }
+
+    /// Map tap: the selected body goes to (or, with Move pending, is put at) this floor point (world frame).
+    func goTo(world p: SIMD3<Float>) {
+        guard ui.selection != nil else { return }
+        applyPoint(ui.pending == .move ? .move : .goTo, StandHit(point: p, kind: .floor))
+    }
+}

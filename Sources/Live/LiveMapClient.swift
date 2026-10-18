@@ -40,7 +40,14 @@ final class LiveMapClient {
     private var lastSeq: Int?
     private var lastPing: TimeInterval = 0
     private var subCenter: [Double]?
-    static let bboxHalf = 12.0
+    /// ±12 m around you in AR; ±40 m while the Map is open (it shows the whole storey).
+    var bboxHalf: Double { model.showMap ? 40 : 12 }
+    private var subHalf = 12.0
+    // 12.0 Mesh (live): highlight steps of fresh tiles (2 fresh → 1 fading → 0 settled), base-swap outlines, storey floors
+    private var tileStep: [String: Int] = [:]
+    private var baseOutlines: [String: (entity: Entity, at: TimeInterval, step: Int, box: [Double])] = [:]
+    private var floorZ: [Int: Double] = [:]
+    private var loggedFirstMesh = false
     private let session: URLSession = {
         let c = URLSessionConfiguration.default
         c.timeoutIntervalForRequest = 30
@@ -57,7 +64,30 @@ final class LiveMapClient {
     /// Downlink wanted: advertised (or forced) and some live layer is on.
     var downlinkWanted: Bool {
         model.serverFeatures.liveDownlink(forced: model.forceLiveDownlink) && model.serverBase != nil
-            && (model.arAgents || model.houseStyle != .off) && !model.showScans
+            && (model.arAgents || model.houseStyle != .off || model.meshLive) && !model.showScans
+    }
+
+    /// 12.0: what the downlink subscribes to: the live layers, + the estimated world's tree events when the server has it.
+    private var layers: [String] {
+        LiveSubscribe.layers + (model.serverFeatures.estimatedWorld ? ["estimated"] : [])
+    }
+
+    /// Fresh tile looks (literal opacities): just arrived / changed = bright, then fading, then the settled amber.
+    private static func freshMaterial(_ step: Int) -> UnlitMaterial {
+        var m = UnlitMaterial(color: UIColor(red: 0.45, green: 1, blue: 0.75, alpha: 1))
+        if #available(iOS 18.0, *) {
+            m.triangleFillMode = .lines
+            m.blending = .transparent(opacity: step >= 2 ? 0.9 : 0.6)
+        } else {
+            m.blending = .transparent(opacity: step >= 2 ? 0.45 : 0.3)
+        }
+        return m
+    }
+    private static let fresh2 = freshMaterial(2)
+    private static let fresh1 = freshMaterial(1)
+
+    private static func material(step: Int) -> UnlitMaterial {
+        step >= 2 ? fresh2 : step == 1 ? fresh1 : liveMaterial
     }
 
     private static let liveMaterial: UnlitMaterial = {
@@ -83,6 +113,8 @@ final class LiveMapClient {
     func tick() {
         let t = now
         layer.agentNode.isEnabled = model.arAgents
+        layer.liveNode.isEnabled = model.meshLive                   // 12.0 layers ▸ Mesh (live)
+        restyleFresh()
         if model.arAgents && model.serverBase != nil && !model.showScans && t - downlinkAgentsAt > 5
             && t - lastPoll >= 2 && !polling {
             poll()
@@ -91,8 +123,9 @@ final class LiveMapClient {
             if !connected && !connecting && t >= reconnectAt { connect() }
             if connected && t - lastInbound > 30 { fail("silent 30 s") }
             if connected && t - lastPing >= 10 { lastPing = t; sendText(["type": "ping"]) }
-            if connected, let c = layer.cameraMap, let sc = subCenter, hypot(c[0] - sc[0], c[1] - sc[1]) > 6 {
-                resubscribe(center: c)                      // walked away from the tile bbox: move it (in flight)
+            if connected, let c = layer.cameraMap, let sc = subCenter,
+               hypot(c[0] - sc[0], c[1] - sc[1]) > 6 || subHalf != bboxHalf {
+                resubscribe(center: c)                      // walked away / Map opened: move or grow the tile bbox
             }
             if t - downlinkAgentsAt < 5 {
                 trails.expire(now: t)
@@ -106,7 +139,11 @@ final class LiveMapClient {
             lastStats = t
             model.log.event("live_down_stats", ["msgs": .int(stats.msgs), "tiles": .int(stats.tiles), "drawn": .int(stats.drawn),
                                                 "changes": .int(stats.changes), "docs": .int(stats.docs),
-                                                "held": .int(tiles.have.count)])
+                                                "held": .int(tiles.have.count),
+                                                "mesh_tiles": .int(model.meshStore.feed.liveCount),
+                                                "mesh_mine": .int(model.meshStore.feed.mineCount),
+                                                "mesh_agents": .string(model.meshStore.feed.otherAgents.joined(separator: ",")),
+                                                "mesh_live": .bool(model.meshLive)])
         }
     }
 
@@ -202,8 +239,11 @@ final class LiveMapClient {
         tk.resume()
         let c = layer.cameraMap
         subCenter = c
+        subHalf = bboxHalf
+        let half = subHalf
         let sub = LiveSubscribe.message(agentID: model.agentID, mapID: mapID, baseVersion: tiles.baseVersion ?? layer.mapVersion,
-                                        tiles: tiles.allSince, epoch: epoch, seq: lastSeq, bbox: c.map(Self.bbox))
+                                        tiles: tiles.allSince, epoch: epoch, seq: lastSeq,
+                                        bbox: c.map { Self.bbox($0, half: half) }, layers: layers)
         tk.send(.string(String(decoding: sub, as: UTF8.self))) { [weak self] err in
             guard let err else { return }
             DispatchQueue.main.async { if self?.gen == g { self?.fail("send: \(err.localizedDescription)") } }
@@ -213,13 +253,14 @@ final class LiveMapClient {
         receive(g)
     }
 
-    private static func bbox(_ c: [Double]) -> [Double] {
-        [c[0] - bboxHalf, c[1] - bboxHalf, c[0] + bboxHalf, c[1] + bboxHalf]
+    private static func bbox(_ c: [Double], half: Double) -> [Double] {
+        [c[0] - half, c[1] - half, c[0] + half, c[1] + half]
     }
 
     private func resubscribe(center c: [Double]) {
         subCenter = c
-        sendText(["type": "subscribe", "map_id": mapID, "layers": LiveSubscribe.layers, "bbox": Self.bbox(c)])
+        subHalf = bboxHalf
+        sendText(["type": "subscribe", "map_id": mapID, "layers": layers, "bbox": Self.bbox(c, half: subHalf)])
     }
 
     private func sendText(_ o: [String: Any]) {
@@ -276,6 +317,11 @@ final class LiveMapClient {
         if let q = seq { lastSeq = max(lastSeq ?? q, q) }
         switch m {
         case .head(let v, let q, let e):
+            if let o = JSON.object(d)["levels"] as? [[String: Any]] {        // storey floors (Map raster heights)
+                for l in o {
+                    if let i = (l["level"] as? NSNumber)?.intValue, let z = (l["floor_z"] as? NSNumber)?.doubleValue { floorZ[i] = z }
+                }
+            }
             if let e, e != epoch { epoch = e; lastSeq = q }
             if let v { model.liveBaseVersion = v; if tiles.baseVersion == nil { tiles.rebase(v) } }
         case .agents(let list):
@@ -287,7 +333,16 @@ final class LiveMapClient {
         case .tile(let l, let key, let ver, let enc, let data):
             stats.tiles += 1
             guard tiles.accept(layer: l, key: key, ver: ver) else { return }
-            if l == "mesh", let mesh = LiveMeshTile.decode(enc: enc, base64: data) { drawTile(key: key, mesh: mesh) }
+            if l == "mesh", let mesh = LiveMeshTile.decode(enc: enc, base64: data) {
+                let h = LiveTileHeader.parse(d) ?? LiveTileHeader(layer: l, key: key, ver: ver)
+                let applied = model.meshStore.applyLive(h, mesh: mesh, floorZ: floorZ[h.levelIndex], me: model.agentID)
+                drawTile(key: key, mesh: mesh)
+                if applied == .new, !loggedFirstMesh {
+                    loggedFirstMesh = true
+                    model.log.event("live_mesh_first", ["key": .string(key), "agents": .string(h.agents.joined(separator: ",")),
+                                                        "triangles": .int(mesh.triangleCount)])
+                }
+            }
         case .doc(let kind, _):
             stats.docs += 1
             if kind == "objects" || kind == "rooms" { layer.reloadDocs() }
@@ -302,8 +357,55 @@ final class LiveMapClient {
             model.log.event("live_down_rebase", ["version": .int(v)])
         case .error(let s):
             model.log.event("live_down_error", ["detail": .string(s)])
-        case .other:
-            break
+        case .other(let t):
+            if t == "estimated", let m = EstimatedLiveMessage.parse(d) { model.planData.estimatedLive(m) }
+        }
+    }
+
+    /// 12.0: a base tile the M4 sync swapped in place: a fading outline of its box (same three steps as live tiles).
+    func baseSwapped(key: String, box: [Double]) {
+        guard box.count >= 12 else { return }
+        baseOutlines[key]?.entity.removeFromParent()
+        let e = boxOutline(box, step: 2)
+        layer.liveNode.addChild(e)
+        baseOutlines[key] = (e, now, 2, box)
+    }
+
+    private func boxOutline(_ b: [Double], step: Int) -> Entity {
+        var mat = UnlitMaterial(color: UIColor(red: 0.45, green: 1, blue: 0.75, alpha: 1))
+        mat.blending = .transparent(opacity: step >= 2 ? 0.7 : 0.35)
+        let holder = Entity()
+        holder.position = SIMD3<Float>(Float(b[0]), Float(b[1]), Float(b[2]))
+        let sx = Float(b[3] * 2), sy = Float(b[7] * 2), sz = Float(min(b[11] * 2, 3)), t: Float = 0.01
+        for a in [Float(-1), 1] {
+            for c in [Float(-1), 1] {
+                let ex = ModelEntity(mesh: .generateBox(size: SIMD3(sx, t, t)), materials: [mat])
+                ex.position = SIMD3(0, a * sy / 2, c * sz / 2)
+                let ey = ModelEntity(mesh: .generateBox(size: SIMD3(t, sy, t)), materials: [mat])
+                ey.position = SIMD3(a * sx / 2, 0, c * sz / 2)
+                holder.addChild(ex); holder.addChild(ey)
+            }
+        }
+        return holder
+    }
+
+    /// Fresh tiles step down (2 → 1 → 0) as they age; base-swap outlines fade the same way and go.
+    private func restyleFresh() {
+        for (k, old) in tileStep {
+            let st = model.meshStore.step(key: k)
+            guard st != old else { continue }
+            tileEntities[k]?.model?.materials = [Self.material(step: st)]
+            if st == 0 { tileStep[k] = nil } else { tileStep[k] = st }
+        }
+        for (k, o) in baseOutlines {
+            let st = model.meshStore.step(key: k, source: .base)
+            if st == 0 { o.entity.removeFromParent(); baseOutlines[k] = nil; continue }
+            if st != o.step {
+                o.entity.removeFromParent()
+                let e = boxOutline(o.box, step: st)
+                layer.liveNode.addChild(e)
+                baseOutlines[k] = (e, o.at, st, o.box)
+            }
         }
     }
 
@@ -319,13 +421,16 @@ final class LiveMapClient {
         d.positions = MeshBuffers.Positions(pos)
         d.primitives = .triangles(m.indices)
         guard let res = try? MeshResource.generate(from: [d]) else { return }
+        let st = model.meshStore.step(key: key)                         // a new / changed tile glows, then settles
         if let e = tileEntities[key] {
-            e.model?.mesh = res
+            e.model?.mesh = res                                         // in place: same entity, new mesh
+            e.model?.materials = [Self.material(step: st)]
         } else {
-            let e = ModelEntity(mesh: res, materials: [Self.liveMaterial])
+            let e = ModelEntity(mesh: res, materials: [Self.material(step: st)])
             layer.liveNode.addChild(e)
             tileEntities[key] = e
         }
+        if st > 0 { tileStep[key] = st }
         stats.drawn += 1
     }
 

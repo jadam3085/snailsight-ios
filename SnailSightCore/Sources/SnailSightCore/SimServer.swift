@@ -367,6 +367,9 @@ public enum SimServerAPI {
         case behaviour(String)                               // an order without params (roam, graze, hold, wander)
         case flee(fromX: Double, fromY: Double, seconds: Double)   // Flee: run from the person
         case followAgent(String)                             // Follow me: follow this client's published pose
+        // 12.0 drone missions (API §5.16, server flag `drone_missions`): exactly one of hold / climb_above / return / land
+        case droneOp(String)
+        case mission(goal: [Double], mode: String, canopy: String)   // mode normal | explore; canopy auto | under | above
 
         /// Short name for logs (sim_cmd).
         public var name: String {
@@ -381,6 +384,8 @@ public enum SimServerAPI {
             case .behaviour(let b): return b
             case .flee: return "flee"
             case .followAgent: return "follow"
+            case .droneOp(let o): return o
+            case .mission(_, let mode, _): return "mission_\(mode)"
             }
         }
     }
@@ -443,6 +448,10 @@ public enum SimServerAPI {
             return ["flee": [r(x), r(y)], "seconds": min(10, max(0.5, sec)), "owner": agentID]
         case .followAgent(let a):
             return ["follow": ["agent": a], "owner": agentID]
+        case .droneOp(let o):
+            return [o: true, "owner": agentID]
+        case .mission(let g, let mode, let canopy):
+            return ["mission": ["goal": g.prefix(3).map { r($0) }, "mode": mode, "canopy": canopy], "owner": agentID]
         }
     }
 

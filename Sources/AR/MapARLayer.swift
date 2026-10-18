@@ -73,8 +73,8 @@ final class MapARLayer {
     private(set) var sceneID: String?
     private var loadingScene: String?
     private(set) var objectsDoc: ARObjectsDoc?
-    private var roomsDoc: ARRoomsDoc?
-    private var floorZ: Double?
+    private(set) var roomsDoc: ARRoomsDoc?
+    private(set) var floorZ: Double?
     private var boxes: [ARBoxItem] = []
     private var labelItems: [ARLabelItem] = []
     private var labelEntities: [String: Entity] = [:]

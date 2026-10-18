@@ -142,6 +142,35 @@ final class AppModel: ObservableObject {
     @Published var liveText: String?
     @Published var liveGood = false
 
+    // 12.0 UI shell (concepts C + A2 + B2 + O1/O2): one pull-up sheet, the Map, the layers button
+    @Published var sheetDetent: SheetDetent = .collapsed
+    @Published var sheetQuery = ""
+    @Published var showMap = false
+    @Published var showLayers = false
+    /// Where the Map should centre when it opens (map frame x, y, z) — set by a sheet row's Show / a room chip.
+    @Published var mapFocus: [Double]?
+    /// Layers ▸ Mesh (live): the mesh as it is being made — this phone's LiDAR mesh (wire) plus the shared live tiles
+    /// of every agent, fresh tiles glowing. On by default (owner 2026-10-18: "retain ability to see the 3d mesh as it's
+    /// made … updated with explorations").
+    @Published var meshLive: Bool = UserDefaults.standard.object(forKey: "layers.meshLive") as? Bool ?? true {
+        didSet {
+            UserDefaults.standard.set(meshLive, forKey: "layers.meshLive")
+            guard meshLive != oldValue else { return }
+            if meshLive, meshStyle == .off { meshStyle = .wire }
+            if !meshLive, meshStyle == .wire { meshStyle = .off }
+            log.event("layer", ["name": .string("mesh_live"), "on": .bool(meshLive)])
+        }
+    }
+    /// Layers ▸ Cameras / Paths (Map + AR markers).
+    @Published var showCameras: Bool = UserDefaults.standard.object(forKey: "layers.cameras") as? Bool ?? true {
+        didSet { UserDefaults.standard.set(showCameras, forKey: "layers.cameras") }
+    }
+    @Published var showPaths: Bool = UserDefaults.standard.object(forKey: "layers.paths") as? Bool ?? true {
+        didSet { UserDefaults.standard.set(showPaths, forKey: "layers.paths") }
+    }
+    let meshStore = LiveMeshStore()
+    private(set) lazy var planData = MapPlanData(model: self)
+
     // 10.1 AR 1:1 (Sources/AR): the house map drawn where it really is once LOCALIZED
     // 11.0: Model (the streamed textured tiles) is the default, once for everyone (key ar.house.v11), then the owner's pick.
     @Published var houseStyle: HouseStyle = AppModel.initialHouseStyle() {

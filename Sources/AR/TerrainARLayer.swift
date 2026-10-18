@@ -65,6 +65,18 @@ final class TerrainARLayer {
         }
     }
 
+    /// 12.0 Map ▸ Yard / Terrain: the robot terrain grid of a storey of the shown version (loads nav + grid on demand;
+    /// nil until loaded). Works without the AR overlay being on.
+    func grid(level: Int) -> TerrainGrid? {
+        guard let v = layer.mapVersion ?? model.mapFollower.followVersion, model.serverBase != nil else { return nil }
+        let key = "\(layer.mapID)@\(v)"
+        if key != navKey { resetFor(key) }
+        guard let nav else { loadNav(v); return nil }
+        if let g = grids[level] { return g }
+        if let L = nav.levels.first(where: { $0.level == level }) { loadGrid(L, key: key) }
+        return nil
+    }
+
     private func resetFor(_ key: String) {
         navKey = key
         nav = nil

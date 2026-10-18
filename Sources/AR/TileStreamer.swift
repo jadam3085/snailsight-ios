@@ -37,6 +37,8 @@ final class TileStreamer {
     private var parents: [String: String] = [:]
     private var nodes: [String: TileNode] = [:]
     private var hashes: [String: String] = [:]                 // key → usdz content hash of the current tileset
+    /// 12.0: held tiles a sync replaced, waiting for their new content to attach (then highlighted as fresh).
+    private var syncSwapped = Set<String>()
     /// 11.2 (M4): tiles changed by a `sync` event before the tileset is refetched: key → (hash, blob URI).
     private var syncOverride: [String: (hash: String, uri: String)] = [:]
     /// Bumped whenever the set of loaded tiles changes (MapFollower re-sends `held`).
@@ -174,6 +176,7 @@ final class TileStreamer {
             let uri = prefix.isEmpty ? "\(c.hash).usdz" : "\(prefix)/\(c.hash).usdz"
             syncOverride[k] = (c.hash, uri)
             hashes[k] = c.hash
+            syncSwapped.insert(k)                                   // 12.0: highlight it when the new one lands
             failedUntil[k] = nil
             applied += 1
         }
@@ -378,7 +381,14 @@ final class TileStreamer {
         guard inFlight[key] == hash else { return }                 // cleared meanwhile (variant switch)
         inFlight[key] = nil
         guard want[key] != nil, hashes[key] == hash else { return } // walked on while it loaded
+        let swapped = entities[key] != nil && syncSwapped.remove(key) != nil
         if entities[key] != nil { release(key, reason: "replaced") }
+        if swapped {                                                // 12.0 Mesh (live): a base tile changed in place
+            let b = n.box
+            let sq: [Double]? = b.count >= 8 ? [b[0] - b[3], b[1] - b[7], b[0] + b[3], b[1] + b[7]] : nil
+            model.meshStore.noteBase(key: key, square: sq, level: n.level, box: b)
+            model.liveMap.baseSwapped(key: key, box: b)
+        }
         let holder = Entity()
         holder.name = "tile.\(key)"
         holder.orientation = simd_quatf(angle: .pi / 2, axis: SIMD3<Float>(1, 0, 0))   // usdz Y-up → map Z-up

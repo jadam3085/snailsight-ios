@@ -350,6 +350,9 @@ public struct ServerFeatures: Equatable {
         forced || !list.isDisjoint(with: ["live_downlink", "live_deltas", "live_subscribe", "map_live"])
     }
 
+    /// 12.0: the surveyed-vs-estimated world (API §5.16).
+    public var estimatedWorld: Bool { list.contains("estimated_world") }
+
     /// S2 server-authoritative sim.
     public func serverSim(forced: Bool) -> Bool {
         forced || !list.isDisjoint(with: ["sim", "sim_server", "sim_entities", "server_sim", "map_sim"])

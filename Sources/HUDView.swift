@@ -1,43 +1,50 @@
 import SwiftUI
 import SnailSightCore
 
-// 9.8 HUD (owner on 9.7.75: "less bulky and more polished, less wasted space, small buttons"):
-//  - top: one slim status pill (tracking · place · fps · heat · server), tap to expand a detail card
-//  - bottom: a small icon toolbar (Tool, Sim, Spawn/Places, Record, Scans, More), thumb reach; everything else that used
-//    to be a chip row lives in the More menu
-//  - contextual: the selected sim body's floating action bar, recording / upload / measure capsules only when relevant
-// Every 9.7 function is still one or two taps away (see `moreMenu`).
+// 12.0 HUD (owner-approved concepts, 2026-10-18): a clean AR view —
+//  - top: the localization pill (+ the compact status pill and its card), a right rail with Map · Layers · tap tool
+//  - bottom: ONE pull-up sheet (MainSheet: search + Spawn / Room scan / Live map / Record; near you; every tool)
+//  - contextual: recording / upload / measure / live capsules, the selection's details card, drone / rover ops (O2);
+//    the command ring around a selected body is drawn by CommandRingOverlay (ContentView)
+// Every 11.3 function is still reachable: the old bottom toolbar + More menu moved into the sheet's full detent.
 
 struct HUDView: View {
     @EnvironmentObject var model: AppModel
 
     var body: some View {
-        VStack(spacing: 6) {
-            VStack(spacing: 4) {                                    // 10.2: "am I localized?" at the top edge
-                LocalizationPill()
-                if let m = model.meshMapText { MappingLine(text: m, live: model.meshMapLive) }
-                if let r = model.roomScanText { MappingLine(text: r, live: model.roomScanOn) }
-                if model.locExpanded { LocCard().transition(.move(edge: .top).combined(with: .opacity)) }
-            }
-            .frame(maxWidth: .infinity)
-            .padding(.top, -2)
-            HStack(alignment: .top, spacing: 6) {
-                StatusPill()
+        ZStack(alignment: .bottom) {
+            VStack(spacing: 6) {
+                VStack(spacing: 4) {                                    // 10.2: "am I localized?" at the top edge
+                    LocalizationPill()
+                    if let m = model.meshMapText { MappingLine(text: m, live: model.meshMapLive) }
+                    if let r = model.roomScanText { MappingLine(text: r, live: model.roomScanOn) }
+                    if model.locExpanded { LocCard().transition(.move(edge: .top).combined(with: .opacity)) }
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.top, -2)
+                HStack(alignment: .top, spacing: 6) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        StatusPill()
+                        if model.statusExpanded { StatusCard().transition(.move(edge: .top).combined(with: .opacity)) }
+                    }
+                    Spacer(minLength: 0)
+                    RightRail()                                          // 12.0: Map · Layers · tap tool
+                }
+                if let t = model.toast {
+                    Text(t).font(.footnote.weight(.semibold)).multilineTextAlignment(.center)
+                        .padding(.horizontal, 12).padding(.vertical, 6)
+                        .background(.ultraThinMaterial, in: Capsule())
+                        .transition(.opacity)
+                }
                 Spacer(minLength: 0)
+                bottomStack
+                Color.clear.frame(height: CGFloat(SheetDetent.collapsed.height(container: 800)) - 22)   // the sheet's room
+                    .allowsHitTesting(false)
             }
-            if model.statusExpanded { StatusCard().transition(.move(edge: .top).combined(with: .opacity)) }
-            if let t = model.toast {
-                Text(t).font(.footnote.weight(.semibold)).multilineTextAlignment(.center)
-                    .padding(.horizontal, 12).padding(.vertical, 6)
-                    .background(.ultraThinMaterial, in: Capsule())
-                    .transition(.opacity)
-            }
-            Spacer(minLength: 0)
-            bottomStack
+            .padding(.horizontal, 10)
+            .padding(.top, 4)
+            MainSheet()                                                  // 12.0: ONE pull-up sheet (concept C)
         }
-        .padding(.horizontal, 10)
-        .padding(.top, 4)
-        .padding(.bottom, 6)
         .animation(.snappy(duration: 0.2), value: model.statusExpanded)
         .animation(.snappy(duration: 0.2), value: model.locExpanded)
         .animation(.easeInOut(duration: 0.2), value: model.toast)
@@ -62,12 +69,11 @@ struct HUDView: View {
             if let c = model.cubeSel, !model.recording { CubeBar(cube: c) }
             if model.simOn && !model.recording && model.spawnMode { SpawnModeBanner() }
             if model.simOn && !model.recording {
-                SimArea(shared: model.serverSim.ui)               // 10.1: shared (S2) or local (S1) sim controls
+                AgentOpsPanel(ui: model.serverSim.ui)              // 12.0 O2: drone / rover ops
+                SimArea(shared: model.serverSim.ui)               // the details card: every command of the selection
             }
-            BottomToolbar()
         }
     }
-
 
     // MARK: recording
 
@@ -207,6 +213,7 @@ private struct StatusCard: View {
                 row("house", "\(model.arStatus.title) · \(model.arStatus.detail)", model.arStatus.tone == .good ? .secondary : .orange)
             }
             if let m = model.mapFollower.statusLine { row("arrow.triangle.2.circlepath", m, .secondary) }   // 10.7
+            if model.meshLive { row("cube.transparent", model.meshStore.summary(me: model.agentID), .secondary) }   // 12.0
             Text("ar \(model.tracking.code) · map \(model.mapping) · mesh \(model.meshAnchors) \(AdaptiveCapture.meshLabel(model.meshMode, recording: model.recording)) · heat \(model.thermal) · v\(model.version)")
                 .font(.caption2).foregroundStyle(.secondary).lineLimit(1).minimumScaleFactor(0.7)
             row(model.serverBase == nil ? "wifi.slash" : "server.rack", model.serverText,
@@ -228,221 +235,48 @@ private struct StatusCard: View {
     }
 }
 
-// MARK: - bottom toolbar
+// MARK: - 12.0 right rail: Map, Layers, tap tool (44 pt)
 
-private struct BottomToolbar: View {
+private struct RightRail: View {
     @EnvironmentObject var model: AppModel
 
     var body: some View {
-        HStack(spacing: 4) {
-            toolMenu
-            ToolButton(icon: model.simOn ? "pawprint.fill" : "pawprint", label: "Sim", active: model.simOn) {
-                model.simOn.toggle()
+        VStack(spacing: 8) {
+            railButton("map", "Map", "Open the house map") { model.openMap() }
+            railButton("square.3.layers.3d", "Layers", "Show or hide layers: live mesh, structure, terrain, cameras") {
+                model.showLayers = true
             }
-            .disabled(model.recording && !model.simAllowWhileRecording)
-            if model.simOn {
-                ToolButton(icon: model.spawnMode ? "plus.circle.fill" : "plus.circle", label: "Spawn",
-                           active: model.spawnMode, tint: .cyan) {
-                    if model.spawnMode { model.endSpawnMode() } else { model.startSpawnMode() }
+            .overlay(alignment: .topTrailing) {
+                if model.meshLive {
+                    Circle().fill(Color.green).frame(width: 9, height: 9).offset(x: -3, y: 3)
+                        .accessibilityHidden(true)
                 }
-                .disabled(model.recording)
-            } else {
-                ToolButton(icon: "map", label: "Places") { model.showPlaces = true }
             }
-            RecordButton()
-            ToolButton(icon: "square.stack.3d.up", label: "Scans") { model.openScans() }
-                .disabled(model.recording)
-            MoreMenu()
-        }
-        .padding(.horizontal, 8).padding(.vertical, 5)
-        .background(.ultraThinMaterial, in: Capsule())
-        .overlay(Capsule().stroke(.white.opacity(0.08)))
-    }
-
-    private var toolMenu: some View {
-        Menu {
-            Picker("Tap tool", selection: $model.tool) {
-                ForEach(ToolMode.allCases) { t in Label(t.rawValue, systemImage: Self.icon(t)).tag(t) }
+            Menu {
+                Picker("Tap tool", selection: $model.tool) {
+                    ForEach(ToolMode.allCases) { t in Label(t.rawValue, systemImage: ToolIcons.icon(t)).tag(t) }
+                }
+            } label: {
+                Image(systemName: ToolIcons.icon(model.tool)).font(.system(size: 17, weight: .semibold))
+                    .frame(width: 44, height: 44)
+                    .background(.ultraThinMaterial, in: Circle())
+                    .overlay(Circle().stroke(.white.opacity(0.1)))
             }
-        } label: {
-            ToolLabel(icon: Self.icon(model.tool), label: model.tool == .ruler ? "Ruler" : model.tool.rawValue)
-        }
-        .onChange(of: model.tool) { _, t in model.flash(t.help) }
-    }
-
-    static func icon(_ t: ToolMode) -> String {
-        switch t {
-        case .cube: return "cube"
-        case .measure: return "ruler"
-        case .ruler: return "lines.measurement.horizontal"
-        case .objects: return "shippingbox"
-        case .robotPath: return "point.topleft.down.to.point.bottomright.curvepath"
+            .accessibilityLabel("Tap tool: \(model.tool.rawValue)")
+            .onChange(of: model.tool) { _, t in model.flash(t.help) }
         }
     }
-}
 
-private struct ToolLabel: View {
-    let icon: String
-    let label: String
-    var active = false
-    var tint: Color = .primary
-
-    var body: some View {
-        VStack(spacing: 1) {
+    private func railButton(_ icon: String, _ label: String, _ hint: String, _ action: @escaping () -> Void) -> some View {
+        Button(action: action) {
             Image(systemName: icon).font(.system(size: 17, weight: .semibold))
-                .foregroundStyle(active ? Color.cyan : tint)
-            Text(label).font(.system(size: 9, weight: .medium)).lineLimit(1).foregroundStyle(.secondary)
-        }
-        .frame(width: 46, height: 40)
-        .background(active ? Color.cyan.opacity(0.22) : Color.clear, in: RoundedRectangle(cornerRadius: 10))
-        .contentShape(Rectangle())
-    }
-}
-
-private struct ToolButton: View {
-    let icon: String
-    let label: String
-    var active = false
-    var tint: Color = .primary
-    let action: () -> Void
-
-    var body: some View {
-        Button(action: action) { ToolLabel(icon: icon, label: label, active: active, tint: tint) }
-            .buttonStyle(.plain)
-            .accessibilityLabel(label)
-    }
-}
-
-/// Record: the one prominent control (red ring; a stop square while recording).
-private struct RecordButton: View {
-    @EnvironmentObject var model: AppModel
-
-    var body: some View {
-        Button { model.toggleRecording() } label: {
-            ZStack {
-                Circle().stroke(.white.opacity(0.9), lineWidth: 2.5).frame(width: 44, height: 44)
-                if model.recording {
-                    RoundedRectangle(cornerRadius: 4).fill(Color.red).frame(width: 18, height: 18)
-                } else {
-                    Circle().fill(Color.red).frame(width: 34, height: 34)
-                }
-            }
-            .frame(width: 54, height: 46)
+                .frame(width: 44, height: 44)
+                .background(.ultraThinMaterial, in: Circle())
+                .overlay(Circle().stroke(.white.opacity(0.1)))
         }
         .buttonStyle(.plain)
-        .accessibilityLabel(model.recording ? "Stop recording" : "Record room")
-    }
-}
-
-/// Everything else, one tap away (9.7 chip rows → menu sections).
-private struct MoreMenu: View {
-    @EnvironmentObject var model: AppModel
-
-    var body: some View {
-        Menu {
-            Section("View") {
-                Picker(selection: $model.meshStyle) {
-                    ForEach(MeshStyle.allCases) { Text($0.rawValue).tag($0) }
-                } label: { Label("Mesh: \(model.meshStyle.rawValue)", systemImage: "square.grid.3x3") }
-                .pickerStyle(.menu)
-                Toggle(isOn: $model.occlusion) { Label("Occlusion", systemImage: "square.2.layers.3d") }
-                Toggle(isOn: $model.peopleOcclusion) { Label("People occlusion", systemImage: "person.fill") }
-            }
-            Section("Sim") {
-                Toggle(isOn: $model.simOn) { Label("Sim", systemImage: "pawprint") }
-                if model.simOn {
-                    Button { model.startSpawnMode() } label: { Label("Spawn…", systemImage: "plus.circle") }
-                    Toggle(isOn: Binding(get: { model.controller.sim.ui.scaleRef },
-                                         set: { model.controller.sim.ui.scaleRef = $0 })) {
-                        Label("1 m reference", systemImage: "ruler")
-                    }
-                    Toggle(isOn: $model.simXRay) { Label("X-ray (see bodies through walls)", systemImage: "eye.circle") }
-                    Button(role: .destructive) { model.controller.sim.clear() } label: {
-                        Label("Clear sim", systemImage: "xmark.circle")
-                    }
-                }
-                if model.serverFeatures.serverSim(forced: model.forceServerSim) {
-                    Toggle(isOn: $model.sharedSim) { Label("Shared sim (server)", systemImage: "server.rack") }
-                    if model.simOn && model.serverSim.isActive {
-                        Button { model.serverSim.spawn("sim-rover", arView: model.controller.arView) } label: {
-                            Label("Spawn sim rover at +", systemImage: "car.side")
-                        }
-                        Button { model.serverSim.spawn("sim-drone", arView: model.controller.arView) } label: {
-                            Label("Spawn sim drone at +", systemImage: "airplane")
-                        }
-                        Button { model.serverSim.startDroneAssist() } label: {
-                            Label("Drone-assist demo (selected rover)", systemImage: "airplane.departure")
-                        }
-                    }
-                }
-                Picker(selection: $model.simScale) {
-                    ForEach([0.25, 0.35, 0.5, 0.75, 1.0], id: \.self) { Text(SimScale.label($0)).tag($0) }
-                } label: { Label("Sim scale \(SimScale.label(model.simScale))", systemImage: "arrow.down.right.and.arrow.up.left") }
-                .pickerStyle(.menu)
-                Picker(selection: $model.simPerf) {
-                    ForEach(SimPerfMode.allCases) { Text($0.title).tag($0) }
-                } label: { Label("Sim quality", systemImage: "leaf") }
-                .pickerStyle(.menu)
-            }
-            Section("House (AR 1:1)") {
-                Picker(selection: $model.houseStyle) {
-                    ForEach(HouseStyle.allCases) { Text($0.rawValue).tag($0) }
-                } label: { Label("House overlay: \(model.houseStyle.rawValue)", systemImage: "house") }
-                .pickerStyle(.menu)
-                Toggle(isOn: $model.rawScan) { Label("Raw scan", systemImage: "cube.transparent") }   // 11.0 tiles variant
-                Toggle(isOn: $model.arObjects) { Label("Objects", systemImage: "shippingbox") }
-                Toggle(isOn: $model.arTerrain) { Label("Robot terrain", systemImage: "square.grid.3x3.topleft.filled") }
-                Toggle(isOn: $model.arAgents) { Label("Other agents", systemImage: "person.2.wave.2") }
-                Button { model.tool = .robotPath } label: { Label("Robot path tool", systemImage: "point.topleft.down.to.point.bottomright.curvepath") }
-                Button { model.tool = .objects } label: { Label("Fix objects tool", systemImage: "pencil") }
-            }
-            Section("Mapping (mesh only)") {
-                Toggle(isOn: $model.meshMapOn) { Label("Map mesh", systemImage: "cube.transparent") }
-                Toggle(isOn: $model.meshMapAuto) { Label("Auto when localized", systemImage: "location.viewfinder") }
-                Button { model.roomScanner.toggle() } label: {   // 11.3 RoomPlan walls / doors / windows → structure layer
-                    Label(model.roomScanOn ? "Stop room scan" : "Room scan", systemImage: "square.split.bottomrightquarter")
-                }
-                .disabled(!RoomScanner.supported)
-            }
-            Section("Live map") {
-                Toggle(isOn: $model.liveOn) { Label("Live map", systemImage: "dot.radiowaves.left.and.right") }
-                Picker(selection: $model.liveRateHz) {
-                    ForEach(LiveGate.allowedRates, id: \.self) { Text(LiveText.rate($0)).tag($0) }
-                } label: { Label("Live rate \(LiveText.rate(model.liveRateHz))", systemImage: "metronome") }
-                .pickerStyle(.menu)
-            }
-            Section("Place") {
-                Button { model.placeCtl.saveNow() } label: { Label("Save place", systemImage: "square.and.arrow.down") }
-                    .disabled(model.place.relocalizing)
-                Button { model.showPlaces = true } label: { Label("Places…", systemImage: "map") }
-            }
-            Section("Capture") {
-                if !model.recording {
-                    Button { model.objectScan.showChooser = true } label: {
-                        Label("Object scan (high-res)", systemImage: "cube.transparent")
-                    }
-                }
-                Button { model.openScans() } label: { Label("Scans", systemImage: "square.stack.3d.up") }
-                    .disabled(model.recording)
-            }
-            Section("Session") {
-                Button { model.showCubes = true } label: { Label("Cubes…", systemImage: "cube") }
-                Button { model.controller.clearCubes() } label: { Label("Clear cubes", systemImage: "trash") }
-                Button { model.controller.clearMeasures() } label: { Label("Clear measures", systemImage: "ruler") }
-                Button { model.controller.resetSession() } label: { Label("Reset AR", systemImage: "arrow.counterclockwise") }
-                Button { model.sendLog() } label: {
-                    Label(model.sendingLog ? "Sending log…" : "Send log", systemImage: "paperplane")
-                }
-                .disabled(model.sendingLog)
-                if let url = model.logURL {
-                    ShareLink(item: url) { Label("Share log file…", systemImage: "square.and.arrow.up") }
-                }
-                Button { model.showSettings = true } label: { Label("Settings", systemImage: "gearshape") }
-            }
-        } label: {
-            ToolLabel(icon: "ellipsis.circle", label: "More")
-        }
-        .accessibilityLabel("More")
+        .accessibilityLabel(label)
+        .accessibilityHint(hint)
     }
 }
 
