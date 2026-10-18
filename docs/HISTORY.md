@@ -196,3 +196,29 @@ has found; tapping again (or leaving the app) builds the room (`RoomBuilder`), a
 → resent when the server is back. The server lines the room up with the scanned walls and lets it replace structure
 elements only where it scores better. Parametric room only: no images, video or audio. Mesh mapping pauses meanwhile.
 Log: `roomscan_start|stop|done|upload|result`.
+
+**12.0 (one sheet, Map, command ring, agent ops, Mesh live)**: the owner-approved UI concepts (2026-10-18), with every
+11.3 function kept, only moved.
+- **Base layout**: a clean AR view, the localization pill + compact status pill at the top, a right rail (Map · Layers ·
+  tap tool, 44 pt), and ONE pull-up sheet (`Sources/UI/MainSheet.swift`, detents in `SnailSightCore.SheetDetent`):
+  collapsed = search + Spawn / Room scan / Live map / Record; half = **Near you** (shared + local sim bodies, sim rover /
+  drone, cameras from map placements, other agents; nearest first, one primary action each) + **Places** (the house map's
+  rooms → the Map; Saved places); full = everything the old bottom toolbar and More menu held (tap tool, view, Sim, House,
+  Mapping, Live map, Place, Capture, Session, Settings).
+- **Map** (`Sources/Map`): full-screen plan, storey switcher B / 1 / 2 / Yd, the version's floor plan overlay, you,
+  bodies, routes, cameras, other agents; tap a body to select it, tap the plan to send it there. **Yard** = robot terrain
+  slope shading + no-go, and (server `estimated_world`, API §5.16) surveyed vs estimated coverage (hatched), lidar trees
+  (ghost / confirmed / corrected with a line from the estimate), estimated-slope no-go, legend, **Explore gaps**.
+- **Command ring** (`CommandRingOverlay`): tapping a body puts its commands (Go to, Follow, Flee, Stay, Roam, Delete —
+  what it offers) in a ring around it; the details card below is still the full command bar. Drag-to-trash and Spawn mode
+  unchanged.
+- **Agent ops** (`AgentOpsPanel`) for a selected sim drone / rover: obstacle-takeover banner, route + layer, altitude /
+  canopy strip, Hold · Climb above · Return · Land now. With server `drone_missions` these send the §5.16 orders; without
+  it Hold = stop, Return = goto the first-seen spot, Climb / Land are disabled with the reason.
+- **Mesh (live)** layer, on by default: this phone's LiDAR wire mesh plus the shared live tiles (API §6b.1) of every agent
+  — your own walk with Live map on, other phones, replays, sim rovers / drones — drawn in AR and on the Map as they arrive,
+  replaced in place on every rebuild, with a fresh-tile highlight that fades in three steps (`LiveMeshFeed`); base tiles
+  the M4 sync swaps in place flash the same way. The downlink no longer needs Other agents / House on, and widens its tile
+  box to ±40 m while the Map is open. Logs: `live_mesh_first`, `live_down_stats` (+ mesh_tiles, mesh_mine, mesh_agents),
+  `sheet`, `quick_action`, `near_action`, `ring_cmd`, `agent_ops`, `map_open`, `map_scene`, `map_plan`, `map_terrain`,
+  `map_estimated`, `estimated_live`, `explore_gaps`, `layer`.

@@ -17,7 +17,7 @@ public enum SheetDetent: Int, CaseIterable, Equatable {
     /// Visible sheet height (points) for a container of height `h`.
     public func height(container h: Double) -> Double {
         switch self {
-        case .collapsed: return 148
+        case .collapsed: return 178               // search + quick actions + the home-indicator inset
         case .half: return min(max(h * 0.52, 360), h - 120)
         case .full: return max(h - 64, 400)
         }

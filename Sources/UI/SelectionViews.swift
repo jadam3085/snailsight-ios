@@ -83,7 +83,7 @@ struct CommandRingOverlay: View {
         guard simd_dot(w - cam, fw) > 0.1 else { return nil }
         let cmds = RingCommand.ring(offered: offered)
         guard !cmds.isEmpty else { return nil }
-        let bottomReserve = 148.0 + 210.0                   // the collapsed sheet + the details card above it
+        let bottomReserve = SheetDetent.collapsed.height(container: 800) + 210.0                   // the collapsed sheet + the details card above it
         let l = CommandRing.layout(center: V2(Double(pt.x), Double(pt.y)), count: cmds.count,
                                    bounds: [0, 110, Double(size.width), max(240, Double(size.height) - bottomReserve)])
         return Ring(title: title, center: l.center, points: l.points, commands: cmds, offered: offered, serverMode: serverMode)

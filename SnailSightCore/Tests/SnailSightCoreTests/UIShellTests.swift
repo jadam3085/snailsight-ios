@@ -4,14 +4,14 @@ import XCTest
 final class UIShellTests: XCTestCase {
     func testSheetDetentsSettleNearestAndFling() {
         let h = 844.0
-        XCTAssertEqual(SheetDetent.collapsed.height(container: h), 148)
+        XCTAssertEqual(SheetDetent.collapsed.height(container: h), 178)
         XCTAssertLessThan(SheetDetent.half.height(container: h), SheetDetent.full.height(container: h))
-        XCTAssertEqual(SheetDetent.settle(height: 160, velocity: 0, container: h), .collapsed)
+        XCTAssertEqual(SheetDetent.settle(height: 190, velocity: 0, container: h), .collapsed)
         XCTAssertEqual(SheetDetent.settle(height: SheetDetent.half.height(container: h) + 10, velocity: 0, container: h), .half)
         XCTAssertEqual(SheetDetent.settle(height: 800, velocity: 0, container: h), .full)
         // a downward fling from near half closes to collapsed; an upward one from collapsed opens to half
         XCTAssertEqual(SheetDetent.settle(height: SheetDetent.half.height(container: h) - 20, velocity: 900, container: h), .collapsed)
-        XCTAssertEqual(SheetDetent.settle(height: 170, velocity: -900, container: h), .half)
+        XCTAssertEqual(SheetDetent.settle(height: 200, velocity: -900, container: h), .half)
     }
 
     func testQuickActionsAreTheFourFromC1WithLabels() {
