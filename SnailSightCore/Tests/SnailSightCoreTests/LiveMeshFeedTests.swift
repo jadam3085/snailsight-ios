@@ -47,7 +47,8 @@ final class LiveMeshFeedTests: XCTestCase {
         XCTAssertEqual(ft.width, 3); XCTAssertEqual(ft.rows, 1)
         XCTAssertEqual(ft.positions.count, 27); XCTAssertEqual(ft.indices, (0..<9).map { UInt32($0) }); XCTAssertEqual(ft.uvs.count, 18)
         XCTAssertEqual(ft.uvs[0], 0.5 / 3, accuracy: 1e-6); XCTAssertEqual(ft.uvs[1], 0.5, accuracy: 1e-6)
-        XCTAssertEqual(ft.uvs[12], 1.5 / 3, accuracy: 1e-6)                            // triangle 1 -> texel 1
+        XCTAssertEqual(ft.uvs[6], 1.5 / 3, accuracy: 1e-6)                             // triangle 1 -> texel 1
+        XCTAssertEqual(ft.uvs[12], 2.5 / 3, accuracy: 1e-6)
         XCTAssertEqual(Array(ft.rgba[0..<4]), Array(fc[0..<3]) + [255])
         XCTAssertEqual(Array(ft.positions[0..<3]), Array(m.positions[6..<9]))         // vertex 2 first
         // the Map: every non-empty plan cell has a photo colour
