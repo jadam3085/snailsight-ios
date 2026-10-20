@@ -273,6 +273,14 @@ struct LayersSheet: View {
                     } footer: {
                         Text("Layers show in AR and on the Map. Mesh (live) needs the house map to place you; turn on Live map to add your own walk to it.")
                     }
+                    Section {
+                        Picker(selection: $model.meshColour) {
+                            ForEach(MeshColour.allCases) { Text($0.rawValue).tag($0) }
+                        } label: { Label("Mesh colour", systemImage: "paintpalette") }
+                        .pickerStyle(.segmented)
+                    } header: { Text("Mesh colour") } footer: {
+                        Text("Photo paints the live mesh with the colours its walkers' cameras saw. Depth-only agents (Kinect, lidar) stay wireframe.")
+                    }
                     Section("House overlay") {
                         Picker(selection: $model.houseStyle) {
                             ForEach(HouseStyle.allCases) { Text($0.rawValue).tag($0) }

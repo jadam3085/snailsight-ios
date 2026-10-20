@@ -196,7 +196,8 @@ struct MapPlanView: View {
 
     private func drawLiveMesh(_ g: inout GraphicsContext, level: Int, now: Double) {
         for r in mesh.rasters.values where r.level == level {
-            if let img = r.image { g.draw(Image(decorative: img, scale: 1).interpolation(.none), in: rect(r.square)) }
+            let img = model.meshColour == .photo ? (r.photo ?? r.image) : r.image          // 12.1 photo colour
+            if let img { g.draw(Image(decorative: img, scale: 1).interpolation(.none), in: rect(r.square)) }
         }
         for info in mesh.feed.fresh(now: now) where info.level == level {
             guard let sq = info.square else { continue }

@@ -199,11 +199,16 @@ public enum LocCadence {
     public static let recordingFactor = 2.0     // recording owns the thermal budget
     public static let hotFactor = 3.0           // thermal serious
 
+    /// 12.1 `sinceSceneChange`: seconds since a big light jump / storey change (LocSceneChange). An unlocked search
+    /// goes back to `searchingFast` for `fastWindowS` after one, even while recording or "not in map" (a daytime
+    /// yard -> house walk took 67 tries / 335 s at 6 s x 2 = 12 s; the house's first views are the ones that lock).
     public static func interval(locked: Bool, refinements: Int, thermalSerious: Bool, recording: Bool,
-                                notInMap: Bool, searchSeconds: Double = .infinity) -> Double {
+                                notInMap: Bool, searchSeconds: Double = .infinity,
+                                sinceSceneChange: Double = .infinity) -> Double {
         var f = 1.0
         if thermalSerious { f *= hotFactor }
         if recording { f *= recordingFactor }
+        if !locked && !thermalSerious && sinceSceneChange >= 0 && sinceSceneChange < fastWindowS { return searchingFast }
         if !locked {
             if notInMap { return Self.notInMap * f }
             return (searchSeconds < fastWindowS && f == 1 ? searchingFast : searching) * f
@@ -225,6 +230,43 @@ public enum LocCadence {
     }
 }
 
+
+/// 12.1: "the scene just changed": the camera's light level jumped more than `lightFactor` (brightness proxy =
+/// ambient intensity / exposure time; outdoors -> indoors is 30-100x) or the phone moved a storey (ARKit height
+/// changed > `storeyM` since the reference). Each trigger re-arms the reference, so one walk inside fires once.
+public struct LocSceneChange: Equatable {
+    public static let lightFactor = 4.0
+    public static let storeyM = 2.0
+    public private(set) var refLight: Double?
+    public private(set) var refHeight: Double?
+    public private(set) var lastAt: Double?
+    public init() {}
+
+    /// Brightness proxy of a frame: ambient intensity (lm, ARKit light estimate; nil = 1000) / exposure time (s).
+    public static func brightness(ambientIntensity: Double?, exposureDuration: Double) -> Double? {
+        guard exposureDuration > 0 else { return nil }
+        return (ambientIntensity ?? 1000) / exposureDuration
+    }
+
+    /// Feed a frame; returns "light" / "storey" when the scene changed (and remembers `now`), else nil.
+    public mutating func update(brightness: Double?, height: Double?, now: Double) -> String? {
+        var why: String?
+        if let b = brightness, b > 0, b.isFinite {
+            if let r = refLight {
+                if max(b / r, r / b) > Self.lightFactor { why = "light"; refLight = b }
+            } else { refLight = b }
+        }
+        if let h = height, h.isFinite {
+            if let r = refHeight {
+                if abs(h - r) > Self.storeyM { why = why ?? "storey"; refHeight = h }
+            } else { refHeight = h }
+        }
+        if why != nil { lastAt = now }
+        return why
+    }
+
+    public func since(now: Double) -> Double { lastAt.map { now - $0 } ?? .infinity }
+}
 
 /// 10.6.x (owner 2026-10-16: one timeout and the app never placed him): the master-map localize loop never stops
 /// while unplaced. After any error / timeout the next attempt waits 2, 4, 8, then 10 s (cap); foreground, a network

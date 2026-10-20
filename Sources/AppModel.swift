@@ -161,6 +161,13 @@ final class AppModel: ObservableObject {
             log.event("layer", ["name": .string("mesh_live"), "on": .bool(meshLive)])
         }
     }
+    /// 12.1 Layers ▸ Mesh colour: live tiles in their photo colour (server live 0.5 vertex colour) or the wireframe look.
+    @Published var meshColour: MeshColour = MeshColour(rawValue: UserDefaults.standard.string(forKey: "layers.meshColour") ?? "") ?? .photo {
+        didSet {
+            UserDefaults.standard.set(meshColour.rawValue, forKey: "layers.meshColour")
+            if meshColour != oldValue { log.event("layer", ["name": .string("mesh_colour"), "mode": .string(meshColour.rawValue)]) }
+        }
+    }
     /// Layers ▸ Cameras / Paths (Map + AR markers).
     @Published var showCameras: Bool = UserDefaults.standard.object(forKey: "layers.cameras") as? Bool ?? true {
         didSet { UserDefaults.standard.set(showCameras, forKey: "layers.cameras") }

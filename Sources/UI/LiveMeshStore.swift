@@ -12,6 +12,7 @@ final class LiveMeshStore: ObservableObject {
         let square: [Double]
         let level: Int
         let image: CGImage?
+        let photo: CGImage?                                // 12.1: the same plan in the tile's photo colours
     }
 
     @Published private(set) var rev = 0
@@ -23,11 +24,17 @@ final class LiveMeshStore: ObservableObject {
 
     /// A live mesh tile accepted + drawn in AR. Rasterised here (≤ ~1000 triangles a tile after server decimation).
     @discardableResult
-    func applyLive(_ h: LiveTileHeader, mesh: FlatMesh, floorZ: Double?, me: String) -> LiveMeshFeed.Applied {
+    func applyLive(_ h: LiveTileHeader, mesh: FlatMesh, rgb: [UInt8]? = nil, floorZ: Double?, me: String) -> LiveMeshFeed.Applied {
         let a = feed.apply(h, triangles: mesh.triangleCount, floorZ: floorZ, me: me, now: now)
         if let sq = h.square {
             let r = TilePlanRaster.raster(mesh, square: sq, floorZ: floorZ)
-            rasters[h.key] = Raster(key: h.key, square: sq, level: h.levelIndex, image: Self.image(r, n: 40))
+            var photo: CGImage?
+            if let rgb {
+                let px = TilePlanRaster.rasterRGBA(mesh, faceRGB: LiveMeshTile.faceColours(mesh, rgb: rgb), square: sq,
+                                                   floorZ: floorZ, n: 40)
+                photo = Self.flipRows(px, n: 40).flatMap { Self.rgbaImage($0, w: 40, h: 40) }
+            }
+            rasters[h.key] = Raster(key: h.key, square: sq, level: h.levelIndex, image: Self.image(r, n: 40), photo: photo)
         }
         schedulePublish()
         return a
@@ -67,6 +74,17 @@ final class LiveMeshStore: ObservableObject {
             }
         }
         return rgbaImage(px, w: n, h: n)
+    }
+
+    /// Raster row 0 = min y -> image row 0 = top = max y.
+    static func flipRows(_ px: [UInt8], n: Int) -> [UInt8]? {
+        guard px.count == n * n * 4 else { return nil }
+        var out = [UInt8](repeating: 0, count: px.count)
+        for j in 0..<n {
+            let src = j * n * 4, dst = (n - 1 - j) * n * 4
+            out[dst..<(dst + n * 4)] = px[src..<(src + n * 4)]
+        }
+        return out
     }
 
     static func rgbaImage(_ px: [UInt8], w: Int, h: Int) -> CGImage? {

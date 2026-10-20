@@ -26,9 +26,13 @@ public struct LiveTileHeader: Decodable, Equatable {
     public var hwWall: Double?
     public var keyframes: Int?
     public var triangles: Int?
+    /// 12.1 (server live 0.5): `"rgb8"` when the tile carries per-vertex photo colour in `rgb` (json transport: base64
+    /// uint8 R,G,B per vertex, vertex order). Absent for depth-only agents (Kinect, lidar): draw those untinted.
+    public var colour: String?
+    public var rgb: String?
 
     enum CodingKeys: String, CodingKey {
-        case type, layer, key, level, tx, ty, ver, origin, hw, keyframes, triangles
+        case type, layer, key, level, tx, ty, ver, origin, hw, keyframes, triangles, colour, rgb
         case sizeM = "size_m", hwWall = "hw_wall"
     }
 
@@ -225,6 +229,56 @@ public enum TilePlanRaster {
                 for i in i0...i1 {
                     let o = j * n + i                    // row 0 = min y
                     if cls > out[o] { out[o] = cls }
+                }
+            }
+        }
+        return out
+    }
+
+    /// 12.1 Map "photo" colour: the same top-down raster as `raster`, but each cell takes the photo colour of the
+    /// triangle that won it (wall > raised > floor; within a class the higher one). `faceRGB` = 3 bytes per triangle
+    /// (LiveMeshTile.faceColours). -> RGBA, row 0 = min y (like `raster`); empty cells transparent.
+    public static func rasterRGBA(_ m: FlatMesh, faceRGB: [UInt8], square s: [Double], floorZ: Double?, n: Int = 40) -> [UInt8] {
+        var out = [UInt8](repeating: 0, count: n * n * 4)
+        guard s.count == 4, n > 0, s[2] > s[0], s[3] > s[1], faceRGB.count == m.triangleCount * 3 else { return out }
+        var cls = [UInt8](repeating: 0, count: n * n)
+        var top = [Double](repeating: -.infinity, count: n * n)
+        let cw = (s[2] - s[0]) / Double(n), ch = (s[3] - s[1]) / Double(n)
+        let p = m.positions, idx = m.indices
+        func v(_ i: UInt32) -> (Double, Double, Double) {
+            let j = Int(i) * 3
+            return (Double(p[j]), Double(p[j + 1]), Double(p[j + 2]))
+        }
+        var fz = floorZ
+        if fz == nil, !p.isEmpty {
+            var zs = stride(from: 2, to: p.count, by: 3).map { Double(p[$0]) }
+            zs.sort()
+            fz = zs[zs.count / 10]
+        }
+        var t = 0
+        while t + 2 < idx.count {
+            let a = v(idx[t]), b = v(idx[t + 1]), c = v(idx[t + 2])
+            let f = t / 3
+            t += 3
+            let ux = b.0 - a.0, uy = b.1 - a.1, uz = b.2 - a.2
+            let wx = c.0 - a.0, wy = c.1 - a.1, wz = c.2 - a.2
+            let nx = uy * wz - uz * wy, ny = uz * wx - ux * wz, nz = ux * wy - uy * wx
+            let len = (nx * nx + ny * ny + nz * nz).squareRoot()
+            guard len > 1e-12 else { continue }
+            let zc = (a.2 + b.2 + c.2) / 3
+            let k: UInt8 = abs(nz / len) < 0.45 ? wall : ((fz.map { zc - $0 > 0.12 } ?? false) ? raised : floor)
+            let x0 = min(a.0, b.0, c.0), x1 = max(a.0, b.0, c.0), y0 = min(a.1, b.1, c.1), y1 = max(a.1, b.1, c.1)
+            let i0 = max(0, Int(((x0 - s[0]) / cw).rounded(.down))), i1 = min(n - 1, Int(((x1 - s[0]) / cw).rounded(.down)))
+            let j0 = max(0, Int(((y0 - s[1]) / ch).rounded(.down))), j1 = min(n - 1, Int(((y1 - s[1]) / ch).rounded(.down)))
+            guard i0 <= i1, j0 <= j1 else { continue }
+            for j in j0...j1 {
+                for i in i0...i1 {
+                    let o = j * n + i
+                    guard k > cls[o] || (k == cls[o] && zc > top[o]) else { continue }
+                    cls[o] = k
+                    top[o] = zc
+                    out[o * 4] = faceRGB[f * 3]; out[o * 4 + 1] = faceRGB[f * 3 + 1]; out[o * 4 + 2] = faceRGB[f * 3 + 2]
+                    out[o * 4 + 3] = 255
                 }
             }
         }

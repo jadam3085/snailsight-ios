@@ -25,6 +25,12 @@ enum HouseStyle: String, CaseIterable, Identifiable {
     var id: String { rawValue }
 }
 
+/// 12.1 live mesh tile look: photo colour (per-vertex RGB from the server, flat per triangle in AR) or wireframe.
+enum MeshColour: String, CaseIterable, Identifiable {
+    case photo = "Photo", wireframe = "Wireframe"
+    var id: String { rawValue }
+}
+
 /// The detected object the owner tapped (AR correction sheet).
 struct ARObjectEdit: Identifiable, Equatable {
     let id: String

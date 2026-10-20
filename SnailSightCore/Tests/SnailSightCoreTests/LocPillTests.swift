@@ -69,6 +69,31 @@ final class LocPillTests: XCTestCase {
         XCTAssertEqual(LocPill.cm(0.2), "±1 cm")
     }
 
+    func testSceneChangeRestartsFastSearch() {
+        // recording + not in map = 12 s between tries; a light jump (yard -> house) or a storey change: 0.5 s for 20 s
+        XCTAssertEqual(LocCadence.interval(locked: false, refinements: 0, thermalSerious: false, recording: true, notInMap: true), 12)
+        XCTAssertEqual(LocCadence.interval(locked: false, refinements: 0, thermalSerious: false, recording: true, notInMap: true,
+                                           searchSeconds: 300, sinceSceneChange: 2), 0.5)
+        XCTAssertEqual(LocCadence.interval(locked: false, refinements: 0, thermalSerious: false, recording: true, notInMap: true,
+                                           searchSeconds: 300, sinceSceneChange: 21), 12)
+        XCTAssertEqual(LocCadence.interval(locked: false, refinements: 0, thermalSerious: true, recording: false, notInMap: false,
+                                           sinceSceneChange: 2), 3)                          // hot: no boost
+        XCTAssertEqual(LocCadence.interval(locked: true, refinements: 12, thermalSerious: false, recording: false, notInMap: false,
+                                           sinceSceneChange: 2), 60)                         // locked: unaffected
+        var s = LocSceneChange()
+        let sun = LocSceneChange.brightness(ambientIntensity: 2000, exposureDuration: 1.0 / 2000)   // daylight yard
+        let room = LocSceneChange.brightness(ambientIntensity: 700, exposureDuration: 1.0 / 60)    // inside
+        XCTAssertNil(s.update(brightness: sun, height: 0.0, now: 100))
+        XCTAssertNil(s.update(brightness: sun! * 1.5, height: 0.3, now: 101))                     // cloud: no
+        XCTAssertEqual(s.update(brightness: room, height: 0.4, now: 110), "light")
+        XCTAssertEqual(s.since(now: 115), 5)
+        XCTAssertNil(s.update(brightness: room, height: 0.5, now: 116))                           // re-armed: once per walk-in
+        XCTAssertEqual(s.update(brightness: room, height: 2.9, now: 130), "storey")              // up the stairs
+        XCTAssertNil(s.update(brightness: nil, height: 3.0, now: 131))
+        XCTAssertNil(LocSceneChange.brightness(ambientIntensity: 1000, exposureDuration: 0))
+        XCTAssertEqual(LocSceneChange().since(now: 5), .infinity)
+    }
+
     func testCadence() {
         // fast until locked, slower while recording / hot, slow retry when not in the map
         XCTAssertEqual(LocCadence.interval(locked: false, refinements: 0, thermalSerious: false, recording: false, notInMap: false), 1)

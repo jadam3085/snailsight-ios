@@ -8,7 +8,11 @@
 //   amber "live" wireframe in the map frame; `change` (L4) becomes a subtle outline that fades over 90 s (`cleared`
 //   removes it, `dynamic` is never flagged); `doc` re-reads rooms / objects; `rebase` / `commit` keep the old tiles
 //   until their re-fused versions arrive. Ping every 10 s; reconnect 1, 2, 4, 8, 10 s, resuming from the last seq.
+// - 12.1 Mesh colour (server live 0.5): a tile with `rgb` (per-vertex photo colour) is drawn in Layers ▸ Mesh colour
+//   "Photo" as flat-coloured triangles (unwelded, one texel per triangle in a nearest-sampled strip: no custom shader);
+//   "Wireframe" (or a depth-only tile) keeps the amber wire. Fresh tiles tint green, then settle.
 import ARKit
+import Metal
 import RealityKit
 import UIKit
 import SnailSightCore
@@ -30,6 +34,9 @@ final class LiveMapClient {
     private var lastInbound: TimeInterval = 0
     private var tiles = LiveTileStore()
     private var tileEntities: [String: ModelEntity] = [:]
+    private var tileData: [String: (mesh: FlatMesh, rgb: [UInt8]?)] = [:]     // 12.1: redraw on a Mesh colour switch
+    private var tilePhoto: [String: TextureResource] = [:]                    // photo strip of each coloured tile
+    private var drawnColour: MeshColour?
     private var changes = ChangeMarkers()
     private var changeEntities: [String: Entity] = [:]
     private var stats = (msgs: 0, tiles: 0, drawn: 0, changes: 0, docs: 0)
@@ -114,6 +121,10 @@ final class LiveMapClient {
         let t = now
         layer.agentNode.isEnabled = model.arAgents
         layer.liveNode.isEnabled = model.meshLive                   // 12.0 layers ▸ Mesh (live)
+        if drawnColour != model.meshColour {                       // 12.1 Layers ▸ Mesh colour switched: redraw
+            drawnColour = model.meshColour
+            for (k, d) in tileData { drawTile(key: k, mesh: d.mesh, rgb: d.rgb) }
+        }
         restyleFresh()
         if model.arAgents && model.serverBase != nil && !model.showScans && t - downlinkAgentsAt > 5
             && t - lastPoll >= 2 && !polling {
@@ -335,8 +346,10 @@ final class LiveMapClient {
             guard tiles.accept(layer: l, key: key, ver: ver) else { return }
             if l == "mesh", let mesh = LiveMeshTile.decode(enc: enc, base64: data) {
                 let h = LiveTileHeader.parse(d) ?? LiveTileHeader(layer: l, key: key, ver: ver)
-                let applied = model.meshStore.applyLive(h, mesh: mesh, floorZ: floorZ[h.levelIndex], me: model.agentID)
-                drawTile(key: key, mesh: mesh)
+                let rgb = LiveMeshTile.decodeColour(base64: h.rgb, vertexCount: mesh.vertexCount)
+                let applied = model.meshStore.applyLive(h, mesh: mesh, rgb: rgb, floorZ: floorZ[h.levelIndex], me: model.agentID)
+                tileData[key] = (mesh, rgb)
+                drawTile(key: key, mesh: mesh, rgb: rgb)
                 if applied == .new, !loggedFirstMesh {
                     loggedFirstMesh = true
                     model.log.event("live_mesh_first", ["key": .string(key), "agents": .string(h.agents.joined(separator: ",")),
@@ -394,7 +407,7 @@ final class LiveMapClient {
         for (k, old) in tileStep {
             let st = model.meshStore.step(key: k)
             guard st != old else { continue }
-            tileEntities[k]?.model?.materials = [Self.material(step: st)]
+            tileEntities[k]?.model?.materials = [material(key: k, step: st)]
             if st == 0 { tileStep[k] = nil } else { tileStep[k] = st }
         }
         for (k, o) in baseOutlines {
@@ -409,24 +422,74 @@ final class LiveMapClient {
         }
     }
 
-    private func drawTile(key: String, mesh m: FlatMesh) {
-        var pos = [SIMD3<Float>]()
-        pos.reserveCapacity(m.vertexCount)
-        var i = 0
-        while i + 2 < m.positions.count {
-            pos.append(SIMD3<Float>(m.positions[i], m.positions[i + 1], m.positions[i + 2]))
-            i += 3
-        }
+    /// The look of one tile: its photo strip in Photo mode (fresh = green tint), else the amber / fresh wire.
+    private func material(key: String, step: Int) -> any RealityKit.Material {
+        guard model.meshColour == .photo, let tex = tilePhoto[key] else { return Self.material(step: step) }
+        return Self.photoMaterial(tex, step: step)
+    }
+
+    private static let nearest: MaterialParameters.Texture.Sampler = {
+        let d = MTLSamplerDescriptor()
+        d.minFilter = .nearest
+        d.magFilter = .nearest
+        d.mipFilter = .notMipmapped
+        d.sAddressMode = .clampToEdge
+        d.tAddressMode = .clampToEdge
+        return MaterialParameters.Texture.Sampler(d)
+    }()
+
+    private static func photoMaterial(_ tex: TextureResource, step: Int) -> UnlitMaterial {
+        var m = UnlitMaterial()
+        let tint = step >= 2 ? UIColor(red: 0.7, green: 1, blue: 0.8, alpha: 1)
+                 : step == 1 ? UIColor(red: 0.85, green: 1, blue: 0.9, alpha: 1) : UIColor.white
+        m.color = .init(tint: tint, texture: .init(tex, sampler: nearest))
+        m.blending = .transparent(opacity: 0.92)
+        return m
+    }
+
+    private static func stripImage(_ px: [UInt8], w: Int, h: Int) -> CGImage? {
+        guard w > 0, h > 0, px.count == w * h * 4, let prov = CGDataProvider(data: Data(px) as CFData) else { return nil }
+        return CGImage(width: w, height: h, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: w * 4,
+                       space: CGColorSpaceCreateDeviceRGB(),
+                       bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
+                       provider: prov, decode: nil, shouldInterpolate: false, intent: .defaultIntent)
+    }
+
+    private func drawTile(key: String, mesh m: FlatMesh, rgb: [UInt8]?) {
         var d = MeshDescriptor(name: "live")
-        d.positions = MeshBuffers.Positions(pos)
-        d.primitives = .triangles(m.indices)
+        tilePhoto[key] = nil
+        if model.meshColour == .photo, let rgb, let ft = LiveMeshTile.faceTextured(m, rgb: rgb),
+           let img = Self.stripImage(ft.rgba, w: ft.width, h: ft.rows),
+           let tex = try? TextureResource.generate(from: img, options: .init(semantic: .color, mipmapsMode: .none)) {
+            var pos = [SIMD3<Float>](), uv = [SIMD2<Float>]()
+            pos.reserveCapacity(ft.positions.count / 3)
+            uv.reserveCapacity(ft.uvs.count / 2)
+            var i = 0
+            while i + 2 < ft.positions.count { pos.append(SIMD3<Float>(ft.positions[i], ft.positions[i + 1], ft.positions[i + 2])); i += 3 }
+            i = 0
+            while i + 1 < ft.uvs.count { uv.append(SIMD2<Float>(ft.uvs[i], ft.uvs[i + 1])); i += 2 }
+            d.positions = MeshBuffers.Positions(pos)
+            d.textureCoordinates = MeshBuffers.TextureCoordinates(uv)
+            d.primitives = .triangles(ft.indices)
+            tilePhoto[key] = tex
+        } else {
+            var pos = [SIMD3<Float>]()
+            pos.reserveCapacity(m.vertexCount)
+            var i = 0
+            while i + 2 < m.positions.count {
+                pos.append(SIMD3<Float>(m.positions[i], m.positions[i + 1], m.positions[i + 2]))
+                i += 3
+            }
+            d.positions = MeshBuffers.Positions(pos)
+            d.primitives = .triangles(m.indices)
+        }
         guard let res = try? MeshResource.generate(from: [d]) else { return }
         let st = model.meshStore.step(key: key)                         // a new / changed tile glows, then settles
         if let e = tileEntities[key] {
             e.model?.mesh = res                                         // in place: same entity, new mesh
-            e.model?.materials = [Self.material(step: st)]
+            e.model?.materials = [material(key: key, step: st)]
         } else {
-            let e = ModelEntity(mesh: res, materials: [Self.material(step: st)])
+            let e = ModelEntity(mesh: res, materials: [material(key: key, step: st)])
             layer.liveNode.addChild(e)
             tileEntities[key] = e
         }

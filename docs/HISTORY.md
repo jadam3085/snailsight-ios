@@ -225,3 +225,16 @@ Log: `roomscan_start|stop|done|upload|result`.
 - 12.0.x: drone missions LIVE on the server (`drone_missions`): the ops panel shows the mission line (phase, layer it
   flies over, under / above canopy, AGL, takeovers) and draws the mission path (entity doc `mission`, API §5.9.12);
   Return uses the mission's home. Sim tree statuses (sim ledger) stay out of the Map's real tree layer.
+
+**12.1 (photo-coloured live mesh, faster re-search on a scene change)**:
+- **Mesh colour** (Layers ▸ Mesh colour: Photo | Wireframe, default Photo): live tiles from server `snailsight-live` 0.5
+  carry per-vertex photo colour (`rgb`, API §6b.1: a weighted running average of the walkers' keyframe colours per 5 cm
+  voxel, exposure-normalised). AR draws them as flat-coloured triangles (unwelded, one texel per triangle in a
+  nearest-sampled strip, `LiveMeshTile.faceTextured`; fresh tiles tinted green, then settled); the Map's top-down tile
+  rasters take the colour of the triangle that wins each cell (`TilePlanRaster.rasterRGBA`). Wireframe, and tiles from
+  depth-only agents (Kinect, lidar), keep the amber wire / grey plan.
+- **Scene change → fast search** (`LocSceneChange`): unlocked, a light jump > 4x (ambient intensity / exposure time:
+  yard → house is 30-100x) or a storey change (ARKit height > 2 m) puts the search back on 0.5 s for 20 s, even while
+  recording or "not in map" (a daytime yard → house walk at 6 s x 2 = 12 s took 67 tries / 335 s). Log
+  `maploc_scene_change {why, attempts, search_s}`.
+- `maploc_locked` logs `T_map_arkit` (row-major 16; the server's phone-lock placement seeds read it).

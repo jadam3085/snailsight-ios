@@ -173,6 +173,66 @@ public enum LiveMeshTile {
         }
     }
 
+    /// 12.1: the tile's per-vertex photo colour (`rgb`, server live 0.5): 3 bytes per vertex, nil when absent or the
+    /// wrong length (an old or depth-only tile: draw it untinted).
+    public static func decodeColour(base64: String?, vertexCount: Int) -> [UInt8]? {
+        guard let s = base64, let d = Data(base64Encoded: s), vertexCount > 0, d.count == vertexCount * 3 else { return nil }
+        return [UInt8](d)
+    }
+
+    /// One colour per triangle (the mean of its three vertices): 3 bytes per triangle.
+    public static func faceColours(_ m: FlatMesh, rgb: [UInt8]) -> [UInt8] {
+        let nt = m.triangleCount
+        guard rgb.count == m.vertexCount * 3 else { return [] }
+        var out = [UInt8](repeating: 0, count: nt * 3)
+        for f in 0..<nt {
+            let a = Int(m.indices[f * 3]) * 3, b = Int(m.indices[f * 3 + 1]) * 3, c = Int(m.indices[f * 3 + 2]) * 3
+            for ch in 0..<3 {
+                out[f * 3 + ch] = UInt8((Int(rgb[a + ch]) + Int(rgb[b + ch]) + Int(rgb[c + ch])) / 3)
+            }
+        }
+        return out
+    }
+
+    /// AR photo colour without a custom shader: every triangle gets its own three vertices (unwelded) whose UVs all
+    /// point at the centre of that triangle's texel in a `width` x `rows` colour strip (`faceColours`, RGBA, row 0 =
+    /// top = v 1). Drawn with nearest sampling each triangle shows its own colour (flat, ~5-10 cm facets).
+    public struct FaceTextured: Equatable {
+        public var positions: [Float]          // 9 per triangle
+        public var indices: [UInt32]           // 0, 1, 2, 3, …
+        public var uvs: [Float]                // 2 per vertex
+        public var rgba: [UInt8]               // width * rows * 4
+        public var width: Int
+        public var rows: Int
+    }
+
+    public static let stripMaxWidth = 4096
+
+    public static func faceTextured(_ m: FlatMesh, rgb: [UInt8]) -> FaceTextured? {
+        let nt = m.triangleCount
+        let fc = faceColours(m, rgb: rgb)
+        guard nt > 0, fc.count == nt * 3 else { return nil }
+        let w = min(nt, stripMaxWidth), rows = (nt + w - 1) / w
+        var pos = [Float](repeating: 0, count: nt * 9)
+        var uv = [Float](repeating: 0, count: nt * 6)
+        var rgba = [UInt8](repeating: 255, count: w * rows * 4)
+        for f in 0..<nt {
+            let x = f % w, y = f / w
+            let u = (Float(x) + 0.5) / Float(w), v = 1 - (Float(y) + 0.5) / Float(rows)
+            for k in 0..<3 {
+                let src = Int(m.indices[f * 3 + k]) * 3
+                pos[f * 9 + k * 3] = m.positions[src]
+                pos[f * 9 + k * 3 + 1] = m.positions[src + 1]
+                pos[f * 9 + k * 3 + 2] = m.positions[src + 2]
+                uv[f * 6 + k * 2] = u
+                uv[f * 6 + k * 2 + 1] = v
+            }
+            let o = (y * w + x) * 4
+            rgba[o] = fc[f * 3]; rgba[o + 1] = fc[f * 3 + 1]; rgba[o + 2] = fc[f * 3 + 2]
+        }
+        return FaceTextured(positions: pos, indices: (0..<UInt32(nt * 3)).map { $0 }, uvs: uv, rgba: rgba, width: w, rows: rows)
+    }
+
     public static func encode(_ m: FlatMesh) -> String {
         var d = Data()
         func u32(_ v: UInt32) { var x = v.littleEndian; withUnsafeBytes(of: &x) { d.append(contentsOf: $0) } }

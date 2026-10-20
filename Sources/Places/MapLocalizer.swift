@@ -45,6 +45,7 @@ final class MapLocalizer {
     private(set) var streamID = MapLocalizer.newStream()
     private var streamStart = Date().timeIntervalSince1970
     private var lastAttempt = 0.0
+    private var scene = LocSceneChange()            // 12.1: light jump / storey change -> fast search again
     private var inFlight = false
     private var inFlightSince = 0.0
     private var retryState = LocRetry()                 // 10.6.x: backoff after errors; never stops while unplaced
@@ -162,8 +163,17 @@ final class MapLocalizer {
             LocCadence.depthNeeded(locked: serverLocked, refinements: refinements, sinceLastAttempt: since,
                                    thermalSerious: hot, recording: model.recording)
         setDepthWanted(needDepth)
+        if alignment == nil {
+            let b = LocSceneChange.brightness(ambientIntensity: f.lightEstimate.map { Double($0.ambientIntensity) },
+                                              exposureDuration: f.camera.exposureDuration)
+            if let why = scene.update(brightness: b, height: Double(f.camera.transform.columns.3.y), now: t) {
+                model.log.event("maploc_scene_change", ["why": .string(why), "attempts": .int(attempts),
+                                                        "search_s": .double(t - streamStart)])
+            }
+        }
         let every = LocCadence.interval(locked: serverLocked, refinements: refinements, thermalSerious: hot,
-                                        recording: model.recording, notInMap: isNotInMap, searchSeconds: t - streamStart)
+                                        recording: model.recording, notInMap: isNotInMap, searchSeconds: t - streamStart,
+                                        sinceSceneChange: serverLocked ? .infinity : scene.since(now: t))
         guard forceAttempt || since >= every else { return }
         switch f.camera.trackingState {
         case .normal: break
@@ -315,6 +325,7 @@ final class MapLocalizer {
                                           "sigma_deg": .double(a.confidence?.sigmaDeg ?? -1),
                                           "rule": .string(a.lockRule ?? "")]
             if let c = cross { ev["cross_cm"] = .double(c.cm); ev["cross_deg"] = .double(c.deg) }
+            ev["T_map_arkit"] = .doubles(T.m)               // 12.1: the placement job's phone-lock seeds read it
             model.log.event("maploc_locked", ev)
             model.flash(MapLocText.locked(mapID: a.mapID, version: a.mapVersion, seconds: lockSeconds,
                                           method: next.method), seconds: 3)

@@ -26,6 +26,38 @@ final class LiveMeshFeedTests: XCTestCase {
         XCTAssertNil(LiveTileHeader.parse(Data(#"{"type":"agent","agent_id":"x"}"#.utf8)))
     }
 
+    /// 12.1: a coloured tile exactly as `snailsight-live` 0.5 sends it on the json transport (livetiles.encode_colour ->
+    /// livepub.tile_json; 6-bit colour bins).
+    static let colourTile = #"{"type": "tile", "layer": "mesh", "key": "0/1/-2", "level": 0, "tx": 1, "ty": -2, "ver": {"base_version": 0, "live_seq": 7}, "origin": [4.0, -8.0, -1.35], "size_m": 4.0, "hw": {"replay-col/ar-1": 9}, "vertices": 5, "triangles": 3, "colour": "rgb8", "enc": "f32", "data": "BQAAAAMAAAAAAIBACtfrwGdmxr8AAIBAzczswJDCxb9iEIBAMzPrwGdmxr9qvIBAzczswAAAwL9/aoBAMzPrwAAAwL8CAAAAAAAAAAEAAAADAAAAAgAAAAEAAAAEAAAAAgAAAAMAAAA=", "rgb": "yraiyraeHj5aZmZm+goK"}"#
+
+    func testColourTileDecodesToFaceStripAndPlanColours() throws {
+        let d = Data(Self.colourTile.utf8)
+        guard case .tile(_, _, _, let enc, let data)? = LiveDownMessage.parse(d) else { return XCTFail("not a tile") }
+        let m = try XCTUnwrap(LiveMeshTile.decode(enc: enc, base64: data))
+        let h = try XCTUnwrap(LiveTileHeader.parse(d))
+        XCTAssertEqual(h.colour, "rgb8")
+        let rgb = try XCTUnwrap(LiveMeshTile.decodeColour(base64: h.rgb, vertexCount: m.vertexCount))
+        XCTAssertEqual(rgb, [202, 182, 162, 202, 182, 158, 30, 62, 90, 102, 102, 102, 250, 10, 10])
+        XCTAssertNil(LiveMeshTile.decodeColour(base64: h.rgb, vertexCount: 4))          // wrong length = untinted
+        XCTAssertNil(LiveMeshTile.decodeColour(base64: nil, vertexCount: 5))
+        // face colour = mean of its vertices; triangle 0 = (2, 0, 1)
+        let fc = LiveMeshTile.faceColours(m, rgb: rgb)
+        XCTAssertEqual(Array(fc[0..<3]), [UInt8((30 + 202 + 202) / 3), UInt8((62 + 182 + 182) / 3), UInt8((90 + 162 + 158) / 3)])
+        let ft = try XCTUnwrap(LiveMeshTile.faceTextured(m, rgb: rgb))
+        XCTAssertEqual(ft.width, 3); XCTAssertEqual(ft.rows, 1)
+        XCTAssertEqual(ft.positions.count, 27); XCTAssertEqual(ft.indices, (0..<9).map { UInt32($0) }); XCTAssertEqual(ft.uvs.count, 18)
+        XCTAssertEqual(ft.uvs[0], 0.5 / 3, accuracy: 1e-6); XCTAssertEqual(ft.uvs[1], 0.5, accuracy: 1e-6)
+        XCTAssertEqual(ft.uvs[12], 1.5 / 3, accuracy: 1e-6)                            // triangle 1 -> texel 1
+        XCTAssertEqual(Array(ft.rgba[0..<4]), Array(fc[0..<3]) + [255])
+        XCTAssertEqual(Array(ft.positions[0..<3]), Array(m.positions[6..<9]))         // vertex 2 first
+        // the Map: every non-empty plan cell has a photo colour
+        let px = TilePlanRaster.rasterRGBA(m, faceRGB: fc, square: try XCTUnwrap(h.square), floorZ: -1.35, n: 40)
+        XCTAssertEqual(px.count, 40 * 40 * 4)
+        let lit = stride(from: 3, to: px.count, by: 4).filter { px[$0] == 255 }
+        XCTAssertFalse(lit.isEmpty)
+        XCTAssertTrue(TilePlanRaster.rasterRGBA(m, faceRGB: [1, 2], square: [0, 0, 4, 4], floorZ: nil).allSatisfy { $0 == 0 })
+    }
+
     func testApplyNewThenInPlaceUpdateAndFreshness() {
         var f = LiveMeshFeed()
         var h = LiveTileHeader(layer: "mesh", key: "1/0/0", level: 1, ver: TileVer(base: 14, seq: 3),
