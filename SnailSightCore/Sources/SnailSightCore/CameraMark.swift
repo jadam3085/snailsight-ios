@@ -179,6 +179,8 @@ public struct MarkGuide: Equatable {
     public var stepM: Double?
 
     /// `me` = the phone now (map frame), to say how far to move from the last mark.
+    public static let bestSpreadDeg = 60.0
+
     public static func evaluate(_ rays: [MarkRay], me: [Double]? = nil, minDeg: Double = MarkMath.minSpreadDeg) -> MarkGuide {
         let used = rays.filter { $0.lock != .none }
         if used.isEmpty {
@@ -186,7 +188,10 @@ public struct MarkGuide: Equatable {
         }
         let spread = MarkMath.maxSpreadDeg(used)
         if used.count >= 2 && spread >= minDeg {
-            return MarkGuide(phase: .ready, text: String(format: "Ready: %d marks, %.0f° apart. Tap Locate", used.count, spread),
+            // the server's synthetic gate: best with ≥ 3 strong-lock marks spread 60-70° around the lens
+            let best = used.count >= 3 && spread >= bestSpreadDeg && used.filter { $0.lock == .strong }.count >= 3
+            let more = best ? "" : String(format: " (best: 3 strong marks ~%.0f° around it)", bestSpreadDeg)
+            return MarkGuide(phase: .ready, text: String(format: "Ready: %d marks, %.0f° apart. Tap Locate", used.count, spread) + more,
                              spreadDeg: spread, stepM: nil)
         }
         // range to the target: the rays' closest point when they are not parallel, else a 6 m guess (roofline)
@@ -366,8 +371,8 @@ public struct WalkStatus: Equatable {
                           poses: (o["poses_n"] as? NSNumber)?.intValue ?? 0, cameras: cams, recent: rec)
     }
 
-    /// Cameras whose detection matched me within the last `window` s.
-    public func sawMe(now: Double, window: Double = 6) -> Set<String> {
+    /// Cameras whose detection matched me within the last `window` s (Frigate events arrive 5-10 s late).
+    public func sawMe(now: Double, window: Double = 10) -> Set<String> {
         Set(recent.filter { $0.matched && now - $0.t <= window }.map(\.cameraID))
     }
 }

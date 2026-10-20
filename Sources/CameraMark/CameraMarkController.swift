@@ -28,8 +28,11 @@ struct MarkTarget: Equatable {
     var source: String                // new only: frigate:<cam> | ring:<cam> | ha:<entity_id> | kinect
     var current: [Double]?            // the placement's map position now
     var level: Int?
+    /// New only: the id it will be created under (the server triangulates an unknown id before its PUT).
+    var newID: String?
 
     var title: String { name }
+    var wireID: String? { id ?? newID }
 }
 
 final class CameraMarkController: ObservableObject {
@@ -74,7 +77,9 @@ final class CameraMarkController: ObservableObject {
 
     // MARK: start / stop
 
-    func start(_ t: MarkTarget) {
+    func start(_ t0: MarkTarget) {
+        var t = t0
+        if t.id == nil && t.newID == nil { t.newID = MarkWire.newID(name: t.name, t: Date().timeIntervalSince1970) }
         target = t
         rays = []
         result = nil
@@ -188,9 +193,9 @@ final class CameraMarkController: ObservableObject {
         note = "Locating…"
         let version = model.mapLocalizer.alignment?.version
         // a NEW placement has no entity id on the server yet: the phone's own estimate
-        guard let id = tg.id, model.serverBase != nil else {
+        guard let id = tg.wireID, model.serverBase != nil else {
             busy = false
-            fallback(rs, why: tg.id == nil ? "new_entity" : "offline")
+            fallback(rs, why: "offline")
             return
         }
         let link = model.link!, map = layer.mapID, agent = model.agentID
@@ -266,7 +271,7 @@ final class CameraMarkController: ObservableObject {
                     via = "put"
                 }
             } else {
-                let id = MarkWire.newID(name: tg.name, t: t)
+                let id = tg.newID ?? MarkWire.newID(name: tg.name, t: t)
                 let body = MarkWire.newPlacement(kind: tg.kind, name: tg.name, source: tg.source, point: p,
                                                  sigmaM: r.sigmaM ?? 0.1, rays: n, agentID: agent, mapVersion: version,
                                                  level: tg.level, t: t)
@@ -446,6 +451,8 @@ final class CameraCheck: ObservableObject {
         line = "Camera check: starting…"
         model.planData.ensureCameras()
         model.log.event("camera_check", ["on": .bool(true)])
+        model.flash("Camera check: walk a zig-zag across each camera's view, near to far (about 2.5 to 13 m and back), "
+                    + "about 4 minutes per camera. Ring cameras calibrate poorly from walks: mark them instead", seconds: 7)
         guard model.serverBase != nil else { line = "Camera check: offline, using the cameras' estimated views"; return }
         let link = model.link!, map = self.map
         let body = JSON.body(["agent_id": model.agentID, "duration_s": 1800] as [String: Any])
@@ -520,6 +527,7 @@ final class CameraCheck: ObservableObject {
         polling = true
         let link = model.link!, map = self.map, wid = windowID
         let q = ["x", "y", "z"].enumerated().map { URLQueryItem(name: $0.element, value: String(format: "%.2f", me[$0.offset])) }
+            + [URLQueryItem(name: "phone", value: "true"), URLQueryItem(name: "occlude", value: "true")]
         Task { [weak self] in
             let c = try? await link.request("GET", "/v1/maps/\(map)/cameras/coverage", query: q, timeout: 10)
             var w: (Data, Int)?

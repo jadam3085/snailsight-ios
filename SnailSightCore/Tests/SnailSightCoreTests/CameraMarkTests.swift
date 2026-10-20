@@ -118,6 +118,13 @@ final class CameraMarkTests: XCTestCase {
         let g3 = MarkGuide.evaluate([first, wide])
         XCTAssertEqual(g3.phase, .ready)
         XCTAssertGreaterThanOrEqual(g3.spreadDeg, 10)
+        XCTAssertTrue(g3.text.contains("best: 3 strong marks"), g3.text)
+        // 3 strong marks spread > 60° around the lens: no extra advice
+        let ring = [ray(from: [-8, 4, 1.5], to: cam), first, ray(from: [8, 4, 1.5], to: cam)]
+        let g4 = MarkGuide.evaluate(ring)
+        XCTAssertEqual(g4.phase, .ready)
+        XCTAssertGreaterThanOrEqual(g4.spreadDeg, 60)
+        XCTAssertFalse(g4.text.contains("best"), g4.text)
     }
 
     func testGuideScalesStepWithRange() {
@@ -204,6 +211,8 @@ final class CameraMarkTests: XCTestCase {
         """.utf8))!
         XCTAssertEqual(w.status, "open")
         XCTAssertEqual(w.sawMe(now: 1000), ["a"])
+        XCTAssertEqual(w.sawMe(now: 1004), ["a"])                          // Frigate delay: 10 s window
+        XCTAssertEqual(w.sawMe(now: 1006), [])
         XCTAssertEqual(w.cameras.first?.matches, 3)
     }
 
