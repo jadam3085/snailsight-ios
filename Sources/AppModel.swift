@@ -272,6 +272,9 @@ final class AppModel: ObservableObject {
     private(set) lazy var terrainLayer = TerrainARLayer(model: self)
     private(set) lazy var liveMap = LiveMapClient(model: self)
     private(set) lazy var serverSim = ServerSimClient(model: self)
+    /// 12.2 Mark camera (point-at triangulation) + Camera check (walk FOV tracking): Sources/CameraMark.
+    private(set) lazy var cameraMark = CameraMarkController(model: self)
+    private(set) lazy var cameraCheck = CameraCheck(model: self)
     /// 10.7 the main AR view follows the house map's newest READY version (Sources/AR/MapFollower, plan M1).
     private(set) lazy var mapFollower = MapFollower(model: self)
     private var scanStoreShared: ScanStore?

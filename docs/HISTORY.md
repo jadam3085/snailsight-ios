@@ -238,3 +238,22 @@ Log: `roomscan_start|stop|done|upload|result`.
   recording or "not in map" (a daytime yard → house walk at 6 s x 2 = 12 s took 67 tries / 335 s). Log
   `maploc_scene_change {why, attempts, search_s}`.
 - `maploc_locked` logs `T_map_arkit` (row-major 16; the server's phone-lock placement seeds read it).
+
+**12.2 (Mark camera, Camera check)**:
+- **Mark camera** (sheet ▸ Mapping or House ▸ Mark camera…): pick a camera / sensor placement (map entities
+  `?include=placements`, API §5.7a, nearest first, searchable) or a new one (name + `frigate:` / `ring:` / `ha:` / `kinect`
+  source). A crosshair: aim at the physical camera and tap Mark. Each mark is a ray (camera centre + crosshair direction)
+  in the MAP frame from the localizer's current T_map_arkit (the lock, not the eased display alignment) with its lock
+  quality (`MarkLock` strong / good / weak; no lock = not recorded). Guidance (`MarkGuide`): "step 2 m sideways and mark
+  again" (the step grows with the range for 10° of spread). Two or more marks ≥ 10° apart → Locate =
+  `POST …/entities/{id}/triangulate` (§5.7b); the point and its 1σ ellipse show in AR as a green sphere plus a ring
+  (yellow lines = the marks); Accept = `POST …/triangulate/accept` (the entity moves, `record.position.source
+  "triangulated"`, `estimated` false). Within LiDAR range (≤ 5 m) "Use LiDAR point" takes the raycast hit from one mark.
+  Fallbacks: no server / no endpoint → the phone's least-squares estimate (`MarkMath.localTriangulate`) and an entity PUT;
+  a new placement is created with `PUT …/entities/<slug>-<hex time>`.
+- **Camera check** toggle: opens a walk-calibration window (`POST …/cameras/calibration/walk`), posts the localized device
+  pose (2 Hz, batches every 5 s, `WalkPoseBuffer`), and every 3 s shows which cameras see you (`GET …/cameras/coverage`
+  at your position) and which detected you (the window's recent matched detections). Without those endpoints: a frustum
+  test from the placements' pose / yaw / pitch / FOV ("estimated views").
+- Logs: `camera_mark`, `camera_triangulate`, `camera_accept`, `camera_mark_start` / `_close`, `camera_check`,
+  `camera_view` (cameras in / out of view with your map position).

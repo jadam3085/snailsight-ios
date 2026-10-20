@@ -139,6 +139,9 @@ final class MapPlanData: ObservableObject {
         if model.serverBase != nil, now - camerasAt > 60 { loadCameras() }
     }
 
+    /// 12.2: after a Mark camera accept (the entity moved / a new one exists).
+    func reloadCameras() { if model.serverBase != nil { loadCameras() } }
+
     private func loadCameras() {
         camerasAt = now
         let link = model.link!, map = layer.mapID

@@ -64,6 +64,8 @@ final class MapARLayer {
     let agentNode = Entity()
     let liveNode = Entity()
     let simNode = Entity()
+    /// 12.2 Mark camera: the marks' rays, the triangulated point + its uncertainty ring.
+    let markNode = Entity()
 
     private var blender = AlignBlender()
     private(set) var shown: Align4?
@@ -117,7 +119,7 @@ final class MapARLayer {
         self.arView = arView
         root.name = "map.root"
         root.addChild(mapFrame)
-        for n in [labelNode, objectNode, terrainNode, pathNode, agentNode, liveNode, simNode] { mapFrame.addChild(n) }
+        for n in [labelNode, objectNode, terrainNode, pathNode, agentNode, liveNode, simNode, markNode] { mapFrame.addChild(n) }
         mapFrame.addChild(tiles.node)
         root.isEnabled = false
         arView.scene.addAnchor(root)

@@ -31,7 +31,8 @@ struct ContentView: View {
                     .shadow(radius: 2).allowsHitTesting(false)
             }
             CommandRingOverlay(server: model.serverSim.ui, local: model.controller.sim.ui)   // 12.0 B2 ring
-            HUDView()
+            HUDView(mark: model.cameraMark)
+            CameraMarkOverlay(mark: model.cameraMark)           // 12.2 Mark camera: crosshair + Mark / Locate / Accept
             if model.simOn && model.simDragging {                // 10.6: drop a dragged body here to delete it
                 VStack { Spacer(); SimTrashCan(hot: model.simDragHot).padding(.bottom, 44) }
                     .frame(maxWidth: .infinity).allowsHitTesting(false)

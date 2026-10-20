@@ -487,6 +487,7 @@ final class ARSessionController: NSObject, ARSessionDelegate {
         model.mapFollower.frame(t: frame.timestamp, camera: frame.camera.transform)   // 10.7 follow LATEST (still → swap)
         mapLayer.frame(frame)                            // 10.1 AR 1:1: blend the map alignment, labels face you
         model.serverSim.frame()                          // 10.1 S2: dead-reckoned shared-sim bodies + teleop
+        model.cameraCheck.frame(frame)                   // 12.2 Camera check: localized pose → 2 Hz walk buffer
         renderer.updateBillboards(camera: Geo.position(frame.camera.transform))
         meshOverlay.tick(now: t)
         if lastMapping != frame.worldMappingStatus {
@@ -502,6 +503,8 @@ final class ARSessionController: NSObject, ARSessionDelegate {
         model.meshMapper.tick()                          // 10.2: mesh anchors, upload pump, mapping line
         model.liveMap.tick()                             // 10.1 L3: other agents, downlink
         model.serverSim.tick()                           // 10.1 S2: shared sim connection + authority
+        model.cameraMark.tick()                          // 12.2 Mark camera: ring faces you, lock quality
+        model.cameraCheck.tick()                         // 12.2 Camera check: pose batches + who sees me
         model.meshAnchors = meshOverlay.count
         evaluateCapturePolicy()
         CameraTuner.shared.apply(reason: "tick")         // re-asserts the shutter cap after any session re-run

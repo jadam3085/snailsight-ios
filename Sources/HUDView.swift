@@ -10,6 +10,7 @@ import SnailSightCore
 
 struct HUDView: View {
     @EnvironmentObject var model: AppModel
+    @ObservedObject var mark: CameraMarkController          // 12.2: the sheet steps aside while marking
 
     var body: some View {
         ZStack(alignment: .bottom) {
@@ -43,7 +44,7 @@ struct HUDView: View {
             }
             .padding(.horizontal, 10)
             .padding(.top, 4)
-            MainSheet()                                                  // 12.0: ONE pull-up sheet (concept C)
+            if !mark.active { MainSheet() }                              // 12.0: ONE pull-up sheet (concept C)
         }
         .animation(.snappy(duration: 0.2), value: model.statusExpanded)
         .animation(.snappy(duration: 0.2), value: model.locExpanded)
@@ -62,6 +63,7 @@ struct HUDView: View {
             }
             if let u = model.undoText { UndoToast(text: u) }
             if let l = model.liveText { LiveCapsule(text: l, good: model.liveGood) }
+            if !mark.active { CameraCheckPanel(check: model.cameraCheck) }  // 12.2 Camera check: who sees me
             if model.houseStyle != .off || model.arTerrain, !model.recording,
                !model.arStatus.title.isEmpty, model.arStatus.tone != .good {
                 ARStatusChip(status: model.arStatus)               // 10.1 AR 1:1: finding / correcting / dimmed

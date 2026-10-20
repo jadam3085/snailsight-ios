@@ -417,6 +417,10 @@ public struct Placement: Decodable, Equatable, Identifiable {
         public var hfov: Double?
         public var far: Double?
         public var enabled: Bool?
+        public var pitch: Double?                // deg, negative = down (12.2 Camera check frustum fallback)
+        public var vfov: Double?
+        public var est_from: String?             // "triangulated (3 rays, σ 0.12 m)" after a 12.2 Mark camera
+        public var calib_state: String?          // estimated | triangulated | calibrated (walk|image|hand)
     }
     public var id: String
     public var kind: String                      // camera | sensor
@@ -428,6 +432,7 @@ public struct Placement: Decodable, Equatable, Identifiable {
     /// "Ring · estimated spot" / "Frigate".
     public var subtitle: String {
         let src = (record?.source ?? kind).split(separator: ":").first.map { String($0).capitalized } ?? kind.capitalized
+        if let c = record?.calib_state, !c.isEmpty, c != "estimated" { return "\(src) · \(c)" }
         return record?.estimated == true ? "\(src) · estimated spot" : src
     }
 }

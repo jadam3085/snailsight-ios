@@ -346,6 +346,7 @@ private struct FullSections: View {
                 Label("Robot path tool", systemImage: "point.topleft.down.to.point.bottomright.curvepath")
             }
             Button { model.tool = .objects; model.sheetDetent = .collapsed } label: { Label("Fix objects tool", systemImage: "pencil") }
+            CameraMarkRows()
         }
         Section("Mapping") {
             Toggle(isOn: $model.meshLive) { Label("Mesh (live) — see the mesh as it is built", systemImage: "cube.transparent") }
@@ -355,6 +356,7 @@ private struct FullSections: View {
                 Label(model.roomScanOn ? "Stop room scan" : "Room scan", systemImage: "square.split.bottomrightquarter")
             }
             .disabled(!RoomScanner.supported)
+            CameraMarkRows()
         }
         Section("Live map") {
             Toggle(isOn: $model.liveOn) { Label("Live map", systemImage: "dot.radiowaves.left.and.right") }
@@ -390,6 +392,32 @@ private struct FullSections: View {
             }
             Button { model.showSettings = true } label: { Label("Settings", systemImage: "gearshape") }
         }
+    }
+}
+
+/// 12.2: Mark camera + Camera check (in Mapping and House).
+private struct CameraMarkRows: View {
+    @EnvironmentObject var model: AppModel
+
+    var body: some View {
+        Button { model.cameraMark.showPicker = true } label: {
+            Label("Mark camera… (confirm where a camera or sensor is)", systemImage: "scope")
+        }
+        .frame(minHeight: 44)
+        .accessibilityLabel("Mark camera")
+        .accessibilityHint("Pick a camera or sensor, then aim at the real one to locate it")
+        CameraCheckToggle(check: model.cameraCheck)
+    }
+}
+
+private struct CameraCheckToggle: View {
+    @ObservedObject var check: CameraCheck
+
+    var body: some View {
+        Toggle(isOn: $check.on) { Label("Camera check — which cameras see me", systemImage: "video.badge.checkmark") }
+            .frame(minHeight: 44)
+            .accessibilityLabel("Camera check")
+            .accessibilityHint("While you walk, shows which cameras see you and logs your path for calibration")
     }
 }
 
