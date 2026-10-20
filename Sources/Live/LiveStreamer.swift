@@ -95,7 +95,7 @@ final class LiveStreamer {
                                          "queue": .int(snapshot.queue), "still_frames": .int(skippedStill)])
             uplink.stop()
         }
-        if !model.showScans { model.controller.rerunConfiguration() }     // .sceneDepth on / off
+        if !model.arSuspended { model.controller.rerunConfiguration() }     // .sceneDepth on / off
         publish()
     }
 
@@ -140,6 +140,7 @@ final class LiveStreamer {
         var paused: String?
         if model.recording { paused = "recording" }
         else if model.showScans { paused = "Scans" }
+        else if model.showMap3D { paused = "3D map" }
         else if model.thermal == "CRITICAL" { paused = "too hot" }
         else if case .normal = f.camera.trackingState {} else { paused = "tracking" }
         if paused != pausedReason {

@@ -126,7 +126,7 @@ final class TileStreamer {
         want = TileSelect.select(roots, cam: cam, heading: heading, speed: motion.speed,
                                  camLevel: TileSelect.cameraLevel(z: cam[2], levels: levels))
         refresh()
-        if !model.recording && !model.showScans { schedule(t) }
+        if !model.recording && !model.arSuspended { schedule(t) }
         if t - lastStatus >= Self.statusEveryS {
             lastStatus = t
             logStatus()
@@ -191,7 +191,7 @@ final class TileStreamer {
                                       "changed_total": .int(ev.changedTotal ?? -1)])
         if applied > 0 || gone > 0 {
             refresh()
-            if !model.recording && !model.showScans { schedule(now) }
+            if !model.recording && !model.arSuspended { schedule(now) }
         }
     }
 
@@ -326,7 +326,7 @@ final class TileStreamer {
         }
     }
 
-    private static func sha256(_ d: Data) -> String {
+    static func sha256(_ d: Data) -> String {
         SHA256.hash(data: d).map { String(format: "%02x", $0) }.joined()
     }
 
@@ -458,6 +458,39 @@ final class TileStreamer {
             mc.materials = over.map { m in mats.map { _ in m } } ?? mats
             e.components.set(mc)
         }
+    }
+
+    // MARK: 12.3 Map ▸ 3D shares the blob cache and the tiles loaded here
+
+    /// The cached file of a tile blob (nil = not on disk).
+    func blobFile(_ hash: String) -> URL? {
+        guard let dir = Self.cacheDir else { return nil }
+        seedDisk(dir)
+        let f = dir.appendingPathComponent("\(hash).usdz")
+        guard disk.contains(hash), FileManager.default.fileExists(atPath: f.path) else { return nil }
+        disk.touch(hash, now: now)
+        return f
+    }
+
+    /// Store a downloaded (hash-checked) blob in the shared cache (2 GB LRU); returns its file.
+    func storeBlob(_ hash: String, data: Data) -> URL? {
+        guard let dir = Self.cacheDir else { return nil }
+        seedDisk(dir)
+        let f = dir.appendingPathComponent("\(hash).usdz")
+        do { try data.write(to: f, options: .atomic) } catch { return nil }
+        let pinned = ledger.hashes.union(inFlight.values).union([hash])
+        for h in disk.insert(hash, bytes: data.count, now: now, pinned: pinned) where h != hash {
+            try? FileManager.default.removeItem(at: dir.appendingPathComponent("\(h).usdz"))
+        }
+        return f
+    }
+
+    /// The AR's loaded content of a tile at exactly this hash, drawn with its own (unlit texture) materials — the 3D
+    /// viewer clones it (a clone shares the mesh + texture resources: no second copy in memory).
+    func sharedContent(key: String, hash: String) -> Entity? {
+        guard ledger.items[key]?.hash == hash, model.houseStyle == .model, styleApplied == .model,
+              let holder = entities[key] else { return nil }
+        return holder.children.first
     }
 
     // MARK: disk + status

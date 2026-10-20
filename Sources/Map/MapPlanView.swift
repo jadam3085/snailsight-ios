@@ -1,4 +1,5 @@
-// SnailSight 12.0 Map (owner-approved concept A2; outdoor = O1): a full-screen plan view.
+// SnailSight 12.0 Map (owner-approved concept A2; outdoor = O1): a full-screen plan view. 12.3: the 3D button opens
+// Map3DView (the whole colour map in a non-AR 3D viewer: orbit or fly; the AR session pauses while it is up).
 // - Storey switcher B / 1 / 2 / Yd; the floor plan of the shown house version (MapPlanData), north up, pinch + drag.
 // - Mesh (live): the shared live mesh tiles of EVERY agent drawn top-down as they arrive (floor light, raised mid,
 //   walls dark), fresh / changed tiles outlined bright and fading; base tiles swapped by the M4 sync flash the same way.
@@ -59,6 +60,9 @@ struct MapPlanView: View {
         .onChange(of: levelID) { _, _ in data.refresh(level: level) }
         .onDisappear { model.mapFocus = nil }
         .sheet(isPresented: $layersOpen) { LayersSheet().environmentObject(model).presentationDetents([.medium, .large]) }
+        .fullScreenCover(isPresented: $model.showMap3D) {                  // 12.3 Map ▸ 3D
+            Map3DView(model: model, data: data).environmentObject(model)
+        }
     }
 
     // MARK: setup
@@ -395,6 +399,13 @@ struct MapPlanView: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .disabled(layer.cameraMap == nil)
+                Button { model.openMap3D() } label: {                  // 12.3: the whole colour map in 3D, fly through it
+                    Label("3D", systemImage: "view.3d").frame(minWidth: 64, minHeight: 44)
+                }
+                .buttonStyle(.borderedProminent).tint(.indigo)
+                .disabled(model.recording)
+                .accessibilityLabel("3D map")
+                .accessibilityHint("Orbit or fly through the whole colour map")
                 if yard {
                     Button { exploreGaps() } label: {
                         Label("Explore gaps", systemImage: "scope").frame(minHeight: 44)

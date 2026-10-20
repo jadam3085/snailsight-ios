@@ -32,6 +32,9 @@ final class DroneDriver: ObservableObject {
     /// `(from, to) -> reached` against the mesh; nil = no mesh yet (or a splat-only scene): free flight.
     var collider: ((SIMD3<Float>, SIMD3<Float>) -> SIMD3<Float>)?
     var home: WalkCamera?
+    /// 12.3 Map ▸ 3D: a replacement for DroneMath.step (SnailSightCore.Map3DFly: walk / run / drone presets, look clamp,
+    /// ground clamp). nil = the Scans drone maths.
+    var stepper: ((DroneState, DroneInput, Float) -> DroneState)?
     let camera: ViewerCamera
 
     private var velocity = SIMD3<Float>.zero
@@ -94,8 +97,9 @@ final class DroneDriver: ObservableObject {
         }
         if input.isIdle && velocity == .zero { return }
         let want = camera.walk.eye + velocity * min(dt, 0.1)
-        let s = DroneMath.step(DroneState(camera: camera.walk, velocity: velocity), input, dt: dt, params: params,
-                               collider: collider)
+        let s = stepper?(DroneState(camera: camera.walk, velocity: velocity), input, dt)
+            ?? DroneMath.step(DroneState(camera: camera.walk, velocity: velocity), input, dt: dt, params: params,
+                              collider: collider)
         velocity = s.velocity
         let b = params.collide && collider != nil && simd_distance(s.camera.eye, want) > 0.01 && simd_length(velocity) < 0.05
             && !(input.move == .zero && input.climb == 0)

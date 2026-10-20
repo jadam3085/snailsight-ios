@@ -146,6 +146,13 @@ final class AppModel: ObservableObject {
     @Published var sheetDetent: SheetDetent = .collapsed
     @Published var sheetQuery = ""
     @Published var showMap = false
+    /// 12.3 Map ▸ 3D: the full-screen non-AR 3D viewer of the whole colour map (over the Map). The AR session is paused
+    /// while it is up (one renderer at a time; resume = the Scans path: no reset, normal relocalization).
+    @Published var showMap3D = false {
+        didSet { if oldValue && !showMap3D { map3DClosed() } }
+    }
+    /// Our AR session is paused (Scans or the 3D map is on screen): nothing may re-run it meanwhile.
+    var arSuspended: Bool { showScans || showMap3D }
     @Published var showLayers = false
     /// Where the Map should centre when it opens (map frame x, y, z) — set by a sheet row's Show / a room chip.
     @Published var mapFocus: [Double]?
@@ -593,6 +600,20 @@ final class AppModel: ObservableObject {
         guard !recording else { return }
         controller.suspendForScans()
         showScans = true
+    }
+
+    /// 12.3 Map ▸ 3D.
+    func openMap3D() {
+        guard !recording, !showScans, !showMap3D else { return }
+        controller.suspendForMap3D()
+        showMap3D = true
+    }
+
+    func map3DClosed() {
+        controller.resumeAfterMap3D()
+        mapLocalizer.resume(why: "map3d_closed")
+        mapFollower.resume(why: "map3d_closed")
+        liveMap.resume(why: "map3d_closed")
     }
 
     func scansClosed() {

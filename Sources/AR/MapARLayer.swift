@@ -168,7 +168,7 @@ final class MapARLayer {
             lastSlow = t
             slowTick(pivot: pivot)
         }
-        let show = shown != nil && status.opacity > 0 && t >= hiddenUntil && !model.recording && !model.showScans
+        let show = shown != nil && status.opacity > 0 && t >= hiddenUntil && !model.recording && !model.arSuspended
         if root.isEnabled != show { root.isEnabled = show }
         guard show else { return }
         for e in labelEntities.values.filter({ $0.isEnabled }) + model.liveMap.tagEntities + model.serverSim.tagEntities {

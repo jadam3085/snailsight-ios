@@ -152,7 +152,7 @@ final class MapLocalizer {
             inFlight = false
             model.log.event("maploc_stuck_cleared", ["s": .double(now - inFlightSince)])
         }
-        guard model.serverBase != nil, !inFlight, !model.showScans else { return }
+        guard model.serverBase != nil, !inFlight, !model.arSuspended else { return }
         let t = now
         guard forceAttempt || retryState.due(now: t) else { return }      // backoff after an error / timeout
         let hot = model.thermal == "SERIOUS" || model.thermal == "CRITICAL"
@@ -671,7 +671,7 @@ final class MapLocalizer {
         depthWanted = on
         // recording / mapping / Live map keep `.sceneDepth` on anyway: re-running the session would change nothing
         let others = model.recording || model.meshMapper.wantsDepth || model.liveStreamer.wantsDepth
-        if !others && !model.showScans { model.controller.rerunConfiguration() }
+        if !others && !model.arSuspended { model.controller.rerunConfiguration() }
         model.log.event("maploc_depth", ["on": .bool(on)])
     }
 
@@ -731,6 +731,7 @@ final class MapLocalizer {
     private var pausedReason: String? {
         if inBackground { return "app in background" }
         if model.showScans { return "Scans open: close it to be placed" }
+        if model.showMap3D { return "3D map open: close it to be placed" }
         if lastFrameAt > 0, now - lastFrameAt > 3 { return "AR paused" }
         return nil
     }

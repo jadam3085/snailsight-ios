@@ -101,7 +101,7 @@ final class MeshMapper {
         dirty.removeAll()
         motionPrev = nil
         persist(id, force: true)
-        if !model.showScans { model.controller.rerunConfiguration() }        // .sceneDepth on
+        if !model.arSuspended { model.controller.rerunConfiguration() }        // .sceneDepth on
         model.log.event("meshmap_on", ["upload_id": .string(id), "stream_id": .string(streamID),
                                        "auto": .bool(!model.meshMapOn), "localized": .bool(model.mapLocalizer.isLocked)])
         if let al = model.mapLocalizer.alignment {                          // the stream's alignment up front
@@ -120,7 +120,7 @@ final class MeshMapper {
         dirty.removeAll()
         ledgers[id]?.stopCapture(now: now)
         persist(id, force: true)
-        if !model.showScans { model.controller.rerunConfiguration() }        // .sceneDepth off (unless others want it)
+        if !model.arSuspended { model.controller.rerunConfiguration() }        // .sceneDepth off (unless others want it)
         let l = ledgers[id]
         model.log.event("meshmap_off", ["upload_id": .string(id), "reason": .string(reason),
                                         "chunks": .int(l?.nextSeq ?? 0), "keyframes": .int(l?.keyframes ?? 0),
@@ -160,7 +160,7 @@ final class MeshMapper {
         var trackingNormal = false
         if case .normal = f.camera.trackingState { trackingNormal = true }
         let reason = MeshMapPolicy.pauseReason(
-            recording: model.recording, scansOpen: model.showScans, thermalCritical: model.thermal == "CRITICAL",
+            recording: model.recording, scansOpen: model.arSuspended, thermalCritical: model.thermal == "CRITICAL",
             trackingNormal: trackingNormal, meshSupported: ARSessionController.supportsMesh,
             depthSupported: ARSessionController.supportsDepth, spoolFull: spoolBytes > Self.spoolCapBytes)
         if reason != pausedReason {

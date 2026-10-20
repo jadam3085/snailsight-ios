@@ -16,6 +16,8 @@ struct CommandRingOverlay: View {
     @EnvironmentObject var model: AppModel
     @ObservedObject var server: ServerSimUI
     @ObservedObject var local: SimUI
+    /// 12.3 Map ▸ 3D: projects a map-frame point into the 3D viewer (nil = the AR view, the default).
+    var projector: (([Double]) -> CGPoint?)? = nil
 
     var body: some View {
         GeometryReader { geo in
@@ -60,6 +62,7 @@ struct CommandRingOverlay: View {
     }
 
     private func ring(size: CGSize) -> Ring? {
+        if let projector { return ring3D(size: size, projector: projector) }
         guard !model.recording, model.sheetDetent == .collapsed, !model.showMap, !model.spawnMode else { return nil }
         let layer = model.controller.mapLayer
         var world: SIMD3<Float>?
@@ -86,6 +89,31 @@ struct CommandRingOverlay: View {
         let bottomReserve = SheetDetent.collapsed.height(container: 800) + 210.0                   // the collapsed sheet + the details card above it
         let l = CommandRing.layout(center: V2(Double(pt.x), Double(pt.y)), count: cmds.count,
                                    bounds: [0, 110, Double(size.width), max(240, Double(size.height) - bottomReserve)])
+        return Ring(title: title, center: l.center, points: l.points, commands: cmds, offered: offered, serverMode: serverMode)
+    }
+
+    /// The ring in the 3D map viewer: the same commands, around the body as the 3D camera sees it.
+    private func ring3D(size: CGSize, projector: ([Double]) -> CGPoint?) -> Ring? {
+        var at: [Double]?
+        var offered: [SimCommand] = []
+        var title = ""
+        var serverMode = false
+        if server.active, let s = server.selection, server.pending == nil, !server.droneAssistPending,
+           let p = model.serverSim.selectedPose {
+            at = [p[0], p[1], p[2] + 0.15]
+            offered = SimCommand.offered(role: s.role, drone: s.drone, server: true)
+            title = s.title
+            serverMode = true
+        } else if !server.active, let s = local.selection, local.pending == nil, let w = model.controller.sim.selectedWorld {
+            at = model.controller.mapLayer.toMap(world: w)
+            offered = SimCommand.offered(role: s.kind.role, server: false)
+            title = s.title
+        }
+        guard let m = at, let pt = projector(m) else { return nil }
+        let cmds = RingCommand.ring(offered: offered)
+        guard !cmds.isEmpty else { return nil }
+        let l = CommandRing.layout(center: V2(Double(pt.x), Double(pt.y)), count: cmds.count,
+                                   bounds: [0, 110, Double(size.width), max(240, Double(size.height) - 230)])
         return Ring(title: title, center: l.center, points: l.points, commands: cmds, offered: offered, serverMode: serverMode)
     }
 
