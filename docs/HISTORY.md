@@ -257,3 +257,25 @@ Log: `roomscan_start|stop|done|upload|result`.
   test from the placements' pose / yaw / pitch / FOV ("estimated views").
 - Logs: `camera_mark`, `camera_triangulate`, `camera_accept`, `camera_mark_start` / `_close`, `camera_check`,
   `camera_view` (cameras in / out of view with your map position).
+
+**12.3 (Map ▸ 3D: the whole colour map, orbit or fly)**: owner 2026-10-20 ("a button on map mode to be able to
+manipulate the map in 3d to see the entire 3d color map and float through it", fly like the PC portal).
+- Map ▸ **3D** opens `Sources/Map/Map3DView.swift`: a full-screen non-AR RealityKit view over the 2D plan. Our AR session
+  pauses while it is up and resumes without reset when it closes (the Scans path; `AppModel.arSuspended` keeps the
+  localizer, mesh mapper, Live map and the AR tile streamer from re-running the paused session meanwhile).
+- Content: the living map's tiles (structure, or raw with Layers ▸ Raw scan) for the WHOLE site.
+  `SnailSightCore.Map3DTiles` covers every root and refines by screen-space error (size / distance) from the virtual
+  camera while the refinement fits the 600 MB budget (halved when the OS is short of memory or after a memory warning);
+  detail k follows the frame rate (`Map3DQuality`, ~30 fps target); far tiles are evicted first. Blobs come from the AR
+  streamer's disk cache (Caches/tiles, by hash; hash-checked downloads go into it) and tiles the AR view already holds
+  are cloned (shared mesh + textures). Overlays: the live coloured mesh (Mesh (live)), sim bodies (+ the selected
+  route), cameras with their frustums, estimated / corrected trees (nearest 600), the estimated DEM terrain.
+- Controls: Orbit (drag, two fingers, pinch; double tap = focus) by default. **Fly** reuses the Scans Fly controller
+  (`ViewerCamera`, `DroneDriver` with a new `stepper` hook, `JoystickPad`, `HoldButton`) driven by
+  `SnailSightCore.Map3DFly`: left stick moves in the camera frame, drag anywhere else looks (pitch clamped ±75°), ▲▼
+  climb, Walk 1.4 / Run 4 / Drone 8 m/s (walk + run follow the floor at eye height 1.6 m, the drone stays 0.4 m
+  above it), optional gyro look. Level slicer B / 1 / 2 / Yd hides the storeys above; Reset view; tap a body = select it
+  with the same command ring (`CommandRingOverlay(projector:)`), tap the ground = send the selection there.
+- Logs: `map3d_open`, `map3d_fly`, `map3d_fps` (every 10 s: fps, footprint_mb, drawn / loaded / wanted / inflight
+  tiles, mem_mb, budget_mb, k, slice), `map3d_tileset`, `map3d_first_tiles`, `map3d_select`, `map3d_goto`,
+  `map3d_tile_error`, `map3d_mem_warning`, `map3d_close` (max_mb, min_fps); `ar_paused` / `ar_resumed` why `map3d`.

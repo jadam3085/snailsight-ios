@@ -716,7 +716,7 @@ final class Map3DOverlays {
     private var terrainKey = ""
     private var terrainBuilding = false
     private var routeKey = ""
-    private var lastSlow: TimeInterval = 0
+    private var lastLiveClone: TimeInterval = 0
 
     private lazy var sphere = MeshResource.generateSphere(radius: 1)
     private lazy var cylinder = MeshResource.generateCylinder(height: 1, radius: 1)
@@ -756,7 +756,9 @@ final class Map3DOverlays {
     func tick(cutZ: Double?, eye: [Double]) {
         // live coloured mesh: clones of the AR live tiles (shared resources), refreshed when the store changes
         live.isEnabled = model.meshLive
-        if model.meshLive, model.meshStore.rev != liveRev {
+        let t = Date().timeIntervalSince1970
+        if model.meshLive, model.meshStore.rev != liveRev, t - lastLiveClone >= 2 {   // ≤ every 2 s while mapping
+            lastLiveClone = t
             liveRev = model.meshStore.rev
             live.children.removeAll()
             liveSources = []
@@ -849,7 +851,7 @@ final class Map3DOverlays {
         Task.detached(priority: .utility) { [weak self] in
             let step = Map3DShapes.terrainStep(w: d.w, h: d.h)
             let m = Map3DShapes.terrain(origin: d.origin, res: d.res, w: d.w, h: d.h, ground: d.ground, step: step)
-            await MainActor.run { self?.showTerrain(m) }
+            await self?.showTerrain(m)
         }
     }
 
