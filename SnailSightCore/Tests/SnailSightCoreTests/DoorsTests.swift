@@ -78,6 +78,15 @@ final class DoorsTests: XCTestCase {
         XCTAssertNil(DoorEvent.parse(Data("{\"type\":\"change\"}".utf8)))
     }
 
+    func testDoorEventRidesTheDownlinkAsOther() {
+        let d = Data(("{\"type\":\"door\",\"door_id\":\"door-L2-10\",\"state\":\"open\",\"angle_deg\":85.1,\"prev_state\":\"closed\","
+                      + "\"prev_angle_deg\":2.2,\"t\":1792200000.5,\"source\":\"live\",\"agent\":\"a1\",\"conf\":0.7,\"level\":2,"
+                      + "\"base_version\":14,\"observed_by\":[\"a1\"],\"seq\":812}").utf8)
+        guard let (m, seq) = LiveDownMessage.parseWithSeq(d) else { return XCTFail("did not parse") }
+        XCTAssertEqual(m, .other("door")); XCTAssertEqual(seq, 812)
+        XCTAssertEqual(DoorEvent.parse(d)?.angleDeg, 85.1)
+    }
+
     func testDoorsLayerFollowsTheMasterSwitch() {
         let s = LayerSnapshot()
         XCTAssertTrue(WorldGate.doors(s, worldOn: true))
