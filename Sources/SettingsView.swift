@@ -87,6 +87,7 @@ struct SettingsView: View {
                     }
                     Toggle("Raw scan", isOn: $model.rawScan)
                     Toggle("Objects", isOn: $model.arObjects)
+                    Toggle("Doors", isOn: $model.arDoors)
                     Toggle("Robot terrain", isOn: $model.arTerrain)
                     Toggle("Other agents", isOn: $model.arAgents)
                     if !model.arStatus.title.isEmpty {

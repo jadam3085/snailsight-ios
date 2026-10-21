@@ -44,7 +44,7 @@ final class UIShellTests: XCTestCase {
 
     func testLayerKeysCoverTheAgreedToggles() {
         XCTAssertEqual(MapLayerKey.allCases.map(\.title),
-                       ["Mesh (live)", "Structure", "X-ray", "Objects", "Terrain", "Cameras", "Paths", "Other agents"])
+                       ["Mesh (live)", "Structure", "X-ray", "Objects", "Doors", "Terrain", "Cameras", "Paths", "Other agents"])
     }
 
     func testRingCommandsFollowWhatTheBodyOffers() {

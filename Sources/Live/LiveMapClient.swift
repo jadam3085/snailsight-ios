@@ -372,6 +372,7 @@ final class LiveMapClient {
             model.log.event("live_down_error", ["detail": .string(s)])
         case .other(let t):
             if t == "estimated", let m = EstimatedLiveMessage.parse(d) { model.planData.estimatedLive(m) }
+            if t == "door" { model.doorStore.live(d) }
         }
     }
 

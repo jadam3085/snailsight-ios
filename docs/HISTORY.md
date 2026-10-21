@@ -313,3 +313,15 @@ the robot"; "Don't let the cube be my default when I click on the screen … a m
   (12.4 dropped the follower on the snapshot already in flight or on a stale entity-doc behaviour: `FollowPoseTracker`).
 - Logs: `tap_tool`, `measure_point`, `cube_undo`, `drive_open`, `drive_start` / `drive_release`, `drive_tank`,
   `selection_overlays`; `terrain_path` gains scale / kind / footprint_m / sim_fits.
+
+**12.6 (Articulated doors)**: server API §8.12 (door entities with a hinge and a measured leaf angle) and §6b.4 (live door states).
+- Each real door (status `door`) is drawn as a thin hinged leaf (leaf width x height x 4 cm) at its latest angle, in AR
+  (under the map frame, with a "L1-06 open 82°" label), on the Map plan (hinge dot + leaf line per level, label when
+  zoomed in) and in Map 3D. Colour: closed blue, ajar amber, open green. Unknown hinge or unknown state = closed in the
+  doorway; openings and passages are not drawn.
+- Live: `door` messages on the downlink's changes layer replace the door's state in place (`door_live` log); a door the
+  list does not know triggers a re-read. The list (`GET /v1/maps/{map}/doors`) re-reads every 2 min and on a map version change.
+- **Doors** layer toggle: Layers sheet, Settings, sheet quick toggles, Map chip, Map 3D tool. It is part of the 3D world
+  master switch (`WorldGate.doors`) and of the Camera + animals / Full world presets (old stored presets decode with doors on).
+- Core: `Doors.swift` (DoorsDoc/DoorInfo, DoorEvent, DoorLeaf.make = hinge transform from hinge.point + jamb + frame.t +
+  swing.direction + angle_deg, DoorSet) + 7 DoorsTests; logs `doors_load`, `door_live`.

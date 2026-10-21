@@ -244,12 +244,13 @@ final class AppModel: ObservableObject {
     var worldBinding: Binding<Bool> { Binding(get: { self.viewPresets.worldOn }, set: { self.viewPresets.worldOn = $0 }) }
     var layerSnapshot: LayerSnapshot {
         LayerSnapshot(house: houseStyle.rawValue, meshLive: meshLive, objects: arObjects, terrain: arTerrain,
-                      cameras: showCameras, agents: arAgents)
+                      cameras: showCameras, agents: arAgents, doors: arDoors)
     }
     /// What actually draws / streams (settings masked by the master switch).
     var drawHouse: HouseStyle { HouseStyle(rawValue: WorldGate.house(layerSnapshot, worldOn: worldOn)) ?? .off }
     var drawMeshLive: Bool { WorldGate.meshLive(layerSnapshot, worldOn: worldOn) }
     var drawObjects: Bool { WorldGate.objects(layerSnapshot, worldOn: worldOn) }
+    var drawDoors: Bool { WorldGate.doors(layerSnapshot, worldOn: worldOn) }
     var drawTerrain: Bool { WorldGate.terrain(layerSnapshot, worldOn: worldOn) }
     var downlinkLayersOn: Bool { WorldGate.downlinkWanted(layerSnapshot, worldOn: worldOn) }
 
@@ -272,12 +273,13 @@ final class AppModel: ObservableObject {
             arTerrain = snap.terrain
             showCameras = snap.cameras
             arAgents = snap.agents
+            arDoors = snap.doors
             applyingPreset = false
         }
         viewPresets = st
         log.event("layers_preset", ["preset": .string(p.rawValue), "house": .string(houseStyle.rawValue),
                                     "mesh_live": .bool(meshLive), "objects": .bool(arObjects), "terrain": .bool(arTerrain),
-                                    "cameras": .bool(showCameras), "agents": .bool(arAgents), "world": .bool(worldOn)])
+                                    "cameras": .bool(showCameras), "agents": .bool(arAgents), "doors": .bool(arDoors), "world": .bool(worldOn)])
     }
 
     /// Launch: a stored preset whose settings drifted (arTerrain is not persisted) reads as Custom.
@@ -299,6 +301,11 @@ final class AppModel: ObservableObject {
     @Published var arObjects: Bool = UserDefaults.standard.object(forKey: "ar.objects") as? Bool ?? true {
         didSet { UserDefaults.standard.set(arObjects, forKey: "ar.objects"); layerEdited(arObjects != oldValue) }
     }
+    /// 12.6 Doors layer: articulated door leaves at their latest angle (AR, Map, Map 3D); part of the 3D world switch.
+    @Published var arDoors: Bool = UserDefaults.standard.object(forKey: "ar.doors") as? Bool ?? true {
+        didSet { UserDefaults.standard.set(arDoors, forKey: "ar.doors"); layerEdited(arDoors != oldValue) }
+    }
+    private(set) lazy var doorStore = DoorStore(model: self)
     @Published var arTerrain = false {                      // P3 robot terrain overlay (off at launch: it is busy)
         didSet { layerEdited(arTerrain != oldValue) }
     }

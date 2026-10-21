@@ -367,6 +367,7 @@ private struct FullSections: View {
             } label: { Label("House overlay", systemImage: "house") }
             Toggle(isOn: $model.rawScan) { Label("Raw scan (instead of structure)", systemImage: "cube.transparent") }
             Toggle(isOn: $model.arObjects) { Label("Objects", systemImage: "shippingbox") }
+            Toggle(isOn: $model.arDoors) { Label("Doors", systemImage: "door.left.hand.open") }
             Toggle(isOn: $model.arTerrain) { Label("Robot terrain", systemImage: "square.grid.3x3.topleft.filled") }
             Toggle(isOn: $model.arAgents) { Label("Other agents", systemImage: "person.2.wave.2") }
             Button { model.tool = .robotPath; model.sheetDetent = .collapsed } label: {

@@ -286,7 +286,7 @@ struct LayersSheet: View {
                         Toggle(isOn: model.worldBinding) {
                             VStack(alignment: .leading, spacing: 2) {
                                 Label("3D world", systemImage: "cube.transparent.fill")
-                                Text(model.worldOn ? "House, live mesh, terrain and objects draw in AR"
+                                Text(model.worldOn ? "House, live mesh, terrain, objects and doors draw in AR"
                                                    : "Hidden: nothing of the generated world draws or downloads. Your layer settings are kept")
                                     .font(.caption).foregroundStyle(.secondary)
                             }
@@ -350,6 +350,7 @@ struct LayersSheet: View {
         case .structure: return Binding(get: { !model.rawScan }, set: { model.rawScan = !$0 })
         case .xray: return $model.simXRay
         case .objects: return $model.arObjects
+        case .doors: return $model.arDoors
         case .terrain: return $model.arTerrain
         case .cameras: return $model.showCameras
         case .paths: return $model.showPaths

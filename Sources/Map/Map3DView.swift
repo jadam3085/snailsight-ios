@@ -701,6 +701,8 @@ final class Map3DOverlays {
     let root = Entity()
     private let live = mapFrameHolder("map3d.live")
     private let terrain = mapFrameHolder("map3d.terrain")
+    private let doorNode = mapFrameHolder("map3d.doors")
+    private var doorRev = -1
     private let cameraNode = Entity()
     private let treeNode = Entity()
     private let bodyNode = Entity()
@@ -725,7 +727,7 @@ final class Map3DOverlays {
         self.model = model
         self.data = data
         root.name = "map3d.overlays"
-        for n in [live, terrain, cameraNode, treeNode, bodyNode, routeNode] { root.addChild(n) }
+        for n in [live, terrain, doorNode, cameraNode, treeNode, bodyNode, routeNode] { root.addChild(n) }
         let sun = DirectionalLight()
         sun.light.intensity = 2500
         sun.look(at: .zero, from: SIMD3(20, 40, 15), relativeTo: nil)
@@ -736,7 +738,8 @@ final class Map3DOverlays {
     var bodyCount: Int { bodies.count }
 
     func clear() {
-        for n in [live, terrain, cameraNode, treeNode, bodyNode, routeNode] { n.children.removeAll() }
+        for n in [live, terrain, doorNode, cameraNode, treeNode, bodyNode, routeNode] { n.children.removeAll() }
+        doorRev = -1
         liveSources = []
         bodies = [:]
         bodyPos = [:]
@@ -774,6 +777,15 @@ final class Map3DOverlays {
         for s in liveSources {
             let on = cutZ.map { Double(s.minZ) < $0 } ?? true
             if s.clone.isEnabled != on { s.clone.isEnabled = on }
+        }
+        doorNode.isEnabled = model.drawDoors
+        if model.drawDoors {
+            model.doorStore.ensure()
+            if model.doorStore.rev != doorRev {
+                doorRev = model.doorStore.rev
+                doorNode.children.removeAll()
+                for d in model.doorStore.leaves { doorNode.addChild(DoorMeshes.leaf(d)) }
+            }
         }
         cameraNode.isEnabled = model.showCameras
         rebuildCameras()
@@ -1105,6 +1117,7 @@ struct Map3DView: View {
             }
             tool("Mesh", "cube.transparent", on: model.meshLive) { model.meshLive.toggle() }
             tool("Cams", "video", on: model.showCameras) { model.showCameras.toggle() }
+            tool("Doors", "door.left.hand.open", on: model.arDoors) { model.arDoors.toggle() }
             tool("Reset", "arrow.counterclockwise", on: false) { vm.resetView() }
         }
     }

@@ -66,6 +66,10 @@ final class MapARLayer {
     let simNode = Entity()
     /// 12.2 Mark camera: the marks' rays, the triangulated point + its uncertainty ring.
     let markNode = Entity()
+    /// 12.6 articulated door leaves (DoorStore) at their latest angle, with a state label above each.
+    let doorNode = Entity()
+    private var doorRev = -1
+    private var doorLabels: [Entity] = []
 
     private var blender = AlignBlender()
     private(set) var shown: Align4?
@@ -119,7 +123,7 @@ final class MapARLayer {
         self.arView = arView
         root.name = "map.root"
         root.addChild(mapFrame)
-        for n in [labelNode, objectNode, terrainNode, pathNode, agentNode, liveNode, simNode, markNode] { mapFrame.addChild(n) }
+        for n in [labelNode, objectNode, terrainNode, pathNode, agentNode, liveNode, simNode, markNode, doorNode] { mapFrame.addChild(n) }
         mapFrame.addChild(tiles.node)
         root.isEnabled = false
         arView.scene.addAnchor(root)
@@ -171,7 +175,7 @@ final class MapARLayer {
         let show = shown != nil && status.opacity > 0 && t >= hiddenUntil && !model.recording && !model.arSuspended
         if root.isEnabled != show { root.isEnabled = show }
         guard show else { return }
-        for e in labelEntities.values.filter({ $0.isEnabled }) + model.liveMap.tagEntities + model.serverSim.tagEntities {
+        for e in labelEntities.values.filter({ $0.isEnabled }) + model.liveMap.tagEntities + model.serverSim.tagEntities + doorLabels {
             let p = e.position(relativeTo: nil)
             e.setOrientation(Geo.billboardRotation(position: p, camera: camWorld), relativeTo: nil)
             let s = max(0.6, min(4, Geo.distance(p, camWorld)))
@@ -204,6 +208,7 @@ final class MapARLayer {
         let ahead = sh.toMap([pivot[0] + Double(camForwardWorld.x), pivot[1] + Double(camForwardWorld.y),
                               pivot[2] + Double(camForwardWorld.z)])
         applyStyle()
+        updateDoors()
         updateVisible(cam: cam)
         tiles.tick(cam: cam, forward: [ahead[0] - cam[0], ahead[1] - cam[1], ahead[2] - cam[2]])
         model.terrainLayer.tick(cameraMap: cam)
@@ -370,6 +375,26 @@ final class MapARLayer {
         let st = model.drawHouse                                  // 12.4: the 3D world switch hides labels + boxes too
         labelNode.isEnabled = st != .off
         objectNode.isEnabled = st != .off && model.arObjects
+    }
+
+    // MARK: 12.6 doors
+
+    private func updateDoors() {
+        let on = model.drawDoors
+        if doorNode.isEnabled != on { doorNode.isEnabled = on }
+        guard on else { return }
+        model.doorStore.ensure()
+        guard model.doorStore.rev != doorRev else { return }
+        doorRev = model.doorStore.rev
+        doorNode.children.removeAll()
+        doorLabels = []
+        for d in model.doorStore.leaves {
+            doorNode.addChild(DoorMeshes.leaf(d))
+            let l = makeLabel("\(d.id.replacingOccurrences(of: "door-", with: "")) \(d.label)", size: 0.04)
+            l.position = SIMD3<Float>(Float(d.boxCenter[0]), Float(d.boxCenter[1]), Float(d.z0 + d.height + 0.2))
+            doorNode.addChild(l)
+            doorLabels.append(l)
+        }
     }
 
     // MARK: labels + boxes

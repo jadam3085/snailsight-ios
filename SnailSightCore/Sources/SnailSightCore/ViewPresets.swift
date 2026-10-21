@@ -17,11 +17,27 @@ public struct LayerSnapshot: Codable, Equatable {
     public var terrain: Bool
     public var cameras: Bool
     public var agents: Bool
+    /// 12.6 articulated door leaves (part of the 3D world: masked by the master switch).
+    public var doors: Bool
 
     public init(house: String = "Model", meshLive: Bool = true, objects: Bool = true, terrain: Bool = false,
-                cameras: Bool = true, agents: Bool = true) {
+                cameras: Bool = true, agents: Bool = true, doors: Bool = true) {
         self.house = house; self.meshLive = meshLive; self.objects = objects; self.terrain = terrain
-        self.cameras = cameras; self.agents = agents
+        self.cameras = cameras; self.agents = agents; self.doors = doors
+    }
+
+    enum CodingKeys: String, CodingKey { case house, meshLive, objects, terrain, cameras, agents, doors }
+
+    /// Stored states from before 12.6 have no `doors`: default on, so the saved presets survive the update.
+    public init(from d: Decoder) throws {
+        let c = try d.container(keyedBy: CodingKeys.self)
+        house = try c.decode(String.self, forKey: .house)
+        meshLive = try c.decode(Bool.self, forKey: .meshLive)
+        objects = try c.decode(Bool.self, forKey: .objects)
+        terrain = try c.decode(Bool.self, forKey: .terrain)
+        cameras = try c.decode(Bool.self, forKey: .cameras)
+        agents = try c.decode(Bool.self, forKey: .agents)
+        doors = try c.decodeIfPresent(Bool.self, forKey: .doors) ?? true
     }
 
     /// The shipped defaults (what "Full world" means before the user has a set of their own).
@@ -29,7 +45,7 @@ public struct LayerSnapshot: Codable, Equatable {
 
     /// Nothing but the camera and the sim bodies: house Off, mesh/objects/terrain/cameras/agents/estimated off.
     public static let cameraOnly = LayerSnapshot(house: "Off", meshLive: false, objects: false, terrain: false,
-                                                 cameras: false, agents: false)
+                                                 cameras: false, agents: false, doors: false)
 
     /// True when no world geometry or overlay is on.
     public var isCameraOnly: Bool { self == .cameraOnly }
@@ -109,6 +125,9 @@ public enum WorldGate {
     public static func meshLive(_ s: LayerSnapshot, worldOn: Bool) -> Bool { worldOn && s.meshLive }
     public static func objects(_ s: LayerSnapshot, worldOn: Bool) -> Bool { worldOn && s.objects && s.house != "Off" }
     public static func terrain(_ s: LayerSnapshot, worldOn: Bool) -> Bool { worldOn && s.terrain }
+    /// 12.6 door leaves: world content, so the master switch hides them; independent of the House overlay style
+    /// (like furniture in the cutaway they stay visible when the house is drawn any way).
+    public static func doors(_ s: LayerSnapshot, worldOn: Bool) -> Bool { worldOn && s.doors }
     /// Estimated / surveyed trees and the estimated terrain are world content too (Map 3D, Yard).
     public static func estimated(worldOn: Bool) -> Bool { worldOn }
 
@@ -119,6 +138,6 @@ public enum WorldGate {
 
     /// The live downlink is wanted when agents are shown or any world layer is.
     public static func downlinkWanted(_ s: LayerSnapshot, worldOn: Bool) -> Bool {
-        s.agents || (worldOn && (s.house != "Off" || s.meshLive))
+        s.agents || (worldOn && (s.house != "Off" || s.meshLive || s.doors))
     }
 }

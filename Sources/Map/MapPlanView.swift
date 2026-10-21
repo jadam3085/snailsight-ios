@@ -180,6 +180,7 @@ struct MapPlanView: View {
         if model.meshLive, let l = shownLevel?.level { drawLiveMesh(&g, level: l, now: now) }
         if yard { drawTrees(&g) }
         drawRooms(&g, level: shownLevel)
+        if model.drawDoors { drawDoors(&g, level: shownLevel) }
         if model.showCameras { drawCameras(&g, level: shownLevel) }
         if model.arAgents { drawAgents(&g) }
         drawBodies(&g)
@@ -216,6 +217,27 @@ struct MapPlanView: View {
         for r in model.roomChips {
             if let l = level, !yard, PlanLevels.level(ofZ: r.center[2], in: data.levels)?.id != l.id { continue }
             g.draw(Text(r.title).font(.caption2.weight(.semibold)).foregroundColor(.white.opacity(0.8)), at: pt(r.center[0], r.center[1]))
+        }
+    }
+
+    /// 12.6 door leaves: a hinge dot and a leaf line at the latest angle (green open, amber ajar, blue closed).
+    private func drawDoors(_ g: inout GraphicsContext, level: PlanLevel?) {
+        model.doorStore.ensure()
+        for d in model.doorStore.leaves {
+            if let l = level?.level, !yard, d.level != l { continue }
+            let col = Color(red: d.colour[0], green: d.colour[1], blue: d.colour[2])
+            var p = Path()
+            p.move(to: pt(d.tail[0], d.tail[1]))
+            p.addLine(to: pt(d.tip[0], d.tip[1]))
+            g.stroke(p, with: .color(col), style: StrokeStyle(lineWidth: max(3, CGFloat(t.ppm * DoorLeaf.thickness * 1.5)), lineCap: .round))
+            if d.hinged {
+                let h = pt(d.pivot[0], d.pivot[1])
+                g.fill(Path(ellipseIn: CGRect(x: h.x - 3.5, y: h.y - 3.5, width: 7, height: 7)), with: .color(.white))
+            }
+            if t.ppm > 18 {
+                let m = pt(d.boxCenter[0], d.boxCenter[1])
+                g.draw(Text(d.label).font(.caption2.weight(.semibold)).foregroundColor(col), at: CGPoint(x: m.x, y: m.y - 11))
+            }
         }
     }
 
@@ -389,6 +411,7 @@ struct MapPlanView: View {
             HStack(spacing: 6) {
                 chip("Mesh", "cube.transparent", $model.meshLive)
                 chip("Terrain", "square.grid.3x3.topleft.filled", $model.arTerrain)
+                chip("Doors", "door.left.hand.open", $model.arDoors)
                 chip("Cameras", "video", $model.showCameras)
                 chip("Paths", "point.topleft.down.to.point.bottomright.curvepath", $model.showPaths)
                 chip("Agents", "person.2.wave.2", $model.arAgents)

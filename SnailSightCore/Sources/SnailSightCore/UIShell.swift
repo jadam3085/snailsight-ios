@@ -182,7 +182,7 @@ public enum NearList {
 
 /// The layers button's toggles (B1's rail, as a compact sheet).
 public enum MapLayerKey: String, CaseIterable, Equatable {
-    case meshLive, structure, xray, objects, terrain, cameras, paths, agents
+    case meshLive, structure, xray, objects, doors, terrain, cameras, paths, agents
 
     public var title: String {
         switch self {
@@ -190,6 +190,7 @@ public enum MapLayerKey: String, CaseIterable, Equatable {
         case .structure: return "Structure"
         case .xray: return "X-ray"
         case .objects: return "Objects"
+        case .doors: return "Doors"
         case .terrain: return "Terrain"
         case .cameras: return "Cameras"
         case .paths: return "Paths"
@@ -203,6 +204,7 @@ public enum MapLayerKey: String, CaseIterable, Equatable {
         case .structure: return "square.split.2x2"
         case .xray: return "eye.circle"
         case .objects: return "shippingbox"
+        case .doors: return "door.left.hand.open"
         case .terrain: return "square.grid.3x3.topleft.filled"
         case .cameras: return "video"
         case .paths: return "point.topleft.down.to.point.bottomright.curvepath"
@@ -216,6 +218,7 @@ public enum MapLayerKey: String, CaseIterable, Equatable {
         case .structure: return "Clean walls / floors (off = the raw scan mesh)"
         case .xray: return "See sim bodies through walls"
         case .objects: return "Detected objects in the house map"
+        case .doors: return "Door leaves at their latest angle: closed, ajar or open (live)"
         case .terrain: return "Where the robot can drive (slope, steps)"
         case .cameras: return "Security cameras and sensors"
         case .paths: return "Planned routes of the selected body"
