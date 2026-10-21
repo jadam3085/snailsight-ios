@@ -5,10 +5,9 @@ import SnailSightCore
 // plan and Map 3D. GET /v1/maps/{map}/doors once (re-read every 2 min while something draws doors, and when the map
 // version changes), then live `door` events on the downlink's changes layer (§6b.4) replace a door's state in place.
 // `rev` bumps on any change so each view rebuilds only its door boxes.
-@MainActor
 final class DoorStore: ObservableObject {
     private unowned let model: AppModel
-    @Published private(set) var set = DoorSet()
+    @Published private(set) var doorSet = DoorSet()
     private(set) var rev = 0
     private var loadedAt: TimeInterval = 0
     private var loadedKey = ""
@@ -17,7 +16,7 @@ final class DoorStore: ObservableObject {
 
     init(model: AppModel) { self.model = model }
 
-    var leaves: [DoorLeaf] { set.leaves }
+    var leaves: [DoorLeaf] { doorSet.leaves }
 
     /// Fetch when stale; cheap to call every tick.
     func ensure() {
@@ -35,11 +34,11 @@ final class DoorStore: ObservableObject {
                 self.loading = false
                 if let r, r.1 == 200, let doc = DoorsDoc.parse(r.0) {
                     self.loadedKey = key
-                    self.set.load(doc)
+                    self.doorSet.load(doc)
                     self.rev += 1
                     self.objectWillChange.send()
                     self.note = nil
-                    self.model.log.event("doors_load", ["map": .string(map), "doors": .int(self.set.doors.count)])
+                    self.model.log.event("doors_load", ["map": .string(map), "doors": .int(self.doorSet.doors.count)])
                 } else {
                     self.note = "Doors unavailable (map server \(r?.1 ?? 0))"
                 }
@@ -50,12 +49,12 @@ final class DoorStore: ObservableObject {
     /// Downlink `door` message (§6b.4).
     func live(_ data: Data) {
         guard let e = DoorEvent.parse(data) else { return }
-        if set.apply(e) {
+        if doorSet.apply(e) {
             rev += 1
             objectWillChange.send()
             model.log.event("door_live", ["door": .string(e.doorID), "state": .string(e.state),
                                           "angle": .double(e.angleDeg ?? -1)])
-        } else if !set.doors.contains(where: { $0.id == e.doorID }) {
+        } else if !doorSet.doors.contains(where: { $0.id == e.doorID }) {
             loadedAt = 0                                   // a door we do not know yet: re-read the list
         }
     }
