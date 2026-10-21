@@ -282,6 +282,26 @@ struct LayersSheet: View {
             TimelineView(.periodic(from: .now, by: 1)) { _ in
                 List {
                     Section {
+                        Toggle(isOn: model.worldBinding) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Label("3D world", systemImage: "cube.transparent.fill")
+                                Text(model.worldOn ? "House, live mesh, terrain and objects draw in AR"
+                                                   : "Hidden: nothing of the generated world draws or downloads. Your layer settings are kept")
+                                    .font(.caption).foregroundStyle(.secondary)
+                            }
+                        }
+                        .frame(minHeight: 44)
+                    } footer: {
+                        Text("One switch for all rendered world geometry. Sim bodies, paths, cameras and other agents have their own toggles.")
+                    }
+                    Section("View") {
+                        Picker("View", selection: Binding(get: { model.viewPresets.preset }, set: { model.selectPreset($0) })) {
+                            ForEach(ViewPreset.allCases) { Text($0.title).tag($0) }
+                        }
+                        .pickerStyle(.segmented)
+                        Text(model.viewPresets.preset.detail).font(.caption).foregroundStyle(.secondary)
+                    }
+                    Section {
                         ForEach(MapLayerKey.allCases, id: \.self) { k in
                             Toggle(isOn: binding(k)) {
                                 VStack(alignment: .leading, spacing: 2) {
@@ -297,9 +317,15 @@ struct LayersSheet: View {
                                 }
                             }
                             .frame(minHeight: 44)
+                            if k == .structure {
+                                Picker(selection: $model.houseStyle) {
+                                    ForEach(HouseStyle.allCases) { Text($0.rawValue).tag($0) }
+                                } label: { Label("House overlay", systemImage: "house") }
+                                .frame(minHeight: 44)
+                            }
                         }
                     } footer: {
-                        Text("Layers show in AR and on the Map. Mesh (live) needs the house map to place you; turn on Live map to add your own walk to it.")
+                        Text("Layers show in AR and on the Map. Mesh (live) needs the house map to place you; turn on Live map to add your own walk to it. Any change here sets the view to Custom.")
                     }
                     Section {
                         Picker(selection: $model.meshColour) {
@@ -308,11 +334,6 @@ struct LayersSheet: View {
                         .pickerStyle(.segmented)
                     } header: { Text("Mesh colour") } footer: {
                         Text("Photo paints the live mesh with the colours its walkers' cameras saw. Depth-only agents (Kinect, lidar) stay wireframe.")
-                    }
-                    Section("House overlay") {
-                        Picker(selection: $model.houseStyle) {
-                            ForEach(HouseStyle.allCases) { Text($0.rawValue).tag($0) }
-                        } label: { Label("House", systemImage: "house") }
                     }
                 }
             }

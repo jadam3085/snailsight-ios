@@ -63,6 +63,7 @@ final class TileStreamer {
     // motion + stats
     private var motion = TileMotion()
     private var started = false
+    private var hiddenSince: TimeInterval?
     private var firstNearLogged = false
     private var dlBytes = 0
     private var fetchedCount = 0
@@ -94,7 +95,7 @@ final class TileStreamer {
 
     /// The overlay draws tiles (Model / Wire / Ghost).
     private var drawing: Bool {
-        let st = model.houseStyle
+        let st = model.drawHouse                                  // 12.4: masked by the 3D world switch
         return st == .model || st == .wire || st == .ghost
     }
 
@@ -112,7 +113,13 @@ final class TileStreamer {
     func tick(cam: [Double], forward: [Double]?) {
         let t = now
         node.isEnabled = drawing
-        guard drawing else { return }                              // Off / Labels: nothing streams
+        guard drawing else {                                        // Off / Labels / 3D world off: nothing streams
+            // 12.4: hidden for 30 s -> free the tiles (memory + battery); the disk cache makes coming back cheap.
+            if hiddenSince == nil { hiddenSince = t }
+            if let h = hiddenSince, t - h > 30, !ledger.items.isEmpty { clear(reason: "hidden") }
+            return
+        }
+        hiddenSince = nil
         guard model.mapLocalizer.alignment != nil else { return }
         if !started {
             guard serverLocked else { return }                     // never before a real server lock
@@ -402,7 +409,7 @@ final class TileStreamer {
         ledger.add(key, .init(hash: hash, mem: n.mem, near: n.size == TileSelect.LEAF_M))
         heldGen += 1
         disk.touch(hash, now: now)
-        style(key, model.houseStyle)
+        style(key, model.drawHouse)
         refresh()
         if loadMs > 1500 { model.log.event("tile_slow_load", ["key": .string(key), "ms": .int(Int(loadMs))]) }
     }
@@ -443,7 +450,7 @@ final class TileStreamer {
     }
 
     private func applyStyle() {
-        let st = model.houseStyle
+        let st = model.drawHouse
         guard styleApplied != st else { return }
         styleApplied = st
         for k in entities.keys { style(k, st) }
@@ -488,7 +495,7 @@ final class TileStreamer {
     /// The AR's loaded content of a tile at exactly this hash, drawn with its own (unlit texture) materials — the 3D
     /// viewer clones it (a clone shares the mesh + texture resources: no second copy in memory).
     func sharedContent(key: String, hash: String) -> Entity? {
-        guard ledger.items[key]?.hash == hash, model.houseStyle == .model, styleApplied == .model,
+        guard ledger.items[key]?.hash == hash, model.drawHouse == .model, styleApplied == .model,
               let holder = entities[key] else { return nil }
         return holder.children.first
     }

@@ -41,7 +41,7 @@ final class TerrainARLayer {
     // MARK: overlay (MapARLayer.slowTick, every 0.5 s while aligned)
 
     func tick(cameraMap cam: [Double]) {
-        let on = model.arTerrain
+        let on = model.drawTerrain
         layer.terrainNode.isEnabled = on
         guard on, let v = layer.mapVersion, model.serverBase != nil else { return }
         let key = "\(layer.mapID)@\(v)"

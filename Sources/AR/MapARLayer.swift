@@ -194,7 +194,8 @@ final class MapARLayer {
         // followed head, else the head (MapFollower).
         // 11.0: only after a lock (no map bytes before it), and only the small docs (rooms, objects): the house mesh
         // itself streams as tiles (TileStreamer).
-        if al != nil, model.serverBase != nil, let v = model.mapFollower.contentVersion(lock: mapVersion) {
+        // 12.4: no rooms / objects docs while the house is hidden (3D world off or House overlay Off) unless X-ray needs the scene.
+        if al != nil, model.serverBase != nil, model.drawHouse != .off || model.simXRay, let v = model.mapFollower.contentVersion(lock: mapVersion) {
             let scene = "\(mapID)@\(v)"
             if scene != sceneID && loadingScene == nil && now - lastLoadTry > 10 { load(scene) }
         }
@@ -366,7 +367,7 @@ final class MapARLayer {
     }
 
     private func applyStyle() {
-        let st = model.houseStyle
+        let st = model.drawHouse                                  // 12.4: the 3D world switch hides labels + boxes too
         labelNode.isEnabled = st != .off
         objectNode.isEnabled = st != .off && model.arObjects
     }
@@ -460,7 +461,7 @@ final class MapARLayer {
 
     /// Tool "Objects": a tap on a detected object opens its correction sheet. true = handled.
     func handleObjectTap(_ pt: CGPoint) -> Bool {
-        guard isAligned, model.arObjects, model.houseStyle != .off, let scene = sceneID else {
+        guard isAligned, model.arObjects, model.drawHouse != .off, let scene = sceneID else {
             model.flash(isAligned ? "Turn on More ▸ House ▸ Objects" : "Objects show once LOCALIZED in the house map")
             return true
         }

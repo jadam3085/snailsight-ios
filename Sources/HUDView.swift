@@ -64,7 +64,7 @@ struct HUDView: View {
             if let u = model.undoText { UndoToast(text: u) }
             if let l = model.liveText { LiveCapsule(text: l, good: model.liveGood) }
             if !mark.active { CameraCheckPanel(check: model.cameraCheck) }  // 12.2 Camera check: who sees me
-            if model.houseStyle != .off || model.arTerrain, !model.recording,
+            if model.drawHouse != .off || model.drawTerrain, !model.recording,
                !model.arStatus.title.isEmpty, model.arStatus.tone != .good {
                 ARStatusChip(status: model.arStatus)               // 10.1 AR 1:1: finding / correcting / dimmed
             }

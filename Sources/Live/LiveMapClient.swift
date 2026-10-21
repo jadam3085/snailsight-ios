@@ -71,7 +71,7 @@ final class LiveMapClient {
     /// Downlink wanted: advertised (or forced) and some live layer is on.
     var downlinkWanted: Bool {
         model.serverFeatures.liveDownlink(forced: model.forceLiveDownlink) && model.serverBase != nil
-            && (model.arAgents || model.houseStyle != .off || model.meshLive) && !model.showScans
+            && model.downlinkLayersOn && !model.showScans
     }
 
     /// 12.0: what the downlink subscribes to: the live layers, + the estimated world's tree events when the server has it.
@@ -120,7 +120,7 @@ final class LiveMapClient {
     func tick() {
         let t = now
         layer.agentNode.isEnabled = model.arAgents
-        layer.liveNode.isEnabled = model.meshLive                   // 12.0 layers ▸ Mesh (live)
+        layer.liveNode.isEnabled = model.drawMeshLive                   // 12.0 layers ▸ Mesh (live)
         if drawnColour != model.meshColour {                       // 12.1 Layers ▸ Mesh colour switched: redraw
             drawnColour = model.meshColour
             for (k, d) in tileData { drawTile(key: k, mesh: d.mesh, rgb: d.rgb) }

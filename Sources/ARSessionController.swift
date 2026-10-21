@@ -145,7 +145,7 @@ final class ARSessionController: NSObject, ARSessionDelegate {
         meshOverlay.idleEvery = heatBudget.meshRebuildS
         if model.meshStyle == .debug { arView.debugOptions.insert(.showSceneUnderstanding) }
         else { arView.debugOptions.remove(.showSceneUnderstanding) }
-        meshOverlay.isEnabled = model.meshStyle == .wire
+        meshOverlay.isEnabled = model.meshStyle == .wire && model.worldOn   // 12.4 3D world switch
         guard started else { return }
         model.log.event("render", ["mesh": .string(model.meshStyle.rawValue), "occlusion": .bool(model.occlusion),
                                    "people": .bool(model.peopleOcclusion)])

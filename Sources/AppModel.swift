@@ -166,6 +166,7 @@ final class AppModel: ObservableObject {
             if meshLive, meshStyle == .off { meshStyle = .wire }
             if !meshLive, meshStyle == .wire { meshStyle = .off }
             log.event("layer", ["name": .string("mesh_live"), "on": .bool(meshLive)])
+            layerEdited(true)
         }
     }
     /// 12.1 Layers ▸ Mesh colour: live tiles in their photo colour (server live 0.5 vertex colour) or the wireframe look.
@@ -177,7 +178,7 @@ final class AppModel: ObservableObject {
     }
     /// Layers ▸ Cameras / Paths (Map + AR markers).
     @Published var showCameras: Bool = UserDefaults.standard.object(forKey: "layers.cameras") as? Bool ?? true {
-        didSet { UserDefaults.standard.set(showCameras, forKey: "layers.cameras") }
+        didSet { UserDefaults.standard.set(showCameras, forKey: "layers.cameras"); layerEdited(showCameras != oldValue) }
     }
     @Published var showPaths: Bool = UserDefaults.standard.object(forKey: "layers.paths") as? Bool ?? true {
         didSet { UserDefaults.standard.set(showPaths, forKey: "layers.paths") }
@@ -188,12 +189,72 @@ final class AppModel: ObservableObject {
     // 10.1 AR 1:1 (Sources/AR): the house map drawn where it really is once LOCALIZED
     // 11.0: Model (the streamed textured tiles) is the default, once for everyone (key ar.house.v11), then the owner's pick.
     @Published var houseStyle: HouseStyle = AppModel.initialHouseStyle() {
-        didSet { UserDefaults.standard.set(houseStyle.rawValue, forKey: "ar.house") }
+        didSet { UserDefaults.standard.set(houseStyle.rawValue, forKey: "ar.house"); layerEdited(houseStyle != oldValue) }
     }
     /// 11.0 Settings ▸ Raw scan: draw the raw scan mesh tiles instead of the structure variant (walls / floors /
     /// ceilings + furniture), which is the default.
     @Published var rawScan: Bool = UserDefaults.standard.bool(forKey: "ar.tiles.raw") {
         didSet { UserDefaults.standard.set(rawScan, forKey: "ar.tiles.raw") }
+    }
+
+    // 12.4 View presets + the "3D world" master switch (core: ViewPresets.swift). Individual settings stay as they are;
+    // `worldOn` only masks what is drawn / fetched, so switching it back on restores everything.
+    @Published var viewPresets = ViewPresetState.decode(UserDefaults.standard.data(forKey: "view.presets")) {
+        didSet {
+            UserDefaults.standard.set(viewPresets.encoded(), forKey: "view.presets")
+            if viewPresets.worldOn != oldValue.worldOn {
+                log.event("world_toggle", ["on": .bool(viewPresets.worldOn), "preset": .string(viewPresets.preset.rawValue),
+                                           "house": .string(houseStyle.rawValue), "mesh_live": .bool(meshLive)])
+                controller.applyRenderSettings()
+            }
+        }
+    }
+    private var applyingPreset = false
+    var worldOn: Bool { viewPresets.worldOn }
+    var worldBinding: Binding<Bool> { Binding(get: { self.viewPresets.worldOn }, set: { self.viewPresets.worldOn = $0 }) }
+    var layerSnapshot: LayerSnapshot {
+        LayerSnapshot(house: houseStyle.rawValue, meshLive: meshLive, objects: arObjects, terrain: arTerrain,
+                      cameras: showCameras, agents: arAgents)
+    }
+    /// What actually draws / streams (settings masked by the master switch).
+    var drawHouse: HouseStyle { HouseStyle(rawValue: WorldGate.house(layerSnapshot, worldOn: worldOn)) ?? .off }
+    var drawMeshLive: Bool { WorldGate.meshLive(layerSnapshot, worldOn: worldOn) }
+    var drawObjects: Bool { WorldGate.objects(layerSnapshot, worldOn: worldOn) }
+    var drawTerrain: Bool { WorldGate.terrain(layerSnapshot, worldOn: worldOn) }
+    var downlinkLayersOn: Bool { WorldGate.downlinkWanted(layerSnapshot, worldOn: worldOn) }
+
+    /// An individual toggle changed (not by a preset): the row becomes Custom.
+    func layerEdited(_ changed: Bool) {
+        guard changed, !applyingPreset else { return }
+        var st = viewPresets
+        st.manualChange(current: layerSnapshot)
+        if st != viewPresets { viewPresets = st }
+    }
+
+    func selectPreset(_ p: ViewPreset) {
+        var st = viewPresets
+        let snap = st.select(p, current: layerSnapshot)
+        if let snap {
+            applyingPreset = true
+            houseStyle = HouseStyle(rawValue: snap.house) ?? .model
+            meshLive = snap.meshLive
+            arObjects = snap.objects
+            arTerrain = snap.terrain
+            showCameras = snap.cameras
+            arAgents = snap.agents
+            applyingPreset = false
+        }
+        viewPresets = st
+        log.event("layers_preset", ["preset": .string(p.rawValue), "house": .string(houseStyle.rawValue),
+                                    "mesh_live": .bool(meshLive), "objects": .bool(arObjects), "terrain": .bool(arTerrain),
+                                    "cameras": .bool(showCameras), "agents": .bool(arAgents), "world": .bool(worldOn)])
+    }
+
+    /// Launch: a stored preset whose settings drifted (arTerrain is not persisted) reads as Custom.
+    func reconcilePresets() {
+        var st = viewPresets
+        st.reconcile(current: layerSnapshot)
+        if st != viewPresets { viewPresets = st }
     }
 
     static func initialHouseStyle() -> HouseStyle {
@@ -206,11 +267,13 @@ final class AppModel: ObservableObject {
         return HouseStyle(rawValue: d.string(forKey: "ar.house") ?? "") ?? .model
     }
     @Published var arObjects: Bool = UserDefaults.standard.object(forKey: "ar.objects") as? Bool ?? true {
-        didSet { UserDefaults.standard.set(arObjects, forKey: "ar.objects") }
+        didSet { UserDefaults.standard.set(arObjects, forKey: "ar.objects"); layerEdited(arObjects != oldValue) }
     }
-    @Published var arTerrain = false                        // P3 robot terrain overlay (off at launch: it is busy)
+    @Published var arTerrain = false {                      // P3 robot terrain overlay (off at launch: it is busy)
+        didSet { layerEdited(arTerrain != oldValue) }
+    }
     @Published var arAgents: Bool = UserDefaults.standard.object(forKey: "ar.agents") as? Bool ?? true {
-        didSet { UserDefaults.standard.set(arAgents, forKey: "ar.agents") }
+        didSet { UserDefaults.standard.set(arAgents, forKey: "ar.agents"); layerEdited(arAgents != oldValue) }
     }
     @Published var arStatus = ARMapStatus(tone: .neutral, title: "", detail: "", opacity: 0)
     @Published var arObjectEdit: ARObjectEdit?
@@ -356,6 +419,7 @@ final class AppModel: ObservableObject {
 
     init() {
         logURL = log.fileURL
+        reconcilePresets()
         services.onLink = { [weak self] base, label in
             self?.serverBase = base
             self?.serverLabel = label

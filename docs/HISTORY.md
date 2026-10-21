@@ -279,3 +279,15 @@ manipulate the map in 3d to see the entire 3d color map and float through it", f
 - Logs: `map3d_open`, `map3d_fly`, `map3d_fps` (every 10 s: fps, footprint_mb, drawn / loaded / wanted / inflight
   tiles, mem_mb, budget_mb, k, slice), `map3d_tileset`, `map3d_first_tiles`, `map3d_select`, `map3d_goto`,
   `map3d_tile_error`, `map3d_mem_warning`, `map3d_close` (max_mb, min_fps); `ar_paused` / `ar_resumed` why `map3d`.
+
+**12.4 (View presets + 3D world switch)**: owner 2026-10-20 ("view live camera plus animals, and turn off the layer where
+I see the 3d generated world").
+- Layers now opens with a **3D world** master switch (hides/shows ALL rendered world geometry in AR: house tiles in any
+  style + labels/objects, live mesh incl. the phone's own wire mesh, terrain; individual settings are kept, so switching
+  it back on restores them; sim bodies, paths, cameras and agents are not "world"), then a **View** row: Camera +
+  animals / Full world / Custom (any manual toggle -> Custom; Full world restores the previous full set; persisted).
+  The same presets are a quick chip in the sheet's search row. House overlay is a picker row right under Structure.
+- While the world is off nothing is fetched: no house tiles (loaded tiles are freed after 30 s hidden; the disk cache
+  makes coming back cheap), no rooms/objects docs (unless X-ray needs the scene), no terrain grids, and the live
+  downlink only runs for agents. Core: `ViewPresets.swift` (LayerSnapshot, ViewPresetState, WorldGate) + 8 tests.
+- Logs: `layers_preset` (preset + the applied toggles), `world_toggle` (on, preset, house, mesh_live).

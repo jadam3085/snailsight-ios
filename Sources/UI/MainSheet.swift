@@ -57,6 +57,8 @@ struct MainSheet: View {
                     Button { model.sheetQuery = "" } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary) }
                         .frame(width: 44, height: 44)
                         .accessibilityLabel("Clear search")
+                } else {
+                    ViewPresetMenu()                                    // 12.4 quick chip: Camera + animals / Full world
                 }
             }
             .padding(.horizontal, 12)
@@ -85,6 +87,31 @@ struct MainSheet: View {
 }
 
 // MARK: quick actions (C1)
+
+/// 12.4 the view-preset quick chip in the sheet's search row (same choice as Layers ▸ View).
+private struct ViewPresetMenu: View {
+    @EnvironmentObject var model: AppModel
+
+    var body: some View {
+        Menu {
+            ForEach(ViewPreset.allCases) { p in
+                Button { model.selectPreset(p) } label: {
+                    if model.viewPresets.preset == p { Label(p.title, systemImage: "checkmark") } else { Text(p.title) }
+                }
+            }
+            Divider()
+            Toggle("3D world", isOn: model.worldBinding)
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: model.worldOn ? "eye" : "eye.slash")
+                Text(model.viewPresets.preset == .cameraAnimals ? "Cam" : (model.viewPresets.preset == .fullWorld ? "Full" : "Custom"))
+                    .font(.caption2.weight(.semibold))
+            }
+            .frame(minWidth: 44, minHeight: 44)
+        }
+        .accessibilityLabel("View preset: \(model.viewPresets.preset.title)")
+    }
+}
 
 private struct QuickActionsRow: View {
     @EnvironmentObject var model: AppModel
