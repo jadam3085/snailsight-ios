@@ -214,6 +214,54 @@ final class SceneRenderer {
         return f
     }
 
+    // MARK: 12.5 temporary measure points (Select / Inspect: a tap on a surface)
+
+    private var probeRoot: AnchorEntity?
+    private var probeKey = ""
+
+    /// Draw the live measure points (world frame): a small marker each, a line between a pair, the readout above the
+    /// newest point; `opacity` fades them out. Empty = remove.
+    func setMeasurePoints(_ pts: [SIMD3<Float>], label: String?, opacity: Float) {
+        if pts.isEmpty || opacity <= 0 {
+            if let r = probeRoot { arView.scene.removeAnchor(r) }
+            probeRoot = nil
+            probeKey = ""
+            return
+        }
+        let key = pts.map { String(format: "%.3f,%.3f,%.3f", $0.x, $0.y, $0.z) }.joined(separator: ";") + "|" + (label ?? "")
+        if key != probeKey {
+            if let r = probeRoot { arView.scene.removeAnchor(r) }
+            let root = AnchorEntity(world: matrix_identity_float4x4)
+            let mat = UnlitMaterial(color: .systemOrange)
+            for p in pts {
+                let m = ModelEntity(mesh: .generateSphere(radius: 0.012), materials: [mat])
+                m.position = p
+                root.addChild(m)
+                var ringMat = UnlitMaterial(color: .white)
+                ringMat.blending = .transparent(opacity: 0.6)
+                let ring = ModelEntity(mesh: .generateCylinder(height: 0.002, radius: 0.03), materials: [ringMat])
+                ring.position = p
+                root.addChild(ring)
+            }
+            if pts.count == 2 {
+                let sg = Geo.segment(from: pts[0], to: pts[1])
+                let line = ModelEntity(mesh: .generateBox(size: SIMD3(sg.length, 0.003, 0.003)), materials: [mat])
+                line.position = sg.center
+                line.orientation = sg.rotation
+                root.addChild(line)
+            }
+            if let label, let last = pts.last {
+                let l = makeLabel(label, size: 0.025)
+                l.position = (pts.count == 2 ? (pts[0] + pts[1]) / 2 : last) + SIMD3(0, 0.06, 0)
+                root.addChild(l)
+            }
+            arView.scene.addAnchor(root)
+            probeRoot = root
+            probeKey = key
+        }
+        probeRoot?.components.set(OpacityComponent(opacity: max(0, min(1, opacity))))
+    }
+
     // MARK: housekeeping
 
     func clearAll(session: ARSession) {
@@ -223,6 +271,7 @@ final class SceneRenderer {
         cubeAnchors.removeAll(); cubeBodies.removeAll(); otherAnchors.removeAll(); billboards.removeAll()
         cubeModels.removeAll(); selectedCube = nil; ledger.reset()
         pendingA = nil; measure.reset()
+        setMeasurePoints([], label: nil, opacity: 0)
         onPlaced?(0)
     }
 

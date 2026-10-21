@@ -51,11 +51,16 @@ final class UIShellTests: XCTestCase {
         let animal = SimCommand.offered(role: .animal, server: true)
         XCTAssertEqual(RingCommand.ring(offered: animal), [.goTo, .follow, .flee, .stay, .roam, .delete])
         let robot = SimCommand.offered(role: .robot, server: true)
-        XCTAssertEqual(RingCommand.ring(offered: robot), [.goTo, .follow, .stay, .delete])
+        XCTAssertEqual(RingCommand.ring(offered: robot), [.goTo, .follow, .stop, .delete])
         XCTAssertEqual(RingCommand.command(.stay, offered: robot), .stop)
         XCTAssertEqual(RingCommand.command(.stay, offered: animal), .stay)
         let drone = SimCommand.offered(role: .robot, drone: true, server: true)
-        XCTAssertEqual(RingCommand.ring(offered: drone), [.goTo, .stay, .delete])
+        XCTAssertEqual(RingCommand.ring(offered: drone), [.goTo, .stop, .delete])
+        // 12.5 drivable (robot / rc_car): Drive / Go to / Follow / Stop / Delete
+        let car = SimCommand.offered(role: .robot, server: true, drivable: true)
+        XCTAssertEqual(RingCommand.ring(offered: car), [.drive, .goTo, .follow, .stop, .delete])
+        XCTAssertEqual(RingCommand.command(.drive, offered: car), .drive)
+        XCTAssertEqual(RingCommand.drive.title, "Drive")
     }
 
     func testRingLayoutStaysOnScreen() {

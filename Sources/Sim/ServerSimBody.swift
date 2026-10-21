@@ -59,6 +59,16 @@ final class ServerSimBody {
                     log("sim_model_fallback", ["kind": .string(key), "why": .string("no model files in the catalog")])
                 }
             }
+        case .rcCar(let scale):
+            // 12.5: the bundled Kenney toy car stretched to the RC car's 0.45 × 0.16 × 0.25 m at the body's scale
+            let toy = catalog.item("toycar")
+            let k = RCCar.modelScale(model: toy?.sizeM, scale: scale)
+            body.scale = SIMD3<Float>(Float(k[0]), Float(k[1]), Float(k[2]))
+            let ts = toy?.size ?? SIMD3(RCCar.toycarSizeM[0], RCCar.toycarSizeM[1], RCCar.toycarSizeM[2])
+            body.addChild(SimShadow.make(length: Float(ts.x) * 0.9, width: Float(ts.z) * 1.1))
+            height = RCCar.sizeM[1] * scale
+            let file = toy?.file(clip: "static") ?? RCCar.modelFile
+            library.request(file) { [weak self] t in self?.rig.attach(clip: "static", template: t) }
         case .robot(let scale):
             let r = SimRobot(pose: DrivePose(x: 0, y: 0, theta: 0), floorY: 0, scale: scale)      // the real model
             robot = r

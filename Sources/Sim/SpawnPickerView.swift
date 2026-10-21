@@ -62,7 +62,7 @@ struct SpawnPickerView: View {
 
     private var robotTile: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("Robot").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+            Text("Robot · Vehicles").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
             Button {
                 pick("robot")
             } label: {
@@ -78,6 +78,25 @@ struct SpawnPickerView: View {
                 .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
             }
             .buttonStyle(.plain)
+            // 12.5 RC car (server catalog `rc_car`, group Vehicles): drive it like the robot
+            Button {
+                pick(RCCar.key)
+            } label: {
+                HStack(spacing: 10) {
+                    SimThumb(item: model.controller.sim.catalog.item(RCCar.key) ?? RCCar.catalogItem()).frame(width: 34, height: 34)
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(RCCar.label).font(.footnote.weight(.semibold))
+                        Text(model.serverSim.isActive ? "1/10 RC car · drive with the stick (Tank toggle) · Go to / Follow"
+                                                      : "Needs the shared sim (map server, LOCALIZED)")
+                            .font(.caption2).foregroundStyle(.secondary)
+                    }
+                    Spacer(minLength: 0)
+                }
+                .padding(10)
+                .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Spawn RC car")
         }
     }
 
@@ -87,6 +106,9 @@ struct SpawnPickerView: View {
         if model.spawnMode {
             model.spawnPick = key
             model.log.event("sim_spawn_pick", ["kind": .string(key)])
+        } else if key == RCCar.key {
+            if model.serverSim.isActive { model.serverSim.spawn(RCCar.key, arView: model.controller.arView) }
+            else { model.flash("The RC car drives in the shared sim: needs the map server and LOCALIZED", seconds: 3) }
         } else if key == "robot" {
             model.controller.sim.spawnRobot()
         } else if let it = model.controller.sim.catalog.item(key) {

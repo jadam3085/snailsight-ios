@@ -428,16 +428,16 @@ private struct CubeBar: View {
     }
 }
 
-/// "Deleted cube #3   Undo" for 5 s.
+/// "Deleted cube #3   Undo" / "Placed cube #3   Undo" (12.5) for 5 s.
 private struct UndoToast: View {
     @EnvironmentObject var model: AppModel
     let text: String
 
     var body: some View {
         HStack(spacing: 10) {
-            Image(systemName: "trash").font(.caption)
+            Image(systemName: model.undoIcon).font(.caption)
             Text(text).font(.caption.weight(.semibold)).lineLimit(1)
-            Button("Undo") { model.controller.undoDeletion() }
+            Button("Undo") { model.runUndo() }
                 .font(.caption.weight(.bold)).foregroundStyle(.yellow)
         }
         .padding(.horizontal, 12).padding(.vertical, 6)
@@ -500,7 +500,7 @@ struct CubeListView: View {
                     HStack {
                         Text(u).font(.caption.weight(.semibold))
                         Spacer()
-                        Button("Undo") { model.controller.undoDeletion(); reload() }.font(.caption.weight(.bold))
+                        Button("Undo") { model.runUndo(); reload() }.font(.caption.weight(.bold))
                     }
                     .padding(12).background(.ultraThinMaterial)
                 }
@@ -612,9 +612,28 @@ private struct SimArea: View {
                 SimActionBar(ui: model.controller.sim.ui, sim: model.controller.sim)
             }
             HStack(alignment: .bottom, spacing: 8) {
-                if shared.active ? (shared.selection?.rover ?? false) : model.simRobot {
-                    JoystickView(size: 104) { v in
-                        if shared.active { model.serverSim.setStick(v) } else { model.controller.sim.setStick(v) }
+                // 12.5: every drivable body (robot, RC car) gets the same stick; Drive in the ring re-opens it
+                if !model.driveHidden, shared.active ? (shared.selection?.drivable ?? false) : model.simRobot {
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack(spacing: 6) {
+                            if shared.active, shared.selection?.driveKind == .ackermann {
+                                Toggle(isOn: $model.driveTank) {
+                                    Label("Tank", systemImage: "arrow.triangle.2.circlepath").font(.caption2.weight(.semibold))
+                                }
+                                .toggleStyle(.button).buttonStyle(.bordered).controlSize(.mini)
+                                .accessibilityLabel("Tank steering: turn like the robot")
+                                .onChange(of: model.driveTank) { _, on in model.log.event("drive_tank", ["on": .bool(on)]) }
+                            }
+                            Button {
+                                model.serverSim.stopDriving()
+                                model.controller.sim.setStick(.zero)
+                                model.driveHidden = true
+                            } label: { Image(systemName: "xmark.circle.fill").font(.callout) }
+                                .buttonStyle(.plain).accessibilityLabel("Hide the joystick")
+                        }
+                        JoystickView(size: 104, label: shared.selection?.rcCar == true ? "RC car joystick" : "Robot joystick") { v in
+                            if shared.active { model.serverSim.setStick(v) } else { model.controller.sim.setStick(v) }
+                        }
                     }
                 }
                 // 10.6: ONE status chip — in server mode the bar's own chip carries "Server sim · N bodies"
@@ -658,7 +677,7 @@ private struct SpawnModeBanner: View {
     }
 
     private func name(_ k: String) -> String {
-        k == "robot" ? "RobosnailBob" : (model.controller.sim.catalog.item(k)?.label ?? k.capitalized)
+        k == "robot" ? "RobosnailBob" : k == RCCar.key ? RCCar.label : (model.controller.sim.catalog.item(k)?.label ?? k.capitalized)
     }
 }
 

@@ -443,8 +443,11 @@ final class ARSessionController: NSObject, ARSessionDelegate {
             model.spawnPicked(at: pt)
             return
         }
-        if model.simOn, model.serverSim.handleTap(pt, arView: arView) { return }   // 10.1 S2: shared sim bodies
+        // 12.5 Select / Inspect (the launch default): a body is selected if hit, else the tap drops a measure point
+        let inspect = model.tool == .select
+        if model.simOn, model.serverSim.handleTap(pt, arView: arView, passThrough: inspect) { return }   // 10.1 S2
         if model.simOn, sim.handleTap(pt) { return }        // 9.5: select / command sim bodies first
+        if inspect, mapLayer.inspectObject(pt) { return }   // a detected house object: its rename / delete sheet
         // As in Apple's sample: `.estimatedPlane` + `.any` also hits the reconstructed mesh.
         guard let hit = arView.raycast(from: pt, allowing: .estimatedPlane, alignment: .any).first else {
             model.flash("No surface there yet: sweep the phone over it first")
@@ -454,12 +457,18 @@ final class ARSessionController: NSObject, ARSessionDelegate {
         let camPos = cam.translation
         let w = hit.worldTransform
         switch model.tool {
+        case .select:
+            dropMeasurePoint(Geo.position(w), camera: camPos)
         case .cube:
+            guard model.toolState.tapPlacesCube else { dropMeasurePoint(Geo.position(w), camera: camPos); return }
             let (n, m) = renderer.placeCube(hit: w, cameraPosition: camPos, session: arView.session)
             let p = Geo.position(m)
             model.log.event("place_cube", ["n": .int(n), "pos": .doubles([Double(p.x), Double(p.y), Double(p.z)]),
                                            "tilt_deg": .double(Double(Geo.angleDegrees(Geo.normal(w), Geo.worldUp))),
                                            "range_m": .double(Double(Geo.distance(p, camPos)))])
+            if let id = renderer.cubes.last(where: { $0.number == n })?.id {        // 12.5: Undo the last cube
+                model.showUndo("Placed cube #\(n)", icon: "cube", action: { [weak self] in self?.undoPlacedCube(id, number: n) })
+            }
         case .measure:
             let p = Geo.position(w)
             switch renderer.measureTap(at: p) {
@@ -485,6 +494,58 @@ final class ARSessionController: NSObject, ARSessionDelegate {
         }
     }
 
+    // MARK: 12.5 measure point + cube undo
+
+    private var probes = MeasurePoints()
+    private var probeText: String?
+
+    /// Undo of a just-placed cube: removed without a deletion undo of its own.
+    private func undoPlacedCube(_ id: UUID, number n: Int) {
+        let gone = renderer.removeCubes([id], session: arView.session)
+        if model.cubeSel?.id == id { model.cubeSel = nil }
+        model.log.event("cube_undo", ["n": .int(n), "removed": .bool(!gone.isEmpty)])
+        model.flash(gone.isEmpty ? "That cube is already gone" : "Cube #\(n) removed", seconds: 1.2)
+    }
+
+    /// A temporary point on the surface: distance from the phone, height above the floor, the storey. Not saved;
+    /// fades 10 s after the newest point; a second point shows the distance between the two.
+    private func dropMeasurePoint(_ p: SIMD3<Float>, camera cam: SIMD3<Float>) {
+        var floorY: Double?
+        var level: String?
+        if mapLayer.isAligned, let pm = mapLayer.toMap(world: p), pm.count > 2,
+           let lv = PlanLevels.level(ofZ: pm[2], in: model.planData.levels) {
+            level = lv.title
+            if let fz = lv.floorZ { floorY = Double(p.y) - (pm[2] - fz) }
+        }
+        if floorY == nil,                                         // the surface under the phone (where you stand)
+           let hit = arView.session.raycast(ARRaycastQuery(origin: cam, direction: SIMD3<Float>(0, -1, 0),
+                                                           allowing: .estimatedPlane, alignment: .horizontal)).first {
+            floorY = Double(hit.worldTransform.columns.3.y)
+        }
+        let now = CACurrentMediaTime()
+        let m = probes.tap(at: [Double(p.x), Double(p.y), Double(p.z)], phone: [Double(cam.x), Double(cam.y), Double(cam.z)],
+                           floor: floorY, level: level, upAxis: 1, now: now)
+        var ev: [String: LogValue] = ["n": .int(probes.points.count), "range_m": .double((m.distanceFromPhone * 100).rounded() / 100),
+                                      "pos": .doubles(m.position)]
+        if let h = m.heightAboveFloor { ev["height_m"] = .double((h * 100).rounded() / 100) }
+        if let l = level { ev["level"] = .string(l) }
+        if let d = probes.pairDistance { ev["pair_m"] = .double((d * 1000).rounded() / 1000) }
+        model.log.event("measure_point", ev)
+        updateProbes(now: now)
+    }
+
+    /// Every frame while points are up: fade, then remove.
+    private func updateProbes(now: Double) {
+        probes.expire(now: now)
+        let pts = probes.points.map { SIMD3<Float>(Float($0.position[0]), Float($0.position[1]), Float($0.position[2])) }
+        let text = probes.readout
+        renderer.setMeasurePoints(pts, label: text, opacity: Float(probes.opacity(now: now)))
+        if text != probeText {
+            if model.measureText == probeText { model.measureText = text }       // never overwrite the Measure tool's text
+            probeText = text
+        }
+    }
+
     // MARK: ARSessionDelegate (main queue)
 
     func session(_ session: ARSession, didUpdate frame: ARFrame) {
@@ -503,6 +564,7 @@ final class ARSessionController: NSObject, ARSessionDelegate {
         model.mapFollower.frame(t: frame.timestamp, camera: frame.camera.transform)   // 10.7 follow LATEST (still → swap)
         mapLayer.frame(frame)                            // 10.1 AR 1:1: blend the map alignment, labels face you
         model.serverSim.frame()                          // 10.1 S2: dead-reckoned shared-sim bodies + teleop
+        if !probes.points.isEmpty || probeText != nil { updateProbes(now: CACurrentMediaTime()) }   // 12.5 measure points
         model.cameraCheck.frame(frame)                   // 12.2 Camera check: localized pose → 2 Hz walk buffer
         renderer.updateBillboards(camera: Geo.position(frame.camera.transform))
         meshOverlay.tick(now: t)

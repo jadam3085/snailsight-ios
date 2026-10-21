@@ -195,6 +195,16 @@ final class TerrainARLayer {
         var start = [cam[0], cam[1], cam[2] - 1.4]
         if let r = model.controller.sim.robotWorldPosition, let s = layer.toMap(world: r) { start = s }
         if let s = model.serverSim.selectedRoverMap { start = s }
+        // 12.5 (owner on 12.4: "robot footprint is way too big and should be half that size"): plan + draw for the
+        // body at ITS sim scale (server dims, else 0.82 × 0.62 × scale), and ask the sim's footprint cost at that scale
+        let body = model.serverSim.selectedBody
+        let scale = BodyFootprint.planScale(selected: body?.scale, localRobot: model.controller.sim.robotScale,
+                                            simOn: model.simOn, global: model.simScale)
+        let kind = body?.kind ?? "robot"
+        let foot = BodyFootprint.size(dims: body?.dims, scale: scale, kind: kind)
+        let simQ = model.serverSim.isActive
+            ? SimNavQueryAnswer.query(x: goal[0], y: goal[1], z: goal[2], scale: scale, kind: kind)
+                .map { URLQueryItem(name: $0.0, value: $0.1) } : nil
         let link = model.link!, map = layer.mapID
         let req = NavPathRequest(start: start, goal: [goal[0], goal[1]])
         let vq = [URLQueryItem(name: "version", value: String(v))]
@@ -205,6 +215,11 @@ final class TerrainARLayer {
             if let r = try? await link.request("GET", "/v1/maps/\(map)/nav/query", query: qq, timeout: 15), r.1 == 200 {
                 query = try? JSONDecoder().decode(NavQueryAnswer.self, from: r.0)
             }
+            var fits: Bool?
+            if let sq = simQ, let r = try? await link.request("GET", "/v1/maps/\(map)/sim/nav/query", query: sq, timeout: 10),
+               r.1 == 200 {
+                fits = (try? JSONDecoder().decode(SimNavQueryAnswer.self, from: r.0))?.fits
+            }
             var path: NavPathAnswer?
             var status = 0
             if let body = try? JSONEncoder().encode(req),
@@ -212,17 +227,18 @@ final class TerrainARLayer {
                 status = r.1
                 if r.1 == 200 { path = try? JSONDecoder().decode(NavPathAnswer.self, from: r.0) }
             }
-            let qF = query, pF = path, stF = status
+            let qF = query, pF = path, stF = status, fF = fits
             await MainActor.run {
                 guard let self else { return }
                 self.pathBusy = false
-                self.drawResult(goal: goal, query: qF, path: pF)
+                self.drawResult(goal: goal, query: qF, path: pF, footprint: foot, fits: fF)
                 let text = [qF?.text, pF?.text ?? (stF == 404 ? "No robot terrain here yet" : nil)].compactMap { $0 }
                     .joined(separator: "\n")
                 self.model.flash(text.isEmpty ? "The map server did not answer" : text, seconds: 4)
                 self.model.log.event("terrain_path", ["ok": .bool(pF?.ok ?? false), "len_m": .double(pF?.lengthM ?? -1),
                                                       "status": .int(stF), "traversable": .bool(qF?.traversable ?? false),
-                                                      "goal": .doubles(goal)])
+                                                      "goal": .doubles(goal), "scale": .double(scale), "kind": .string(kind),
+                                                      "footprint_m": .doubles(foot), "sim_fits": .string(fF.map { "\($0)" } ?? "n/a")])
             }
         }
         return true
@@ -233,19 +249,22 @@ final class TerrainARLayer {
         pathEntities = []
     }
 
-    private func drawResult(goal: [Double], query: NavQueryAnswer?, path: NavPathAnswer?) {
+    private func drawResult(goal: [Double], query: NavQueryAnswer?, path: NavPathAnswer?, footprint: [Double], fits: Bool?) {
         clearPath()
         let node = layer.pathNode
-        // footprint ghost at the goal (RobosnailBob 0.82 × 0.62 m), green if it can stand there, red if not
-        let ok = query?.traversable ?? false
+        // footprint ghost at the goal (12.5: the body's scaled footprint, 0.41 × 0.31 m for the robot at 50 %; 12.4 drew
+        // 0.82 × 0.62 always), green if it can stand there (the sim's own answer at its scale when known), red if not
+        let ok = fits ?? query?.traversable ?? false
         var fm = UnlitMaterial(color: ok ? UIColor(red: 0.2, green: 0.8, blue: 0.35, alpha: 1)
                                         : UIColor(red: 0.9, green: 0.2, blue: 0.2, alpha: 1))
         fm.blending = .transparent(opacity: 0.45)
-        let foot = ModelEntity(mesh: .generateBox(size: SIMD3<Float>(0.82, 0.62, 0.02), cornerRadius: 0.01), materials: [fm])
+        let foot = ModelEntity(mesh: .generateBox(size: SIMD3<Float>(Float(footprint[0]), Float(footprint[1]), 0.02),
+                                                  cornerRadius: 0.01), materials: [fm])
         let gz = query?.elevation ?? goal[2]
         foot.position = SIMD3<Float>(Float(goal[0]), Float(goal[1]), Float(gz) + 0.03)
         node.addChild(foot)
         pathEntities.append(foot)
+        model.overlayDrawn(.robotPathResult)
         guard let p = path, p.ok else { return }
         let dot = UnlitMaterial(color: UIColor(red: 0.3, green: 0.95, blue: 1, alpha: 1))
         let mesh = MeshResource.generateSphere(radius: 0.025)

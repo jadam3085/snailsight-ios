@@ -86,6 +86,9 @@ public struct SimEntitySnap: Equatable {
     public var nav: SimNav?
     // 12.0: drone missions (API §5.9.12 / §5.16, server flag `drone_missions`)
     public var mission: SimMission?
+    // 12.5 drivable bodies (API §5.9.10): rc_car front wheel angle (rad, + = left) and its drive model
+    public var steer: Double?
+    public var drive: String?                     // diff | ackermann
 }
 
 /// A drone mission's live state (entity doc `mission`): phase, the layer it flies over, its planned path.
@@ -147,6 +150,7 @@ public struct SimMission: Decodable, Equatable {
 extension SimEntitySnap: Decodable {
     enum K: String, CodingKey {
         case id, kind, pose, vel, state, owner, name, goal, path, cat, dims, scale, behaviour, clip, action, t, level, nav, mission
+        case steer, drive
         case tMono = "t_mono", agentType = "agent_type", clipT0 = "clip_t0", clipRate = "clip_rate"
     }
     public init(from d: Decoder) throws {
@@ -175,6 +179,8 @@ extension SimEntitySnap: Decodable {
         level = opt(Int.self, .level)
         nav = opt(SimNav.self, .nav)
         mission = opt(SimMission.self, .mission)
+        steer = opt(Double.self, .steer)
+        drive = opt(String.self, .drive)
     }
 
     /// The clip to draw: the server's shared clip (protocol 2), else its older `state` hint.
@@ -193,6 +199,7 @@ extension SimEntitySnap: Decodable {
         if s.path == nil { s.path = d.path }
         if s.level == nil { s.level = d.level }
         if s.mission == nil { s.mission = d.mission }
+        if s.drive == nil { s.drive = d.drive }
         s.nav = SimNav.merged(snapshot: s.nav, doc: d.nav)
         return s
     }
@@ -202,6 +209,10 @@ extension SimEntitySnap: Decodable {
         cat == "robot" || kind == "robot" || kind.contains("rover") || (agentType ?? "").contains("rover")
     }
     public var isObject: Bool { cat == "object" }
+    /// 12.5: the joystick drives it (robot, rc_car, sim rovers; never drones).
+    public var isDrivable: Bool { !isDrone && Drivable.isDrivable(kind: kind, cat: cat, agentType: agentType) }
+    public var driveKind: DriveKind { Drivable.driveKind(kind: kind, catalogDrive: drive) }
+    public var isRCCar: Bool { kind == RCCar.key }
 }
 
 public enum SimStreamMessage: Equatable {
@@ -417,6 +428,7 @@ public enum SimServerAPI {
 
     public enum Command: Equatable {
         case teleop(v: Double, w: Double, ttl: Double)
+        case drive(throttle: Double, steer: Double, tank: Bool, ttl: Double)   // 12.5 drivable bodies
         case goal(x: Double, y: Double, z: Double?)
         case goTo(label: String, objectID: String?, x: Double, y: Double)
         case goToLabel(String)
@@ -435,6 +447,7 @@ public enum SimServerAPI {
         public var name: String {
             switch self {
             case .teleop: return "teleop"
+            case .drive: return "drive"
             case .goal: return "goto"
             case .goTo, .goToLabel: return "goto_label"
             case .patrol: return "patrol"
@@ -484,6 +497,9 @@ public enum SimServerAPI {
         switch c {
         case .teleop(let v, let w, let ttl):
             return ["v": r(v), "w": r(w), "ttl": ttl, "owner": agentID]
+        case .drive(let th, let st, let tank, let ttl):
+            return ["drive": ["throttle": r(min(1, max(-1, th))), "steer": r(min(1, max(-1, st))), "tank": tank],
+                    "ttl": ttl, "owner": agentID]
         case .goal(let x, let y, let z):
             return ["goal": z.map { [r(x), r(y), r($0)] } ?? [r(x), r(y)], "owner": agentID]
         case .goTo(let label, let oid, let x, let y):
@@ -600,6 +616,7 @@ public enum SimServerVisual: Equatable {
     case animal(key: String, scale: Double)
     case object(key: String, scale: Double)
     case robot(scale: Double)
+    case rcCar(scale: Double)                 // 12.5: the bundled toy car scaled to the RC car's size
     case drone
     case box
 
@@ -607,6 +624,7 @@ public enum SimServerVisual: Equatable {
     public static func of(_ s: SimEntitySnap, animalKeys: Set<String>, objectKeys: Set<String>) -> SimServerVisual {
         let sc = min(2.0, max(0.1, s.scale ?? SimServerVisual.defaultScale(s)))
         if s.isDrone { return .drone }
+        if s.isRCCar { return .rcCar(scale: sc) }
         if s.isRover { return .robot(scale: sc) }
         if animalKeys.contains(s.kind) { return .animal(key: s.kind, scale: sc) }
         if objectKeys.contains(s.kind) { return .object(key: s.kind, scale: sc) }
@@ -623,13 +641,14 @@ public enum SimServerVisual: Equatable {
 public extension SimCommand {
     /// The commands the selection bar offers for a body. ONE list for the local and the server sim (10.6: the server
     /// bar had none for animals). Owner list: Go to / Roam / Stay / Flee / Follow me / Delete.
-    static func offered(role: SimKind.Role, drone: Bool = false, server: Bool) -> [SimCommand] {
+    static func offered(role: SimKind.Role, drone: Bool = false, server: Bool, drivable: Bool = false) -> [SimCommand] {
         switch role {
         case .animal:
             return server ? [.goTo, .roam, .stay, .flee, .follow, .graze, .wander, .delete] : available(for: SimKind(key: "a", role: .animal))
         case .robot:
             if drone { return [.goTo, .patrol, .stop, .delete] }
-            return server ? [.goTo, .follow, .stop, .patrol, .delete] : available(for: .robot)
+            if server { return (drivable ? [.drive] : []) + [.goTo, .follow, .stop, .patrol, .delete] }
+            return available(for: .robot)
         case .object:
             return server ? [.delete] : available(for: .block)
         }

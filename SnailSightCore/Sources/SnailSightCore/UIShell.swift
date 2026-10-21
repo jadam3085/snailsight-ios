@@ -227,14 +227,16 @@ public enum MapLayerKey: String, CaseIterable, Equatable {
 // MARK: command ring (B2)
 
 public enum RingCommand: String, CaseIterable, Equatable {
-    case goTo, follow, flee, stay, roam, delete
+    case drive, goTo, follow, flee, stay, stop, roam, delete
 
     public var title: String {
         switch self {
+        case .drive: return "Drive"
         case .goTo: return "Go to"
         case .follow: return "Follow"
         case .flee: return "Flee"
         case .stay: return "Stay"
+        case .stop: return "Stop"
         case .roam: return "Roam"
         case .delete: return "Delete"
         }
@@ -242,10 +244,12 @@ public enum RingCommand: String, CaseIterable, Equatable {
 
     public var symbol: String {
         switch self {
+        case .drive: return "gamecontroller"
         case .goTo: return "mappin.and.ellipse"
         case .follow: return "figure.walk"
         case .flee: return "hare"
         case .stay: return "hand.raised"
+        case .stop: return "stop.fill"
         case .roam: return "square.dashed"
         case .delete: return "trash"
         }
@@ -254,27 +258,24 @@ public enum RingCommand: String, CaseIterable, Equatable {
     /// The bar command it runs (one command path for ring, bar and Map).
     public var simCommand: SimCommand {
         switch self {
+        case .drive: return .drive
         case .goTo: return .goTo
         case .follow: return .follow
         case .flee: return .flee
         case .stay: return .stay
+        case .stop: return .stop
         case .roam: return .roam
         case .delete: return .delete
         }
     }
 
     /// Ring commands for a body, in ring order (clockwise from the top), from the commands it actually offers.
+    /// 12.5: drivable bodies get Drive / Go to / Follow / Stop / Delete; robots and drones show Stop (not Stay).
     public static func ring(offered: [SimCommand]) -> [RingCommand] {
-        var out: [RingCommand] = []
-        for r in RingCommand.allCases {
-            let c = r.simCommand
-            if offered.contains(c) { out.append(r); continue }
-            if r == .stay, offered.contains(.stop) { out.append(.stay) }        // robots: Stop = Stay
-        }
-        return out
+        RingCommand.allCases.filter { offered.contains($0.simCommand) }
     }
 
-    /// The command to send for a ring choice: robots / drones have Stop where animals have Stay.
+    /// The command to send for a ring choice (Stay on a body that only has Stop sends Stop).
     public static func command(_ r: RingCommand, offered: [SimCommand]) -> SimCommand {
         if r == .stay, !offered.contains(.stay), offered.contains(.stop) { return .stop }
         return r.simCommand

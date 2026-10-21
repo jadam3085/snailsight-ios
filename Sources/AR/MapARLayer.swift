@@ -460,6 +460,20 @@ final class MapARLayer {
     // MARK: P4 corrections
 
     /// Tool "Objects": a tap on a detected object opens its correction sheet. true = handled.
+    /// 12.5 Select / Inspect: a tap on a drawn house object opens its sheet; false (silently) when nothing is hit.
+    func inspectObject(_ pt: CGPoint) -> Bool {
+        guard isAligned, model.arObjects, model.drawHouse != .off, let scene = sceneID,
+              let ray = mapRay(pt), let cam = cameraMap else { return false }
+        let near = boxes.filter { hypot($0.center[0] - cam[0], $0.center[1] - cam[1]) <= Self.boxRange + 2 }
+        guard let hit = ARMapContent.pick(origin: ray.origin, direction: ray.direction, boxes: near),
+              let o = objectsDoc?.objects.first(where: { $0.id == hit.id }) else { return false }
+        model.log.event("armap_object_tap", ["id": .string(o.id), "label": .string(o.label), "m": .double(hit.distance),
+                                             "via": .string("inspect")])
+        model.arObjectEdit = ARObjectEdit(id: o.id, scene: scene, label: o.label, name: o.name ?? "",
+                                          confidence: o.confidence, manual: o.isManual)
+        return true
+    }
+
     func handleObjectTap(_ pt: CGPoint) -> Bool {
         guard isAligned, model.arObjects, model.drawHouse != .off, let scene = sceneID else {
             model.flash(isAligned ? "Turn on More ▸ House ▸ Objects" : "Objects show once LOCALIZED in the house map")

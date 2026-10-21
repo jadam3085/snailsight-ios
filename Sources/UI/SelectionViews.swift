@@ -1,5 +1,5 @@
 // SnailSight 12.0 selection (concept B2) + agent ops (concept O2) + the layers button (B1's rail as a compact sheet).
-// - CommandRingOverlay: tap a body → a ring of its commands around it on screen (Go to, Follow, Flee, Stay, Roam,
+// - CommandRingOverlay: tap a body → a ring of its commands around it on screen (Drive, Go to, Follow, Flee, Stay, Stop, Roam,
 //   Delete — whatever that body offers, SnailSightCore.RingCommand), 52 pt buttons kept on screen. The details card
 //   below stays the full command bar (every command, scale, extras), so the ring only adds reach; drag-to-trash and
 //   Spawn mode are unchanged.
@@ -72,7 +72,7 @@ struct CommandRingOverlay: View {
         if server.active, let s = server.selection, server.pending == nil, !server.droneAssistPending {
             guard let p = model.serverSim.selectedPose else { return nil }
             world = layer.toWorld(map: [p[0], p[1], p[2] + 0.15])
-            offered = SimCommand.offered(role: s.role, drone: s.drone, server: true)
+            offered = SimCommand.offered(role: s.role, drone: s.drone, server: true, drivable: s.drivable)
             title = s.title
             serverMode = true
         } else if !server.active, let s = local.selection, local.pending == nil {
@@ -101,7 +101,7 @@ struct CommandRingOverlay: View {
         if server.active, let s = server.selection, server.pending == nil, !server.droneAssistPending,
            let p = model.serverSim.selectedPose {
             at = [p[0], p[1], p[2] + 0.15]
-            offered = SimCommand.offered(role: s.role, drone: s.drone, server: true)
+            offered = SimCommand.offered(role: s.role, drone: s.drone, server: true, drivable: s.drivable)
             title = s.title
             serverMode = true
         } else if !server.active, let s = local.selection, local.pending == nil, let w = model.controller.sim.selectedWorld {
@@ -120,6 +120,7 @@ struct CommandRingOverlay: View {
     private func run(_ r: RingCommand, offered: [SimCommand]) {
         let c = RingCommand.command(r, offered: offered)
         model.log.event("ring_cmd", ["cmd": .string(c.rawValue), "server": .bool(server.active)])
+        if c == .drive { model.openDrive(); return }
         if server.active { model.serverSim.command(c) } else { model.controller.sim.command(c) }
     }
 }

@@ -25,6 +25,7 @@
 // unmapped level"); the selection line shows the storey + planner status. More ▸ Sim ▸ X-ray: bodies behind walls /
 // on another storey draw as a see-through ghost (their own animated model, unlit, no depth test) with a badge.
 import ARKit
+import Combine
 import RealityKit
 import SwiftUI
 import UIKit
@@ -38,7 +39,11 @@ struct ServerSimSelection: Equatable {
     var drone: Bool
     var animal = false
     var role: SimKind.Role = .animal
-    var symbol: String { drone ? "airplane" : rover ? "car.side" : role == .object ? "cube" : "pawprint" }
+    // 12.5 drivable bodies (robot, rc_car): the joystick drives them; rc_car sends `drive`, the robot v / w teleop
+    var drivable = false
+    var driveKind: DriveKind = .diff
+    var rcCar = false
+    var symbol: String { drone ? "airplane" : rcCar ? "car.side.fill" : rover ? "car.side" : role == .object ? "cube" : "pawprint" }
 }
 
 /// The shared sim's HUD state (its own ObservableObject: no AppModel churn at 10 Hz).
@@ -67,11 +72,14 @@ final class ServerSimClient {
     private var held: [String: [Double]] = [:]              // dropped by a drag: drawn there until the server agrees
     private var lastMessageAt: Double?
     private var teleop = TeleopSender()
+    private var driveSender = DriveSender()
     private var stick = V2.zero
     private let shaper = StickShaper()
+    private var drivingID: String?                           // the body the stick last drove (zero on reselect)
+    private var selectionSink: AnyCancellable?
     private var cmdInFlight = 0
     private var acks = SimAcks()                             // WS commands waiting for the server's ack
-    private var followers: [String: TimeInterval] = [:]      // bodies following this phone (Follow me) -> since
+    private var follow = FollowPoseTracker()                 // 12.5: bodies following this phone (Follow me)
     private var labelGoals: [String: String] = [:]           // "Go to…" labels waiting for the server's ack
     private var patrol: [[Double]] = []
     private var markers: [Entity] = []
@@ -97,7 +105,36 @@ final class ServerSimClient {
         return URLSession(configuration: c)
     }()
 
-    init(model: AppModel) { self.model = model }
+    init(model: AppModel) {
+        self.model = model
+        // 12.5: a different selection (or none) clears every overlay of the previous one (SelectionOverlays)
+        selectionSink = ui.$selection.map { $0?.id }.removeDuplicates().dropFirst()
+            .sink { [weak self] id in
+                guard let self else { return }
+                self.stopDriving()
+                self.model.selectionChanged(id.map { "server.\($0)" })
+            }
+    }
+
+    /// The overlays the previous selection left (goal markers, route ribbon).
+    func clearSelectionOverlays() {
+        clearMarkers()
+        clearPath()
+    }
+
+    /// Selection changed / joystick closed: a body still moving under the stick gets its one zero command.
+    func stopDriving() {
+        stick = .zero
+        guard let id = drivingID, tracks[id] != nil else { drivingID = nil; return }
+        drivingID = nil
+        if tracks[id]?.snap.driveKind == .ackermann {
+            send(.drive(throttle: 0, steer: 0, tank: model.driveTank, ttl: DriveSender.ttl), to: id, quiet: true)
+        } else {
+            send(.teleop(v: 0, w: 0, ttl: TeleopSender.ttl), to: id, quiet: true)
+        }
+        teleop = TeleopSender()
+        driveSender = DriveSender()
+    }
 
     private var layer: MapARLayer { model.controller.mapLayer }
     private var now: TimeInterval { Date().timeIntervalSince1970 }
@@ -166,8 +203,10 @@ final class ServerSimClient {
             model.log.event("sim_cmd", ["cmd": .string(p.cmd), "id": .string(p.id), "ack": .string("timeout"),
                                         "ref": .string(ref), "via": .string("ws")])
         }
-        if isActive, !followers.isEmpty, let cam = layer.cameraMap, let tk = task, connected {   // Follow me: my pose
-            followers = followers.filter { tracks[$0.key] != nil && t - $0.value < 1800 }
+        // Follow me: my pose ~2 Hz while anything follows this phone and it is LOCALIZED (12.5: kept through stale
+        // snapshots and reselects, FollowPoseTracker)
+        if isActive, connected, let tk = task, let cam = layer.cameraMap,
+           follow.shouldSend(now: t, alive: Set(tracks.keys), localized: layer.isAligned) {
             let d = SimServerAPI.wsAgentPose(agentID: model.agentID, x: cam[0], y: cam[1], z: cam.count > 2 ? cam[2] : 0)
             tk.send(.string(String(decoding: d, as: UTF8.self))) { _ in }
         }
@@ -245,15 +284,37 @@ final class ServerSimClient {
             lastPathDraw = t
             drawSelectedPath(now: t)
         }
-        if let s = ui.selection, s.rover {
-            let c = shaper.command(stick, profile: RobotProfile.robosnailbob)
-            if let cmd = teleop.next(v: c.v, w: c.omega, now: t) {
-                send(.teleop(v: cmd.v, w: cmd.w, ttl: cmd.ttl), to: s.id, quiet: true)
+        if let s = ui.selection, s.drivable, !model.driveHidden {
+            switch DriveRoute.make(stick: stick, kind: s.driveKind, tank: model.driveTank, robotShaper: shaper) {
+            case .teleop(let v, let w):
+                if let cmd = teleop.next(v: v, w: w, now: t) {
+                    send(.teleop(v: cmd.v, w: cmd.w, ttl: cmd.ttl), to: s.id, quiet: true)
+                    noteDriving(s.id, moving: abs(cmd.v) > 0 || abs(cmd.w) > 0)
+                }
+            case .drive(let d):
+                if let cmd = driveSender.next(d, now: t) {
+                    send(.drive(throttle: cmd.throttle, steer: cmd.steer, tank: cmd.tank, ttl: DriveSender.ttl), to: s.id,
+                         quiet: true)
+                    noteDriving(s.id, moving: !cmd.isZero)
+                }
             }
         }
     }
 
     func setStick(_ v: SIMD2<Double>) { stick = v }
+
+    private var driveLoggedAt: TimeInterval = 0
+    private func noteDriving(_ id: String, moving: Bool) {
+        if moving {
+            if drivingID != id { model.log.event("drive_start", ["id": .string(id), "kind": .string(tracks[id]?.snap.kind ?? ""),
+                                                                 "tank": .bool(model.driveTank)]) }
+            drivingID = id
+            follow.drop(id)                                   // driving it by hand ends Follow me
+        } else if drivingID == id {
+            drivingID = nil
+            model.log.event("drive_release", ["id": .string(id)])
+        }
+    }
 
     private func authorityChanged() {
         let server = authority.mode == .server
@@ -263,7 +324,7 @@ final class ServerSimClient {
             ui.selection = nil
             ui.pending = nil
             ui.droneAssistPending = false
-            followers = [:]
+            follow.dropAll()
             clearMarkers()
             clearPath()
         }
@@ -382,7 +443,7 @@ final class ServerSimClient {
                 let why = status == 409 ? "Another device is driving it"
                     : detail.map { "\(title(p.id)): \($0)" } ?? "The map server refused \(p.cmd) (\(status ?? 0))"
                 model.flash(why, seconds: detail == nil ? 2 : 4)
-                if p.cmd == "follow" { followers[p.id] = nil; refreshSelection() }
+                if p.cmd == "follow" { follow.drop(p.id); refreshSelection() }
                 if p.cmd == "place" { held[p.id] = nil }
             }
         case .error(let s):
@@ -394,6 +455,7 @@ final class ServerSimClient {
 
     private func apply(_ raw: [SimEntitySnap], full: Bool) {
         let t = now
+        for r in raw { follow.observe(r.id, behaviour: r.behaviour, now: t) }    // the server's own word, not the doc's
         let list = raw.map { $0.merged(withStatic: statics[$0.id]) }
         if let st = list.lazy.compactMap(\.t).first { clock.observe(serverTime: st, receivedAt: t) }
         let ids = Set(list.map(\.id))
@@ -402,8 +464,6 @@ final class ServerSimClient {
             if var tr = tracks[s.id] { tr.update(s, now: t); tracks[s.id] = tr } else { tracks[s.id] = RemoteTrack(s, now: t) }
             if homes[s.id] == nil { homes[s.id] = [s.pose.x, s.pose.y, s.pose.z] }
             if bodies[s.id]?.visual != visual(s) { redraw(s) }
-            // 10.8: a follow the server ended (lost / no path / another order) is no longer "following you"
-            if followers[s.id] != nil, let b = s.behaviour, b != "follow" { followers[s.id] = nil }
             noteNav(s)
         }
         if let sel = ui.selection, let tr = tracks[sel.id] {
@@ -416,7 +476,7 @@ final class ServerSimClient {
     private func noteNav(_ s: SimEntitySnap) {
         guard let n = s.nav else { navFlashed[s.id] = nil; return }
         guard n.isProblem else { navFlashed[s.id] = nil; return }
-        guard isActive, navFlashed[s.id] != n.status, ui.selection?.id == s.id || followers[s.id] != nil,
+        guard isActive, navFlashed[s.id] != n.status, ui.selection?.id == s.id || follow.followers.contains(s.id),
               n.reason != nil else { return }
         navFlashed[s.id] = n.status
         model.flash("\(title(s.id)): \(n.text)", seconds: 4)
@@ -464,6 +524,7 @@ final class ServerSimClient {
         case .animal: drawn = "model"
         case .object: drawn = "model"
         case .robot: drawn = "robot_model"
+        case .rcCar: drawn = "rc_car_model"
         case .drone: drawn = "drone"
         case .box: drawn = "box"
         }
@@ -488,9 +549,10 @@ final class ServerSimClient {
         if s.isDrone { d += String(format: " · %.1f m up", s.pose.z - ((layer.cameraMap?[2] ?? 1.4) - 1.4)) }
         if let lv = s.level { d += " · L\(lv)" }
         if let n = s.nav, !(n.status == "walking" && n.targetLevel == s.level) { d += " · \(n.text)" }
-        if followers[s.id] != nil && s.behaviour == "follow" && s.nav?.isProblem != true { d += " · following you" }
+        if follow.followers.contains(s.id) && s.behaviour == "follow" && s.nav?.isProblem != true { d += " · following you" }
         return ServerSimSelection(id: s.id, title: title(s.id), detail: d, rover: s.isRover, drone: s.isDrone,
-                                  animal: s.role == .animal, role: s.role)
+                                  animal: s.role == .animal, role: s.role, drivable: s.isDrivable, driveKind: s.driveKind,
+                                  rcCar: s.isRCCar)
     }
 
     // MARK: X-ray + path preview (10.8, API §5.9.11)
@@ -575,6 +637,7 @@ final class ServerSimClient {
             layer.simNode.addChild(e)
             pathEntity = e
         }
+        model.overlayDrawn(.pathPreview)
     }
 
     private func clearPath() {
@@ -588,8 +651,10 @@ final class ServerSimClient {
     private var pickBoxes: [ARBoxItem] {
         tracks.values.map { tr in
             let p = tr.pose(now: now), s = tr.snap
+            let k = s.scale ?? 1                                 // 12.5: fallbacks at the body's sim scale
+            let car = [RCCar.sizeM[0] * k, RCCar.sizeM[2] * k, RCCar.sizeM[1] * k]
             let size: [Double] = (s.dims?.count == 3 ? s.dims : nil)
-                ?? (s.isDrone ? [0.5, 0.5, 0.2] : s.isRover ? [0.82, 0.62, 0.6] : [1.0, 0.4, 1.2])
+                ?? (s.isDrone ? [0.5, 0.5, 0.2] : s.isRCCar ? car : s.isRover ? [0.82 * k, 0.62 * k, 0.6 * k] : [1.0, 0.4, 1.2])
             return ARBoxItem(id: s.id, label: s.kind, center: [p.x, p.y, p.z + size[2] / 2], size: size, yaw: p.theta,
                              movable: true, confidence: 1)
         }
@@ -597,8 +662,9 @@ final class ServerSimClient {
 
     // MARK: taps + commands
 
-    /// true = consumed (in server mode every tap is ours: the local bodies are hidden).
-    func handleTap(_ pt: CGPoint, arView: ARView) -> Bool {
+    /// true = consumed (in server mode every tap is ours: the local bodies are hidden). 12.5 `passThrough` (Select /
+    /// Inspect): a tap that hits no body and clears no selection is left to the caller (a measure point).
+    func handleTap(_ pt: CGPoint, arView: ARView, passThrough: Bool = false) -> Bool {
         guard isActive else { return false }
         if ui.droneAssistPending {
             guard let g = floorPoint(pt, arView: arView) else { model.flash("Aim at the floor"); return true }
@@ -623,7 +689,7 @@ final class ServerSimClient {
                 held[s.id] = g
                 send(.place(x: g[0], y: g[1], z: g[2]), to: s.id)
             default:                                            // Go to
-                followers[s.id] = nil
+                follow.drop(s.id)
                 send(.goal(x: g[0], y: g[1], z: g[2]), to: s.id)
                 addMarker(g)
             }
@@ -638,9 +704,11 @@ final class ServerSimClient {
             model.log.event("sim_select", ["id": .string(id), "kind": .string(tr.snap.kind), "mode": .string("server"),
                                            "cleared": .bool(again)])
         } else {
+            let had = ui.selection != nil
             model.log.event("sim_tap", ["hit": .bool(false), "mode": .string("server"), "bodies": .int(tracks.count),
-                                        "selected": .bool(ui.selection != nil)])
+                                        "selected": .bool(had)])
             ui.selection = nil
+            if passThrough && !had { return false }
         }
         return true
     }
@@ -716,13 +784,14 @@ final class ServerSimClient {
     /// The ONE bar's commands (SimBarView), all sent to the server (WS + ack).
     func command(_ c: SimCommand) {
         guard let s = ui.selection else { return }
+        if c == .drive { model.openDrive(); return }
         if c.needsPoint { startPending(c); return }
         if c == .delete { despawnSelected(); return }
         guard let sc = c.serverCommand(agentID: model.agentID, phone: layer.cameraMap) else {
             model.flash("\(c.label): not available here", seconds: 1.5)
             return
         }
-        if c == .follow { followers[s.id] = now } else { followers[s.id] = nil }
+        if c == .follow { follow.follow(s.id, now: now) } else { follow.drop(s.id) }
         send(sc, to: s.id)
         if c == .follow { model.flash("\(s.title) follows you", seconds: 1.5) }
     }
@@ -857,7 +926,7 @@ final class ServerSimClient {
     /// Delete for everyone (authoritative + tombstoned on the server); gone here at once.
     func despawn(_ id: String, via: String) {
         model.log.event("sim_delete_request", ["id": .string(id), "via": .string(via), "mode": .string("server")])
-        followers[id] = nil
+        follow.drop(id)
         if ui.selection?.id == id { ui.selection = nil }
         forgetLocally(id)
         if connected, let tk = task {
@@ -902,6 +971,7 @@ final class ServerSimClient {
         e.position = SIMD3<Float>(Float(p[0]), Float(p[1]), Float(p.count > 2 ? p[2] : 0) + 0.02)
         layer.simNode.addChild(e)
         markers.append(e)
+        model.overlayDrawn(.goalMarkers)
     }
 
     private func clearMarkers() {
@@ -921,7 +991,7 @@ struct ServerSimBar: View {
         SimBarView(prompt: prompt, pending: ui.pending, patrolPoints: ui.patrolPoints,
                    selection: ui.selection.map { s in
                        SimBarModel(title: s.title, detail: s.detail, symbol: s.symbol,
-                                   commands: SimCommand.offered(role: s.role, drone: s.drone, server: true),
+                                   commands: SimCommand.offered(role: s.role, drone: s.drone, server: true, drivable: s.drivable),
                                    extras: extras(s))
                    },
                    hint: [ui.status.isEmpty ? "Server sim" : ui.status, "tap a body"].joined(separator: " · "),
@@ -956,7 +1026,7 @@ struct ServerSimBar: View {
     private func extras(_ s: ServerSimSelection) -> [SimBarExtra] {
         guard s.rover || s.drone else { return [] }
         var x = [SimBarExtra(id: "goto_label", symbol: "magnifyingglass", label: "Go to…")]
-        if s.rover && !s.drone {
+        if s.rover && !s.drone && !s.rcCar {
             x.append(SimBarExtra(id: "deter", symbol: "hare", label: "Deter deer"))
             x.append(SimBarExtra(id: "drone_assist", symbol: "airplane.departure", label: "Drone assist"))
         }
@@ -1023,6 +1093,12 @@ extension ServerSimClient {
         }.sorted { $0.id < $1.id }
     }
 
+    /// 12.5: the selected body's sim scale + kind + scaled dims (robot path tool footprint, sim nav query).
+    var selectedBody: (scale: Double?, kind: String, dims: [Double]?)? {
+        guard isActive, let id = ui.selection?.id, let s = tracks[id]?.snap else { return nil }
+        return (s.scale, s.kind, s.dims)
+    }
+
     /// The selected body's pose in the map frame.
     var selectedPose: [Double]? {
         guard isActive, let id = ui.selection?.id, let tr = tracks[id] else { return nil }
@@ -1065,7 +1141,7 @@ extension ServerSimClient {
     /// Map tap: the selected body goes to this map point (Go to), or is put there (Move pending).
     func goTo(mapPoint g: [Double]) {
         guard let s = ui.selection, g.count >= 2 else { return }
-        followers[s.id] = nil
+        follow.drop(s.id)
         if ui.pending == .move {
             send(.place(x: g[0], y: g[1], z: g.count > 2 ? g[2] : nil), to: s.id)
         } else {

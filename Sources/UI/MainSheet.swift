@@ -451,6 +451,7 @@ private struct CameraCheckToggle: View {
 enum ToolIcons {
     static func icon(_ t: ToolMode) -> String {
         switch t {
+        case .select: return "hand.point.up.left"
         case .cube: return "cube"
         case .measure: return "ruler"
         case .ruler: return "lines.measurement.horizontal"

@@ -1,9 +1,10 @@
 import SwiftUI
 
-/// On-screen thumb stick for the sim robot: output (x right, y up) in the unit disc; releases to zero.
+/// On-screen thumb stick for the sim robot and (12.5) the RC car: output (x right, y up) in the unit disc; releases to zero.
 /// Shaping (deadzone, expo) and the robot's real limits are applied in SnailSightCore (StickShaper, DiffDrive).
 struct JoystickView: View {
     var size: CGFloat = 136
+    var label = "Robot joystick"
     var onChange: (SIMD2<Double>) -> Void
     @State private var knob: CGSize = .zero
 
@@ -33,6 +34,6 @@ struct JoystickView: View {
                     onChange(.zero)
                 }
         )
-        .accessibilityLabel("Robot joystick")
+        .accessibilityLabel(label)
     }
 }

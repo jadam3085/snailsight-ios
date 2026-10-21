@@ -3,11 +3,25 @@ import UIKit
 import SnailSightCore
 
 enum ToolMode: String, CaseIterable, Identifiable {
+    // 12.5: Select / Inspect is the launch default (owner: accidental cubes); Cube only when picked, never remembered
+    case select = "Select / Inspect"
     case cube = "Cube", measure = "Measure", ruler = "1 m ruler"
     case objects = "Objects", robotPath = "Robot path"           // 10.1 AR 1:1 (Sources/AR)
     var id: String { rawValue }
+    var kind: TapToolKind {
+        switch self {
+        case .select: return .select
+        case .cube: return .cube
+        case .measure: return .measure
+        case .ruler: return .ruler
+        case .objects: return .objects
+        case .robotPath: return .robotPath
+        }
+    }
+    init(_ k: TapToolKind) { self = ToolMode.allCases.first { $0.kind == k } ?? .select }
     var help: String {
         switch self {
+        case .select: return "Tap a body to command it · tap a surface for a measure point"
         case .cube: return "Tap a surface to drop a 10 cm cube"
         case .measure: return "Tap point A, then point B"
         case .ruler: return "Tap where the 0 end goes; it points away from you"
@@ -25,7 +39,20 @@ enum MeshStyle: String, CaseIterable, Identifiable {
 /// UI state. Mutated on the main thread only (ARSession delegate callbacks arrive on main; network actors report
 /// through DispatchQueue.main).
 final class AppModel: ObservableObject {
-    @Published var tool: ToolMode = .cube
+    /// 12.5: every launch starts on Select / Inspect (TapToolState); not persisted.
+    private(set) var toolState = TapToolState()
+    @Published var tool: ToolMode = ToolMode(TapToolState.launchDefault) {
+        didSet {
+            guard tool != oldValue else { return }
+            toolState.pick(tool.kind)
+            log.event("tap_tool", ["tool": .string(tool.kind.rawValue), "from": .string(oldValue.kind.rawValue),
+                                   "explicit": .bool(toolState.explicitPick)])
+            if tool != .robotPath { terrainLayer.clearPath() }       // its footprint + path belong to the tool
+        }
+    }
+    /// 12.5 drive: the joystick for the selected drivable body (robot / rc_car) — hidden with its ✕ until reselected.
+    @Published var driveHidden = false
+    @Published var driveTank = false
     @Published var meshStyle: MeshStyle = .wire { didSet { controller.applyRenderSettings() } }
     @Published var occlusion = true { didSet { controller.applyRenderSettings() } }
     @Published var peopleOcclusion = true { didSet { controller.rerunConfiguration() } }
@@ -83,6 +110,9 @@ final class AppModel: ObservableObject {
         guard let k = spawnPick else { showSpawn = true; return }
         if serverSim.isActive {
             serverSim.spawn(k == "robot" ? "robot" : k, arView: controller.arView, at: pt)
+        } else if k == RCCar.key {
+            flash("The RC car drives in the shared sim: needs the map server and LOCALIZED", seconds: 3)
+            return
         } else if k == "robot" {
             controller.sim.spawnRobot(at: pt)
         } else if let it = controller.sim.catalog.item(k) {
@@ -688,7 +718,13 @@ final class AppModel: ObservableObject {
     }
 
     /// 9.9: "Deleted … [Undo]" for 5 s (the deletion itself is kept in ARSessionController's UndoBuffer).
-    func showUndo(_ text: String, seconds: Double = 5) {
+    /// 12.5: what the Undo button runs (nil = undo the last deletion, the 9.9 behaviour).
+    private(set) var undoAction: (() -> Void)?
+    private(set) var undoIcon = "trash"
+
+    func showUndo(_ text: String, seconds: Double = 5, icon: String = "trash", action: (() -> Void)? = nil) {
+        undoAction = action
+        undoIcon = icon
         undoText = text
         undoWork?.cancel()
         let w = DispatchWorkItem { [weak self] in self?.undoText = nil }
@@ -699,6 +735,39 @@ final class AppModel: ObservableObject {
     func hideUndo() {
         undoWork?.cancel()
         undoText = nil
+        undoAction = nil
+    }
+
+    func runUndo() {
+        if let a = undoAction { hideUndo(); a() } else { controller.undoDeletion() }
+    }
+
+    /// 12.5 selection-scoped overlays (owner on 12.4: the robot's path overlay stayed when the chicken was selected).
+    private(set) var overlays = SelectionOverlays()
+
+    /// Any selection change (server "server.<id>", local "local.<id>", nil = none): clear what the previous one drew.
+    func selectionChanged(_ id: String?) {
+        let gone = overlays.select(id)
+        driveHidden = false
+        guard !gone.isEmpty else { return }
+        if gone.contains(.robotPathResult) { terrainLayer.clearPath() }
+        if gone.contains(.goalMarkers) || gone.contains(.pathPreview) {
+            serverSim.clearSelectionOverlays()
+            controller.sim.clearSelectionMarkers()
+        }
+        log.event("selection_overlays", ["to": .string(id ?? ""), "cleared": .string(gone.map(\.rawValue).sorted().joined(separator: ","))])
+    }
+
+    /// An overlay was drawn for whatever is selected right now.
+    func overlayDrawn(_ o: SelectionOverlay) { overlays.drew(o, for: overlays.selected) }
+
+    /// 12.5 Drive (ring / bar) on a drivable body: show the joystick, out of the sheet's way.
+    func openDrive() {
+        driveHidden = false
+        sheetDetent = .collapsed
+        log.event("drive_open", ["tank": .bool(driveTank)])
+        flash(driveTank ? "Drive: stick up = go, left / right = turn (tank)" : "Drive: stick up = throttle, left / right = steer",
+              seconds: 2)
     }
 
     func flash(_ text: String, seconds: Double = 2.5) {

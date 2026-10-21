@@ -291,3 +291,25 @@ I see the 3d generated world").
   makes coming back cheap), no rooms/objects docs (unless X-ray needs the scene), no terrain grids, and the live
   downlink only runs for agents. Core: `ViewPresets.swift` (LayerSnapshot, ViewPresetState, WorldGate) + 8 tests.
 - Logs: `layers_preset` (preset + the applied toggles), `world_toggle` (on, preset, house, mesh_live).
+
+**12.5 (Drive the RC car + no accidental cubes)**: owner 2026-10-20 ("If I select a RC car, let me control it like I do
+the robot"; "Don't let the cube be my default when I click on the screen … a measure point").
+- **RC car** (server catalog `rc_car`, group Vehicles, API §5.9.10 drivable bodies): Spawn ▸ Robot · Vehicles ▸ RC car
+  (shared sim). Drawn with the bundled Kenney toy car stretched to 0.45 × 0.16 × 0.25 m at the body's sim scale. The same
+  joystick as the robot: stick up/down = throttle, left/right = steer (+ = right), WS `cmd` `drive {throttle, steer,
+  tank}` at 10 Hz, ttl 0.5, one zero on release (`DriveStick`, `DriveSender`, `DriveRoute`); a **Tank** toggle sends
+  `tank: true` (robot-like turning). The robot keeps its v / w teleop. Drivable = catalog `drivable`, else kind robot /
+  rc_car / sim rovers. Ring for drivable bodies: Drive · Go to · Follow · Stop · Delete (Drive opens the stick; its ✕
+  hides it until the next selection). 12.4 already decoded `rc_car` (kind is free text, `cat: robot`), drawing it as a
+  RobosnailBob model and driving it through legacy v / w.
+- **Tap tool**: every launch starts on **Select / Inspect** (never persisted). A tap selects a body or a house object;
+  otherwise it drops a temporary **measure point** (distance from the phone, height above the floor, storey; a second
+  point shows A→B; both fade 10 s after the last tap; nothing saved). Cubes only with the Cube tool picked, and each new
+  cube shows an **Undo** toast. Core `TapTool.swift` (TapToolState, MeasurePoints).
+- 12.4 screenshot fixes: a new selection (or none) clears every overlay the previous one drew (Robot path footprint +
+  dotted path, goal markers, route ribbon: `SelectionOverlays`); the Robot path footprint is the body's own (server dims,
+  else 0.82 × 0.62 × sim scale: 0.41 × 0.31 m at 50 %, was always 0.82 × 0.62) and its colour comes from
+  `/sim/nav/query?scale&kind` when the shared sim runs; Follow me keeps sending `agent_pose` at 2 Hz while localized
+  (12.4 dropped the follower on the snapshot already in flight or on a stale entity-doc behaviour: `FollowPoseTracker`).
+- Logs: `tap_tool`, `measure_point`, `cube_undo`, `drive_open`, `drive_start` / `drive_release`, `drive_tank`,
+  `selection_overlays`; `terrain_path` gains scale / kind / footprint_m / sim_fits.

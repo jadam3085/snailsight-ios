@@ -62,6 +62,8 @@ public enum SimCommand: String, CaseIterable, Equatable {
     case move, rotateLeft, rotateRight, duplicate, delete
     // agents
     case goTo, follow, stop, patrol
+    // 12.5 drivable bodies (robot, rc_car): opens the joystick
+    case drive
     // animals
     case flee, graze, stay, wander
     // animals, P2a: live in the room they were put in
@@ -84,6 +86,7 @@ public enum SimCommand: String, CaseIterable, Equatable {
         case .wander: return "Wander"
         case .roam: return "Roam room"
         case .pace: return "Pace here"
+        case .drive: return "Drive"
         }
     }
 
@@ -104,6 +107,7 @@ public enum SimCommand: String, CaseIterable, Equatable {
         case .wander: return "shuffle"
         case .roam: return "square.dashed"
         case .pace: return "arrow.triangle.2.circlepath"
+        case .drive: return "gamecontroller"
         }
     }
 
@@ -112,7 +116,7 @@ public enum SimCommand: String, CaseIterable, Equatable {
 
     public static func available(for kind: SimKind) -> [SimCommand] {
         switch kind.role {
-        case .robot: return [.goTo, .follow, .stop, .patrol, .move, .rotateLeft, .rotateRight, .delete]
+        case .robot: return [.drive, .goTo, .follow, .stop, .patrol, .move, .rotateLeft, .rotateRight, .delete]
         case .animal:
             return [.pace, .roam, .goTo, .follow, .flee, .graze, .stay, .wander, .move, .rotateLeft, .rotateRight,
                     .duplicate, .delete]

@@ -340,6 +340,8 @@ final class SimController: NSObject, UIGestureRecognizerDelegate {
 
     /// The local robot's floor point in ARKit world (Robot path starts there).
     var robotWorldPosition: SIMD3<Float>? { robot.map { SimFrame.world($0.position, y: $0.floorY) } }
+    /// 12.5: the local sim robot's effective scale (robot path tool footprint), nil = no robot.
+    var robotScale: Double? { robot?.scale }
 
     /// "Clear sim": everything goes, including the anchors (the next save of the place has no animals).
     func clear() {
@@ -1663,6 +1665,7 @@ final class SimController: NSObject, UIGestureRecognizerDelegate {
 
     private func select(_ id: Int?) {
         if ui.pending != nil { cancelPending() }
+        if id != ui.selection?.id { model.selectionChanged(id.map { "local.\($0)" }) }   // 12.5 selection overlays
         guard let id, let i = info(id) else {
             if let old = ui.selection { model.log.event("sim_select", ["id": .int(old.id), "cleared": .bool(true)]) }
             ui.selection = nil
@@ -1770,6 +1773,7 @@ final class SimController: NSObject, UIGestureRecognizerDelegate {
 
     func command(_ c: SimCommand) {
         guard let sel = ui.selection else { return }
+        if c == .drive { model.openDrive(); return }        // 12.5: the joystick (HUD SimArea)
         if c.needsPoint {
             ui.pending = c
             patrolPts = []
@@ -1813,7 +1817,7 @@ final class SimController: NSObject, UIGestureRecognizerDelegate {
                 showHome(sel.id)
             }
             clearMarkers()
-        case .move, .goTo, .patrol: break
+        case .move, .goTo, .patrol, .drive: break
         }
         model.log.event("sim_cmd", ev)
         if c != .follow && c != .stop && !sel.kind.isObject { onEntitiesChanged?() }
@@ -2222,7 +2226,11 @@ final class SimController: NSObject, UIGestureRecognizerDelegate {
         e.position = p
         root.addChild(e)
         markers.append(e)
+        model.overlayDrawn(.goalMarkers)
     }
+
+    /// 12.5: another body (or none) selected: the previous selection's goal / patrol markers go.
+    func clearSelectionMarkers() { clearMarkers() }
 
     private func setMarkers(_ pts: [SIMD3<Float>]) {
         clearMarkers()
