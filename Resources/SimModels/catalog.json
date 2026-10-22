@@ -1,6 +1,6 @@
 {
  "version": 1,
- "built": "2026-10-22T11:27:53Z",
+ "built": "2026-10-22T11:34:29Z",
  "jam_commit": "bdce326b2d7eee85524c08c751faf4804d453f3d",
  "items": [
   {
@@ -1407,7 +1407,7 @@
    "group": "Helix lab",
    "symbol": "figure.stand",
    "nominal": {
-    "height_m": 1.7
+    "height_m": 1.553
    },
    "behaviour": {
     "calm": "stopgo",
@@ -1542,7 +1542,7 @@
    "group": "Helix lab",
    "symbol": "figure.stand",
    "nominal": {
-    "height_m": 1.7
+    "height_m": 1.631
    },
    "behaviour": {
     "calm": "stopgo",
@@ -1722,7 +1722,7 @@
    "group": "Helix lab",
    "symbol": "figure.stand",
    "nominal": {
-    "height_m": 0.9
+    "height_m": 0.87
    },
    "behaviour": {
     "calm": "stopgo",
