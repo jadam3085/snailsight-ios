@@ -47,6 +47,7 @@ The licence texts as shipped with each pack are in `licenses/` (Xcode copies the
 | plant | `plant.usdz` | `pottedPlant.glb` | Kenney, *Kenney Furniture Kit (pottedPlant)*, https://kenney.nl/assets/furniture-kit | CC0-1.0 (`licenses/kenney-furniture-kit.txt`) | static |
 | chair | `chair.usdz` | `chair.glb` | Kenney, *Kenney Furniture Kit (chair)*, https://kenney.nl/assets/furniture-kit | CC0-1.0 (`licenses/kenney-furniture-kit.txt`) | static |
 | stool | `stool.usdz` | `stoolBar.glb` | Kenney, *Kenney Furniture Kit (stoolBar)*, https://kenney.nl/assets/furniture-kit | CC0-1.0 (`licenses/kenney-furniture-kit.txt`) | static |
+| helix | `helix_idle.usdz`, `helix_walk.usdz`, `helix_run.usdz`, `helix_eat.usdz` | `chibi_mechabot_fem_111_hq_full.glb` | Jon / Helix forge, *Helix lab character chibi_mechabot_fem_111 (helix-avatar forge: TRELLIS.2 + MIA rig, Mixamo clips)*, https://firefly.taild541c2.ts.net/helixrig | owner-made (Jon); Mixamo clips under the Mixamo licence (`licenses/data.txt`) | `idle_look` → idle, `Walking` → walk, `Running` → run, `Looking_Around` → eat |
 
 Attribution (CC-BY 4.0): "Fox" rigging and animation by tomkranis, https://sketchfab.com/tomkranis, licensed under
 CC BY 4.0 (https://creativecommons.org/licenses/by/4.0/). Low-poly fox model by PixelMannen (CC0). glTF conversion
