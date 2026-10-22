@@ -1,6 +1,6 @@
 {
  "version": 1,
- "built": "2026-10-14T23:10:04Z",
+ "built": "2026-10-22T03:17:20Z",
  "jam_commit": "bdce326b2d7eee85524c08c751faf4804d453f3d",
  "items": [
   {
@@ -1399,6 +1399,51 @@
    ],
    "tris": 176,
    "thumb": "stool.png"
+  },
+  {
+   "key": "helix",
+   "label": "Helix (chibi mecha-bot)",
+   "category": "animal",
+   "group": "Helix",
+   "symbol": "figure.stand",
+   "nominal": {
+    "height_m": 0.9
+   },
+   "behaviour": {
+    "calm": "stopgo",
+    "walk_speed": 0.7,
+    "flee_speed": 2.0,
+    "scare_person": 0.0,
+    "scare_robot": 1.2,
+    "flee_dist": 1.5,
+    "run_above": 1.0
+   },
+   "source": {
+    "pack": "Helix lab character chibi_mechabot_fem_111 (helix-avatar forge: TRELLIS.2 + MIA rig, Mixamo clips)",
+    "path": "data/models/helix/chibi_mechabot_fem_111_hq_full.glb",
+    "url": "https://firefly.taild541c2.ts.net/helixrig",
+    "license": "owner-made (Jon); Mixamo clips under the Mixamo licence",
+    "author": "Jon / Helix forge"
+   },
+   "files": {
+    "idle": "helix_idle.usdz",
+    "walk": "helix_walk.usdz",
+    "run": "helix_run.usdz",
+    "eat": "helix_eat.usdz"
+   },
+   "clip_actions": {
+    "idle": "idle_look",
+    "walk": "Walking",
+    "run": "Running",
+    "eat": "Looking_Around"
+   },
+   "size_m": [
+    0.223,
+    0.87,
+    0.305
+   ],
+   "tris": 19400,
+   "thumb": "helix.png"
   }
  ]
 }
