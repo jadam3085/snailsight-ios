@@ -156,9 +156,12 @@ final class ServerSimBody {
     }
 
     /// Place + animate at local time `now` (server time `serverNow`): the server's clip, at the server's phase.
-    func render(pose p: SimPose, snap s: SimEntitySnap, serverNow: Double?, now: Double) {
+    /// 12.7 `turret`: the interpolated head (body-relative yaw / pitch, rad) of a turreted body (RobosnailBob).
+    func render(pose p: SimPose, snap s: SimEntitySnap, serverNow: Double?, now: Double,
+                turret: (yaw: Double, pitch: Double)? = nil) {
         root.position = SIMD3<Float>(Float(p.x), Float(p.y), Float(p.z))
         root.orientation = simd_quatf(angle: Float(p.theta), axis: SIMD3<Float>(0, 0, 1))
+        if let r = robot, let t = turret { r.setTurret(yaw: t.yaw, pitch: t.pitch) }
         guard !rig.isEmpty, let key = SimSharedClip.key(s.serverClip, available: rig.available) else { return }
         rig.show(key, transition: 0.2)
         rig.lockPhase(clipT0: s.clipT0, rate: s.clipRate, serverNow: serverNow, now: now)

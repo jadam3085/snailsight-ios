@@ -57,6 +57,8 @@ final class ServerSimUI: ObservableObject {
     @Published var showGoToLabel = false
     /// 12.0 O2: what the obstacle sensor / planner just said about the selected drone or rover.
     @Published var opsBanner: ObstacleBanner?
+    /// 12.7: another controller holds the selected body's lease ("portal (cop.snail)"); nil = free or mine.
+    @Published var otherDriver: String?
 }
 
 final class ServerSimClient {
@@ -80,6 +82,10 @@ final class ServerSimClient {
     private var cmdInFlight = 0
     private var acks = SimAcks()                             // WS commands waiting for the server's ack
     private var follow = FollowPoseTracker()                 // 12.5: bodies following this phone (Follow me)
+    private(set) var leases = LeaseTracker()                 // 12.7: who else drives what (API §5.9.10 lease)
+    private var turrets: [String: TurretTrack] = [:]         // 12.7: interpolated turret head per body
+    private var hiddenBodies: Set<String> = []               // 12.7 FPV: the driven body is not drawn (camera inside)
+    private var aimLine: ModelEntity?                        // 12.7 AR: where the driven turret points
     private var labelGoals: [String: String] = [:]           // "Go to…" labels waiting for the server's ack
     private var patrol: [[Double]] = []
     private var markers: [Entity] = []
@@ -263,7 +269,10 @@ final class ServerSimClient {
 
     /// Every AR frame: dead-reckoned poses + teleop.
     func frame() {
-        guard isActive else { return }
+        guard isActive else {
+            if model.drive.active { model.drive.frame(now: now) }      // 12.7: the local sim robot in drive mode
+            return
+        }
         let t = now
         let serverNow = clock.serverNow(local: t)
         for (id, tr) in tracks {
@@ -274,8 +283,11 @@ final class ServerSimClient {
                 if hypot(tr.snap.pose.x - q[0], tr.snap.pose.y - q[1]) < 0.3 { held[id] = nil }
                 else { p.x = q[0]; p.y = q[1]; p.z = q[2] }
             }
-            b.render(pose: p, snap: tr.snap, serverNow: serverNow, now: t)
+            b.render(pose: p, snap: tr.snap, serverNow: serverNow, now: t, turret: turretValue(id, now: t))
+            let hide = hiddenBodies.contains(id)
+            if b.root.isEnabled == hide { b.root.isEnabled = !hide }
         }
+        updateAimLine(now: t)
         if t - lastXRay >= 0.2 {                                 // 5 Hz: who is hidden, ghosts, badges
             lastXRay = t
             updateXRay(now: t)
@@ -284,7 +296,9 @@ final class ServerSimClient {
             lastPathDraw = t
             drawSelectedPath(now: t)
         }
-        if let s = ui.selection, s.drivable, !model.driveHidden {
+        if model.drive.active {                                 // 12.7 drive mode: twin sticks (DriveController)
+            model.drive.frame(now: t)
+        } else if let s = ui.selection, s.drivable, !model.driveHidden {
             switch DriveRoute.make(stick: stick, kind: s.driveKind, tank: model.driveTank, robotShaper: shaper) {
             case .teleop(let v, let w):
                 if let cmd = teleop.next(v: v, w: w, now: t) {
@@ -327,6 +341,7 @@ final class ServerSimClient {
             follow.dropAll()
             clearMarkers()
             clearPath()
+            if model.drive.active, !(model.drive.bodyID ?? "").hasPrefix("local.") { model.drive.bodyGone() }   // 12.7
         }
         model.log.event("sim_authority", ["mode": .string(authority.mode.rawValue), "reason": .string(authority.reason),
                                           "bodies": .int(tracks.count)])
@@ -402,6 +417,8 @@ final class ServerSimClient {
 
     private func handle(_ d: Data) {
         guard let m = SimStreamMessage.parse(d) else { return }
+        if case .lease = m, let e = SimLeaseEvent.parse(d) { leaseEvent(e); lastMessageAt = now; return }
+        if case .ack(_, false, 409?, _) = m, let r = LeaseHolder.refusal(d), let id = r.id { leaseRefused(id, r.holder) }
         lastMessageAt = now
         switch m {
         case .snapshot(_, let list, let full):
@@ -425,10 +442,8 @@ final class ServerSimClient {
             if isActive, let text, !text.isEmpty { model.flash(text, seconds: 2) }
             else if isActive, kind == "arrive" || kind == "arrived" { model.flash("\(title(id ?? "")) arrived", seconds: 1.5) }
             else if isActive, kind == "goal_failed" { model.flash("\(title(id ?? "")) can't get there", seconds: 2) }
-        case .lease(let id, let owner, let granted):
-            if granted == false, owner != model.agentID, ui.selection?.id == id {
-                model.flash("\(title(id)) is driven by \(owner ?? "another device")", seconds: 2)
-            }
+        case .lease:
+            break                                               // SimLeaseEvent above (12.7)
         case .ack(let ref, let ok, let status, let detail):
             guard let p = acks.resolve(ref) else { break }
             var ev: [String: LogValue] = ["cmd": .string(p.cmd), "id": .string(p.id), "ack": .string(ok ? "ok" : "refused"),
@@ -440,7 +455,7 @@ final class ServerSimClient {
                 if ok { model.flash("\(title(p.id)) → \(l)", seconds: 2) } else { goToLocally(label: l, id: p.id) }
             } else if !ok {
                 // 10.8: the server says WHY (no path / unmapped level / no free floor …): show it
-                let why = status == 409 ? "Another device is driving it"
+                let why = status == 409 ? "\(title(p.id)) is driven by \(leases.drivenByOther(p.id) ?? "another device")"
                     : detail.map { "\(title(p.id)): \($0)" } ?? "The map server refused \(p.cmd) (\(status ?? 0))"
                 model.flash(why, seconds: detail == nil ? 2 : 4)
                 if p.cmd == "follow" { follow.drop(p.id); refreshSelection() }
@@ -463,6 +478,11 @@ final class ServerSimClient {
         for s in list {
             if var tr = tracks[s.id] { tr.update(s, now: t); tracks[s.id] = tr } else { tracks[s.id] = RemoteTrack(s, now: t) }
             if homes[s.id] == nil { homes[s.id] = [s.pose.x, s.pose.y, s.pose.z] }
+            if let tu = s.turret {
+                let spec = s.turretSpec ?? .robosnailbob
+                if var tt = turrets[s.id] { tt.update(yaw: tu.yaw, pitch: tu.pitch, now: t, spec: spec); turrets[s.id] = tt }
+                else { turrets[s.id] = TurretTrack(yaw: tu.yaw, pitch: tu.pitch, now: t) }
+            }
             if bodies[s.id]?.visual != visual(s) { redraw(s) }
             noteNav(s)
         }
@@ -491,6 +511,8 @@ final class ServerSimClient {
         occluded[id] = nil
         navFlashed[id] = nil
         tracks[id] = nil
+        turrets[id] = nil
+        leases.forget(id)
         bodies[id]?.remove()
         bodies[id] = nil
         statics[id] = nil
@@ -533,7 +555,8 @@ final class ServerSimClient {
         layer.simNode.addChild(b.root)
         bodies[s.id] = b
         if let tr = tracks[s.id] {
-            b.render(pose: tr.pose(now: now), snap: tr.snap, serverNow: clock.serverNow(local: now), now: now)
+            b.render(pose: tr.pose(now: now), snap: tr.snap, serverNow: clock.serverNow(local: now), now: now,
+                     turret: turretValue(s.id, now: now))
         }
     }
 
@@ -861,10 +884,11 @@ final class ServerSimClient {
 
     /// 10.6: commands go over the sim WebSocket (the server acks the ref: sim_cmd {cmd, id, ack}); REST only when the
     /// socket is down or the caller needs the result (`done`).
-    private func send(_ c: SimServerAPI.Command, to id: String, quiet: Bool = false, done: ((Bool) -> Void)? = nil) {
+    private func send(_ c: SimServerAPI.Command, to id: String, quiet: Bool = false, force: Bool = false,
+                      done: ((Bool) -> Void)? = nil) {
         if done == nil, connected, let tk = task {
             let ref: String? = quiet ? nil : acks.register(cmd: c.name, id: id, now: now)
-            let d = SimServerAPI.wsCommand(c, id: id, agentID: model.agentID, ref: ref)
+            let d = SimServerAPI.wsCommand(c, id: id, agentID: model.agentID, ref: ref, force: force)
             tk.send(.string(String(decoding: d, as: UTF8.self))) { [weak self] err in
                 guard let err else { return }
                 DispatchQueue.main.async {
@@ -877,7 +901,7 @@ final class ServerSimClient {
         guard cmdInFlight < 3 else { done?(false); return }
         cmdInFlight += 1
         let link = model.link!, path = SimServerAPI.cmdPath(map: mapID, id: id)
-        let body = SimServerAPI.body(c, agentID: model.agentID)
+        let body = SimServerAPI.body(c, agentID: model.agentID, force: force)
         Task { [weak self] in
             let r = try? await link.request("POST", path, body: body, timeout: 5)
             await MainActor.run {
@@ -889,7 +913,11 @@ final class ServerSimClient {
                                                      "ack": .string((200..<300).contains(st) ? "ok" : "refused"),
                                                      "status": .int(st)])
                 }
-                if st == 409 { self.model.flash("Another device is driving it", seconds: 2) }
+                if st == 409 {                                  // FastAPI: {"detail": {detail, by, holder, until}}
+                    let d = (r.map { JSON.object($0.0) }?["detail"] as? [String: Any]) ?? [:]
+                    self.leaseRefused(id, LeaseHolder(by: d["by"] as? String, holder: d["holder"] as? String,
+                                                      until: (d["until"] as? NSNumber)?.doubleValue))
+                }
                 else if !quiet && !(200..<300).contains(st) { self.model.flash("The map server refused (\(st))", seconds: 2) }
                 done?((200..<300).contains(st))
             }
@@ -1177,5 +1205,131 @@ extension ServerSimClient {
             send(.goal(x: g[0], y: g[1], z: g.count > 2 ? g[2] : nil), to: s.id)
         }
         model.flash("\(s.title) → explore the gap", seconds: 2)
+    }
+}
+
+// MARK: - 12.7 drive mode: twin sticks, turret, controller lease, FPV feed
+
+/// The driven body as drive mode / FPV need it (map frame, interpolated now).
+struct DrivenBody {
+    var id: String
+    var title: String
+    var kind: String
+    var pose: SimPose
+    var scale: Double
+    var turret: (yaw: Double, pitch: Double)?
+    var spec: TurretSpec?
+    var speed: Double
+    var level: Int?
+    var nav: SimNav?
+    var ackermann: Bool
+}
+
+extension ServerSimClient {
+    /// The interpolated turret head of a body (nil = no turret).
+    func turretValue(_ id: String, now t: Double) -> (yaw: Double, pitch: Double)? {
+        guard let tt = turrets[id] else { return nil }
+        return tt.value(now: t, spec: tracks[id]?.snap.turretSpec ?? .robosnailbob)
+    }
+
+    func driven(_ id: String) -> DrivenBody? {
+        guard let tr = tracks[id] else { return nil }
+        let t = now
+        let s = tr.snap
+        return DrivenBody(id: id, title: title(id), kind: s.kind, pose: tr.pose(now: t), scale: s.scale ?? 1,
+                          turret: turretValue(id, now: t), spec: s.turretSpec,
+                          speed: SpeedReadout.speed(v: s.vel.v, vx: s.vel.vx, vy: s.vel.vy), level: s.level, nav: s.nav,
+                          ackermann: s.driveKind == .ackermann)
+    }
+
+    /// Drivable bodies (L1 / R1 switch between them), stable order.
+    var drivableIDs: [String] { tracks.values.filter { $0.snap.isDrivable }.map(\.snap.id).sorted() }
+
+    var socketUp: Bool { isActive && connected }
+
+    /// One twin-stick message (drive and / or turret) — quiet (no ack), 10 Hz from DriveController. `force` = Take over.
+    func sendControl(_ m: TeleopMessage, to id: String, force: Bool = false) {
+        guard !m.isEmpty else { return }
+        send(.control(m), to: id, quiet: !force, force: force)
+        if m.drive.map({ !$0.isZero }) == true { follow.drop(id) }
+    }
+
+    func sendTurret(_ c: TurretCommand, to id: String) { send(.turret(c), to: id) }
+
+    /// E-stop: zero now + the server's stop (robots idle); the lease is kept.
+    func estop(_ id: String) {
+        send(.control(TeleopMessage(drive: .zero)), to: id, quiet: true)
+        send(.stop, to: id)
+        follow.drop(id)
+    }
+
+    /// Exit drive mode: give the controller lease back (the server also releases 2 s after the last command).
+    func sendRelease(_ id: String) { send(.release, to: id, quiet: true) }
+
+    /// FPV: the driven body is not drawn (the camera sits inside its head); nil = draw everything.
+    func hideBody(_ id: String?) {
+        hiddenBodies = id.map { [$0] } ?? []
+    }
+
+    /// The AR sim node (bodies, routes, markers) — FPV / Chase borrow it into their scene so the 3D view draws the very
+    /// same models, clips and turret heads; it goes back to the AR map frame on exit.
+    var simNode: Entity { layer.simNode }
+
+    // MARK: lease (API §5.9.10)
+
+    func leaseEvent(_ e: SimLeaseEvent) {
+        let n = leases.observe(e, me: model.agentID)
+        model.log.event("sim_lease", ["id": .string(e.entityID), "granted": .bool(e.granted ?? false),
+                                      "holder": .string(e.holder ?? ""), "reason": .string(e.reason ?? ""),
+                                      "taken_from": .string(e.takenFrom ?? ""), "mine": .bool(leases.isMine(e.entityID))])
+        refreshOtherDriver()
+        let watched = ui.selection?.id == e.entityID || model.drive.bodyID == e.entityID
+        if watched, let f = n.flash(title: title(e.entityID)) { model.flash(f, seconds: 3) }
+    }
+
+    func leaseRefused(_ id: String, _ h: LeaseHolder) {
+        let first = leases.drivenByOther(id) == nil
+        let n = leases.refused(id, holder: h)
+        refreshOtherDriver()
+        if first {
+            model.log.event("sim_lease_refused", ["id": .string(id), "holder": .string(h.label)])
+            if let f = n.flash(title: title(id)) { model.flash(f + " · Take over?", seconds: 3) }
+        }
+    }
+
+    func refreshOtherDriver() {
+        let id = model.drive.bodyID ?? ui.selection?.id
+        let o = id.flatMap { leases.drivenByOther($0, serverNow: clock.serverNow(local: now)) }
+        if ui.otherDriver != o { ui.otherDriver = o }
+    }
+
+    // MARK: AR aim line (where the turret points)
+
+    func updateAimLine(now t: Double) {
+        guard model.drive.active, model.drive.view == .ar, let id = model.drive.bodyID, let d = driven(id),
+              let spec = d.spec, let tu = d.turret else {
+            aimLine?.removeFromParent(); aimLine = nil
+            return
+        }
+        let cam = TurretCamera.pose(x: d.pose.x, y: d.pose.y, z: d.pose.z, bodyYaw: d.pose.theta, scale: d.scale, spec: spec,
+                                    turretYaw: tu.yaw, turretPitch: tu.pitch)
+        let len: Float = 3
+        let e: ModelEntity
+        if let a = aimLine { e = a } else {
+            var m = UnlitMaterial(color: UIColor(red: 1, green: 0.35, blue: 0.3, alpha: 1))
+            m.blending = .transparent(opacity: 0.8)
+            e = ModelEntity(mesh: .generateBox(size: SIMD3<Float>(len, 0.012, 0.012)), materials: [m])
+            let dot = ModelEntity(mesh: .generateSphere(radius: 0.04), materials: [m])
+            dot.position = SIMD3<Float>(len / 2, 0, 0)
+            e.addChild(dot)
+            e.name = "serversim.aim"
+            layer.simNode.addChild(e)
+            aimLine = e
+        }
+        let f = cam.forward
+        e.position = SIMD3<Float>(Float(cam.x + f[0] * Double(len) / 2), Float(cam.y + f[1] * Double(len) / 2),
+                                  Float(cam.z + f[2] * Double(len) / 2))
+        e.orientation = simd_quatf(angle: Float(cam.yaw), axis: SIMD3<Float>(0, 0, 1))
+            * simd_quatf(angle: Float(-cam.pitch), axis: SIMD3<Float>(0, 1, 0))
     }
 }

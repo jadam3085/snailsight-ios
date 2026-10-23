@@ -304,18 +304,18 @@ final class ARSessionController: NSObject, ARSessionDelegate {
     }
 
     /// 12.3 Map ▸ 3D: the same pause as Scans (the 3D viewer renders its own non-AR view).
-    func suspendForMap3D() {
+    func suspendForMap3D(why: String = "map3d") {
         arView.session.pause()
         var ev = MemoryProbe.fields()
-        ev["why"] = .string("map3d")
+        ev["why"] = .string(why)
         model.log.event("ar_paused", ev)
     }
 
     /// Back from the 3D map: resume without reset, exactly as after Scans.
-    func resumeAfterMap3D() {
+    func resumeAfterMap3D(why: String = "map3d") {
         arView.session.run(makeConfiguration())
         var ev = MemoryProbe.fields()
-        ev["why"] = .string("map3d")
+        ev["why"] = .string(why)
         model.log.event("ar_resumed", ev)
     }
 

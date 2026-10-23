@@ -30,8 +30,7 @@ struct ContentView: View {
                 Image(systemName: "plus").font(.title3.weight(.light)).foregroundStyle(.white.opacity(0.8))
                     .shadow(radius: 2).allowsHitTesting(false)
             }
-            CommandRingOverlay(server: model.serverSim.ui, local: model.controller.sim.ui)   // 12.0 B2 ring
-            HUDView(mark: model.cameraMark)
+            DriveOrHUD(drive: model.drive.ui, mark: model.cameraMark)   // 12.7: drive mode replaces ring + HUD
             CameraMarkOverlay(mark: model.cameraMark)           // 12.2 Mark camera: crosshair + Mark / Locate / Accept
             if model.simOn && model.simDragging {                // 10.6: drop a dragged body here to delete it
                 VStack { Spacer(); SimTrashCan(hot: model.simDragHot).padding(.bottom, 44) }
@@ -45,6 +44,14 @@ struct ContentView: View {
         }
         .fullScreenCover(isPresented: $model.showMap) {                    // 12.0 Map (A2 / O1)
             MapPlanView(data: model.planData, mesh: model.meshStore, serverUI: model.serverSim.ui).environmentObject(model)
+        }
+        .fullScreenCover(isPresented: $model.showDriveViewer) {           // 12.7 drive FPV / Chase (AR paused)
+            ZStack {
+                DriveViewerView(model: model, data: model.planData, ui: model.drive.ui)
+                DriveModeView(ui: model.drive.ui, shared: model.serverSim.ui)
+            }
+            .environmentObject(model)
+            .statusBarHidden(true)
         }
         .sheet(isPresented: $model.showPlaces) { PlacesView().environmentObject(model) }   // P2a places
         .sheet(isPresented: $model.showSpawn) {                             // 9.8 spawn picker
@@ -63,6 +70,22 @@ struct ContentView: View {
             model.controller.start()
             model.startNetworking()
             UIApplication.shared.isIdleTimerDisabled = true   // as in Apple's sample: never dim mid-AR
+        }
+    }
+}
+
+/// 12.7 drive mode (strip + twin sticks only) or the normal HUD (12.0 B2 ring + sheet).
+private struct DriveOrHUD: View {
+    @EnvironmentObject var model: AppModel
+    @ObservedObject var drive: DriveUI
+    let mark: CameraMarkController
+
+    var body: some View {
+        if drive.active {
+            DriveModeView(ui: drive, shared: model.serverSim.ui)
+        } else {
+            CommandRingOverlay(server: model.serverSim.ui, local: model.controller.sim.ui)
+            HUDView(mark: mark)
         }
     }
 }

@@ -169,6 +169,9 @@ final class SimRobot {
     var scaleOverride: Double?
     private let leftWheel = Entity(), rightWheel = Entity()
     private var spinL: Float = 0, spinR: Float = 0
+    // 12.7 turret (API §5.9.10 robot `turret.spec`): the sensor head is a separable node yawing about origin_m, with a
+    // pitch child carrying the head camera at camera_m (model frame: x forward, y up, z = −URDF y).
+    let turretYaw = Entity(), turretPitch = Entity()
 
     init(pose: DrivePose, floorY: Float, scale: Double) {
         self.scale = scale
@@ -201,8 +204,30 @@ final class SimRobot {
         }
     }
 
+    /// Body-relative turret yaw (+ = left, about model +y) and pitch (+ = up, about model +z).
+    func setTurret(yaw: Double, pitch: Double) {
+        turretYaw.orientation = simd_quatf(angle: Float(yaw), axis: SIMD3<Float>(0, 1, 0))
+        turretPitch.orientation = simd_quatf(angle: Float(pitch), axis: SIMD3<Float>(0, 0, 1))
+    }
+
     private func build() {
         let p = RobotProfile.robosnailbob
+        let spec = TurretSpec.robosnailbob
+        let pivot = SIMD3<Float>(Float(spec.originM[0]), Float(spec.originM[2]), Float(-spec.originM[1]))
+        turretYaw.name = "turret.yaw"
+        turretYaw.position = pivot
+        body.addChild(turretYaw)
+        turretPitch.name = "turret.pitch"
+        turretPitch.position = SIMD3<Float>(Float(spec.cameraM[0]), Float(spec.cameraM[2]), Float(-spec.cameraM[1])) - pivot
+        turretYaw.addChild(turretPitch)
+        // the head camera (Brio) on the pitch axis + a red lens so the aim reads from any side
+        let cam = ModelEntity(mesh: .generateBox(size: SIMD3<Float>(0.05, 0.04, 0.10), cornerRadius: 0.008),
+                              materials: [Self.material(.dark)])
+        turretPitch.addChild(cam)
+        let lens = ModelEntity(mesh: .generateBox(size: SIMD3<Float>(0.006, 0.022, 0.05), cornerRadius: 0.003),
+                               materials: [SimpleMaterial(color: .systemRed, roughness: 0.3, isMetallic: false)])
+        lens.position = SIMD3<Float>(0.027, 0, 0)
+        turretPitch.addChild(lens)
         for part in RobotModel.parts(p) {
             let mesh = PartMesh.entity(part, material: Self.material(part.material))
             if part.name == "wheel.left" || part.name == "wheel.right" {
@@ -219,6 +244,10 @@ final class SimRobot {
                     spoke.orientation = simd_quatf(angle: Float(k) * .pi / 3, axis: SIMD3(0, 0, 1))
                     pivot.addChild(spoke)
                 }
+            } else if part.name == "lidar" {
+                // the lidar rides on the turret (it yaws with the head; it does not pitch)
+                mesh.position = SimFrame.f3(part.center) + mesh.position - pivot
+                turretYaw.addChild(mesh)
             } else {
                 mesh.position = SimFrame.f3(part.center) + mesh.position
                 body.addChild(mesh)

@@ -51,7 +51,7 @@ final class AppModel: ObservableObject {
         }
     }
     /// 12.5 drive: the joystick for the selected drivable body (robot / rc_car) — hidden with its ✕ until reselected.
-    @Published var driveHidden = false
+    @Published var driveHidden = true                     // 12.7: drive mode replaced the single joystick
     @Published var driveTank = false
     @Published var meshStyle: MeshStyle = .wire { didSet { controller.applyRenderSettings() } }
     @Published var occlusion = true { didSet { controller.applyRenderSettings() } }
@@ -181,8 +181,10 @@ final class AppModel: ObservableObject {
     @Published var showMap3D = false {
         didSet { if oldValue && !showMap3D { map3DClosed() } }
     }
-    /// Our AR session is paused (Scans or the 3D map is on screen): nothing may re-run it meanwhile.
-    var arSuspended: Bool { showScans || showMap3D }
+    /// 12.7 drive mode FPV / Chase (Sources/Drive/DriveViewer): the non-AR 3D view from the driven body is up.
+    @Published var showDriveViewer = false
+    /// Our AR session is paused (Scans, the 3D map or the drive FPV / Chase view is on screen): nothing may re-run it.
+    var arSuspended: Bool { showScans || showMap3D || showDriveViewer }
     @Published var showLayers = false
     /// Where the Map should centre when it opens (map frame x, y, z) — set by a sheet row's Show / a room chip.
     @Published var mapFocus: [Double]?
@@ -379,6 +381,8 @@ final class AppModel: ObservableObject {
     private(set) lazy var terrainLayer = TerrainARLayer(model: self)
     private(set) lazy var liveMap = LiveMapClient(model: self)
     private(set) lazy var serverSim = ServerSimClient(model: self)
+    /// 12.7 drive mode: twin sticks, turret, gamepad, FPV (Sources/Drive).
+    private(set) lazy var drive = DriveController(model: self)
     /// 12.2 Mark camera (point-at triangulation) + Camera check (walk FOV tracking): Sources/CameraMark.
     private(set) lazy var cameraMark = CameraMarkController(model: self)
     private(set) lazy var cameraCheck = CameraCheck(model: self)
@@ -755,7 +759,7 @@ final class AppModel: ObservableObject {
     /// Any selection change (server "server.<id>", local "local.<id>", nil = none): clear what the previous one drew.
     func selectionChanged(_ id: String?) {
         let gone = overlays.select(id)
-        driveHidden = false
+        driveHidden = true                                   // 12.7: Drive opens drive mode (the twin sticks)
         guard !gone.isEmpty else { return }
         if gone.contains(.robotPathResult) { terrainLayer.clearPath() }
         if gone.contains(.goalMarkers) || gone.contains(.pathPreview) {
@@ -768,13 +772,42 @@ final class AppModel: ObservableObject {
     /// An overlay was drawn for whatever is selected right now.
     func overlayDrawn(_ o: SelectionOverlay) { overlays.drew(o, for: overlays.selected) }
 
-    /// 12.5 Drive (ring / bar) on a drivable body: show the joystick, out of the sheet's way.
+    /// Drive (ring / bar / gamepad L3) on a drivable body: 12.7 full-screen drive mode (Sources/Drive).
     func openDrive() {
-        driveHidden = false
-        sheetDetent = .collapsed
+        guard !recording else { return }
         log.event("drive_open", ["tank": .bool(driveTank)])
-        flash(driveTank ? "Drive: stick up = go, left / right = turn (tank)" : "Drive: stick up = throttle, left / right = steer",
-              seconds: 2)
+        drive.enter()
+    }
+
+    /// 12.7 FPV / Chase: snapshot the AR view (the last-frame PiP), pause AR, show the 3D drive view.
+    func beginDriveViewer(pip: @escaping (UIImage?) -> Void) {
+        guard !showDriveViewer, !showScans, !showMap3D else { return }
+        controller.arView.snapshot(saveToHDR: false) { [weak self] img in
+            pip(img.flatMap { AppModel.thumbnail($0, width: 168) })
+            guard let self, self.drive.active, self.drive.view.pausesAR, !self.showDriveViewer else { return }
+            self.controller.suspendForMap3D(why: "drive_fpv")
+            var tr = Transaction()
+            tr.disablesAnimations = true                       // straight into the 3D view, no sheet slide
+            withTransaction(tr) { self.showDriveViewer = true }
+        }
+    }
+
+    func endDriveViewer() {
+        guard showDriveViewer else { return }
+        var tr = Transaction()
+        tr.disablesAnimations = true
+        withTransaction(tr) { showDriveViewer = false }
+        controller.resumeAfterMap3D(why: "drive_fpv")
+        mapLocalizer.resume(why: "drive_fpv_closed")
+        mapFollower.resume(why: "drive_fpv_closed")
+        liveMap.resume(why: "drive_fpv_closed")
+    }
+
+    static func thumbnail(_ img: UIImage, width: CGFloat) -> UIImage {
+        let h = img.size.width > 0 ? img.size.height * width / img.size.width : width
+        return UIGraphicsImageRenderer(size: CGSize(width: width, height: h)).image { _ in
+            img.draw(in: CGRect(x: 0, y: 0, width: width, height: h))
+        }
     }
 
     func flash(_ text: String, seconds: Double = 2.5) {

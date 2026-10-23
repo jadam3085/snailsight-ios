@@ -89,6 +89,9 @@ public struct SimEntitySnap: Equatable {
     // 12.5 drivable bodies (API §5.9.10): rc_car front wheel angle (rad, + = left) and its drive model
     public var steer: Double?
     public var drive: String?                     // diff | ackermann
+    // 12.7 turret (API §5.9.10): snapshot {yaw, pitch}; entity docs add `spec`. Controller lease {by, holder, until}.
+    public var turret: SimTurret?
+    public var lease: LeaseHolder?
 }
 
 /// A drone mission's live state (entity doc `mission`): phase, the layer it flies over, its planned path.
@@ -150,7 +153,7 @@ public struct SimMission: Decodable, Equatable {
 extension SimEntitySnap: Decodable {
     enum K: String, CodingKey {
         case id, kind, pose, vel, state, owner, name, goal, path, cat, dims, scale, behaviour, clip, action, t, level, nav, mission
-        case steer, drive
+        case steer, drive, turret, lease
         case tMono = "t_mono", agentType = "agent_type", clipT0 = "clip_t0", clipRate = "clip_rate"
     }
     public init(from d: Decoder) throws {
@@ -181,6 +184,8 @@ extension SimEntitySnap: Decodable {
         mission = opt(SimMission.self, .mission)
         steer = opt(Double.self, .steer)
         drive = opt(String.self, .drive)
+        turret = opt(SimTurret.self, .turret)
+        lease = opt(LeaseHolder.self, .lease)
     }
 
     /// The clip to draw: the server's shared clip (protocol 2), else its older `state` hint.
@@ -200,6 +205,8 @@ extension SimEntitySnap: Decodable {
         if s.level == nil { s.level = d.level }
         if s.mission == nil { s.mission = d.mission }
         if s.drive == nil { s.drive = d.drive }
+        if s.turret == nil { s.turret = d.turret }                    // a doc's pose until the snapshot says
+        else if s.turret?.spec == nil { s.turret?.spec = d.turret?.spec }
         s.nav = SimNav.merged(snapshot: s.nav, doc: d.nav)
         return s
     }
@@ -213,6 +220,9 @@ extension SimEntitySnap: Decodable {
     public var isDrivable: Bool { !isDrone && Drivable.isDrivable(kind: kind, cat: cat, agentType: agentType) }
     public var driveKind: DriveKind { Drivable.driveKind(kind: kind, catalogDrive: drive) }
     public var isRCCar: Bool { kind == RCCar.key }
+    /// 12.7: a server turret (the robot); the spec from the doc, else RobosnailBob's.
+    public var hasTurret: Bool { turret != nil || kind == "robot" }
+    public var turretSpec: TurretSpec? { hasTurret ? (turret?.spec ?? .robosnailbob) : nil }
 }
 
 public enum SimStreamMessage: Equatable {
@@ -442,6 +452,10 @@ public enum SimServerAPI {
         // 12.0 drone missions (API §5.16, server flag `drone_missions`): exactly one of hold / climb_above / return / land
         case droneOp(String)
         case mission(goal: [Double], mode: String, canopy: String)   // mode normal | explore; canopy auto | under | above
+        // 12.7 drive mode: twin sticks (drive and / or turret in ONE message), turret aim / centre, lease release
+        case control(TeleopMessage)
+        case turret(TurretCommand)
+        case release
 
         /// Short name for logs (sim_cmd).
         public var name: String {
@@ -459,6 +473,9 @@ public enum SimServerAPI {
             case .followAgent: return "follow"
             case .droneOp(let o): return o
             case .mission(_, let mode, _): return "mission_\(mode)"
+            case .control(let m): return m.drive != nil ? (m.turret != nil ? "drive_turret" : "drive") : "turret"
+            case .turret: return "turret"
+            case .release: return "release"
             }
         }
     }
@@ -468,10 +485,18 @@ public enum SimServerAPI {
     public static func body(_ c: Command, agentID: String) -> Data { json(fields(c, agentID: agentID)) }
 
     /// WS command (protocol snailsight-sim/2): {type: cmd, id, ref, agent_id, …the REST body…}; the server acks the ref.
-    public static func wsCommand(_ c: Command, id: String, agentID: String, ref: String?) -> Data {
+    /// `force`: Take over (the server hands the lease to this client; grant event `taken_from`).
+    public static func wsCommand(_ c: Command, id: String, agentID: String, ref: String?, force: Bool = false) -> Data {
         var o = fields(c, agentID: agentID)
         o["type"] = "cmd"; o["id"] = id; o["agent_id"] = agentID
         if let ref { o["ref"] = ref }
+        if force { o["force"] = true }
+        return json(o)
+    }
+
+    public static func body(_ c: Command, agentID: String, force: Bool) -> Data {
+        var o = fields(c, agentID: agentID)
+        if force { o["force"] = true }
         return json(o)
     }
 
@@ -528,6 +553,17 @@ public enum SimServerAPI {
             return [o: true, "owner": agentID]
         case .mission(let g, let mode, let canopy):
             return ["mission": ["goal": g.prefix(3).map { r($0) }, "mode": mode, "canopy": canopy], "owner": agentID]
+        case .control(let m):
+            var o: [String: Any] = ["ttl": min(0.5, max(0.05, m.ttl)), "owner": agentID]
+            if let d = m.drive {
+                o["drive"] = ["throttle": r(min(1, max(-1, d.throttle))), "steer": r(min(1, max(-1, d.steer))), "tank": d.tank]
+            }
+            if let t = m.turret { o["turret"] = t.fields }
+            return o
+        case .turret(let t):
+            return ["turret": t.fields, "ttl": TeleopFrameSender.ttl, "owner": agentID]
+        case .release:
+            return ["release": true, "owner": agentID]
         }
     }
 
