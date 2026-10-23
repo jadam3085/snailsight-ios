@@ -325,3 +325,49 @@ the robot"; "Don't let the cube be my default when I click on the screen … a m
   master switch (`WorldGate.doors`) and of the Camera + animals / Full world presets (old stored presets decode with doors on).
 - Core: `Doors.swift` (DoorsDoc/DoorInfo, DoorEvent, DoorLeaf.make = hinge transform from hinge.point + jamb + frame.t +
   swing.direction + angle_deg, DoorSet) + 7 DoorsTests; logs `doors_load`, `door_live`.
+
+**12.7 (Drive mode: twin sticks, turret, gamepad, first-person 3D)**: owner 2026-10-22 ("It's hard to see and drive at the
+same time. I want the right thumbstick and I want that to control turret orientation" · "If you're doing a full screen
+drive mode, give me teleop control like in the robosnailbob project, and give first person view with 3d world"). Server:
+API §5.9.10 Turret + Controller lease (live on :8904).
+- **Drive mode**: Drive (ring / bar / gamepad L3) opens a full-screen driving layout: the command ring, O2 ops card,
+  selection bar, rail, pills and the sheet are hidden; a slim strip shows the body, speed (+ throttle %, TURBO), a status
+  line (you drive / driven by … / server link / nav problem / storey / pad), AR | FPV | Chase, Exit and STOP. Exit restores
+  the previous layout exactly (sheet detent, selection, expanded cards) and sends `cmd {release: true}`. Core
+  `DriveMode.swift` (DriveModeLayout, DriveView, DriveChrome, the quick wheel's items).
+- **Twin sticks, RoboSnailBob HUD parity** (core `TeleopMap.swift`): left stick drives (Tank toggle for the rc_car), right
+  stick aims the turret by RATE (yaw from the horizontal, pitch from the vertical; the turret holds when let go; double-tap
+  recentres). Both sticks are one UIKit multi-touch pad, each touch tracked on its own, 124 pt sticks. ONE 10 Hz WS message
+  carries `drive` + `turret` (ttl 0.5); each stick's release sends its one zero. HUD feel: the HUD's 0.5 / 0.75 m/s
+  (turbo +50 %) become throttle / steer fractions 0.667 normal / 1.0 turbo of the server's full drive (robot at 50 %
+  scale: 0.133 / 0.2 m/s, 0.8 / 1.2 rad/s; rc_car 2 / 3 m/s); release = ×0.6 every 50 ms until < 0.03 (≈ 350 ms from full
+  stick), then zero; STOP = zero + `stop` now (lease kept, sticks ignored until let go); Turbo hold; quick wheel (hold
+  L2 or the wheel button): Stop · Centre · View · Tank · Follow me · Go to · Exit · Take over.
+- **Gamepad** (GameController; the owner's GameSir G8 Galileo): core `GamepadMap.swift` = the HUD's presets (default /
+  southpaw / triggers: throttle = R2 − L2 / dpadcam) and function map: A select · B E-stop / cancel · X view · Y take over ·
+  L1 / R1 previous / next drivable body · L2 hold wheel · R2 hold turbo · L3 drive mode on / off · R3 turret centre ·
+  Select controller mode · Start menu (sticky wheel) · D-pad turret ±10° / ±15°. Deadzone 0.15 (the HUD's dz()),
+  persisted (UserDefaults `drive.gamepad`), A / B not rebindable. Controller mode hides the on-screen sticks (auto at the
+  first pairing; the controller badge brings them back).
+- **Turret on the model**: RobosnailBob's lidar + a head camera are a separate node yawing about `origin_m` with a pitch
+  child at `camera_m`, driven by the snapshot `turret {yaw, pitch}` through `TurretTrack` (extrapolated ≤ 0.15 s at the
+  measured rate, τ 0.12 s error easing, spec clamps). In AR a red aim line shows where the turret points.
+- **FPV / Chase** (`Sources/Drive/DriveViewer.swift`): a non-AR RealityKit view from `TurretCamera.pose` (exactly
+  `sim/vehicle.py turret_camera`; map → viewer `(x, z, −y)`) or behind it (`TurretCamera.chase`: 0.4 + 1.6·scale back,
+  0.2 + 0.6·scale up), every frame from the same interpolated pose + head as the AR bodies. World = the 12.3 Map 3D tile
+  loader (SSE LOD centred on the driven camera, 600 MB budget, k adapted to ~30 fps) + overlays (live mesh, doors,
+  cameras, trees, terrain, route); the bodies are the AR layer's own sim node borrowed into the scene (same models,
+  clips, turret heads; the driven body is hidden in FPV). Minimap inset (the storey's plan, bodies, the phone, the look
+  cone). AR is paused while FPV / Chase is up (one renderer at a time, as Map 3D), so a LIVE camera PiP is impossible: the
+  PiP is the AR view's last frame (tap it to go back to AR). rc_car: no server turret, the right stick pans the app's own
+  view in FPV / Chase (`ViewPan`) and is hidden in AR.
+- **Lease fix** (the owner's "RobosnailBob is driven by another device" while he was the only driver): the server sends
+  `lease {granted: false, owner: null}` on every RELEASE (2 s after the app's own last command); ≤ 12.6 flashed it.
+  `LeaseTracker`: only `granted: true` for someone else or a 409 means another driver; the strip names the holder
+  ("driven by portal (cop.snail)") with **Take over** (resend with `force: true`). 409 details are dicts now (both shapes
+  handled).
+- Logs: `drive_mode_enter` / `_exit`, `drive_view`, `drive_estop`, `drive_takeover`, `drive_wheel`, `drive_turbo`,
+  `drive_goto`, `turret_aim` / `turret_centre` / `turret_step`, `gamepad_connect` / `_disconnect`, `gamepad_preset`,
+  `controller_mode`, `sim_lease` / `sim_lease_refused`, `fpv_open` / `fpv_fps` / `fpv_close`.
+- Core tests: TurretTests (camera vs the Python reference), TeleopMapTests, GamepadMapTests, DriveModeTests (incl. a
+  release event never produces "driven by another").

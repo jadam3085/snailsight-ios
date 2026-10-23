@@ -208,6 +208,9 @@ public struct GamepadOutput: Equatable {
     public var turbo: Bool
     public var wheelHeld: Bool
     public var fired: [GamepadFunction]
+    public init(axes: TwinStickAxes = TwinStickAxes(), turbo: Bool = false, wheelHeld: Bool = false, fired: [GamepadFunction] = []) {
+        self.axes = axes; self.turbo = turbo; self.wheelHeld = wheelHeld; self.fired = fired
+    }
 }
 
 /// Rising-edge detection + the function map (HUD `edge()` + the actions loop).
