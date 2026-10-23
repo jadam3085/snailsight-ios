@@ -265,7 +265,7 @@ final class ServerSimBody {
         case "cylinderY":
             m = ModelEntity(mesh: .generateCylinder(height: size.y, radius: size.x / 2), materials: [mat])
         default:
-            m = ModelEntity(mesh: .generateBox(size: size, cornerRadius: Float(p.corner ?? min(size.x, size.y, size.z) * 0.2)),
+            m = ModelEntity(mesh: .generateBox(size: size, cornerRadius: p.corner.map { Float($0) } ?? min(size.x, size.y, size.z) * 0.2),
                             materials: [mat])
         }
         m.position = SIMD3<Float>(Float(p.center[0]), Float(p.center[1]), Float(p.center[2]))
