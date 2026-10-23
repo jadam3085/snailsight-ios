@@ -57,10 +57,12 @@ final class SimModelLibrary {
         waiting[file, default: []].append(done)
         guard subs[file] == nil else { return }
         let name = (file as NSString).deletingPathExtension
-        guard let url = Bundle.main.url(forResource: name, withExtension: "usdz") else {
+        // 12.8: a runtime item's file is a verified blob in Application Support/SimContent; else the bundle
+        guard let url = SimContentStore.shared.localURL(for: file)
+                ?? Bundle.main.url(forResource: name, withExtension: "usdz") else {
             failed.insert(file)
             waiting[file] = nil
-            onError?(file, "not in the app bundle")
+            onError?(file, "not in the app bundle or the runtime content")
             return
         }
         let t0 = CACurrentMediaTime()
@@ -97,6 +99,11 @@ final class SimClipRig {
     private var playback: AnimationPlaybackController?
     private var lastSync = 0.0
     var onAttached: (() -> Void)?
+    // 12.8 gestures (runtime content clip_info loop == false): loaded on demand, played once, last frame held
+    private var item: SimCatalogItem?
+    private weak var library: SimModelLibrary?
+    private var requested = Set<String>()
+    private var oneShot = false
 
     init(body: Entity) { self.body = body }
 
@@ -118,10 +125,23 @@ final class SimClipRig {
     /// sim_model_fallback here when the item has no files).
     func load(_ item: SimCatalogItem, library: SimModelLibrary, log: (String, [String: LogValue]) -> Void) {
         let files = item.files ?? [:]
+        self.item = item
+        self.library = library
         if files.isEmpty { log("sim_model_fallback", ["kind": .string(item.key), "why": .string("no model files in the catalog")]) }
-        for (clip, file) in files {
+        for (clip, file) in files where !SimContent.isGesture(item, clip: clip) {
+            requested.insert(clip)
             library.request(file) { [weak self] t in self?.attach(clip: clip, template: t) }
         }
+    }
+
+    /// 12.8: load a gesture clip's model the first time the server plays it (true = it is a clip of this item).
+    @discardableResult
+    func ensure(clip: String) -> Bool {
+        guard let it = item, let file = it.file(clip: clip), let library else { return false }
+        if requested.insert(clip).inserted {
+            library.request(file) { [weak self] t in self?.attach(clip: clip, template: t) }
+        }
+        return true
     }
 
     /// Show this clip (no-op when it already shows); the animation loops.
@@ -131,9 +151,18 @@ final class SimClipRig {
         current = key
         playback?.stop()
         playback = nil
+        oneShot = SimContent.isGesture(item, clip: key)
         if let a = e.availableAnimations.first {
             durations[key] = a.definition.duration
-            playback = e.playAnimation(a.repeat(), transitionDuration: transition, startsPaused: false)
+            if oneShot {
+                // play once and hold the last frame until the server's clip changes
+                var def = a.definition
+                def.fillMode = .forwards
+                let res = (try? AnimationResource.generate(with: def)) ?? a
+                playback = e.playAnimation(res, transitionDuration: transition, startsPaused: false)
+            } else {
+                playback = e.playAnimation(a.repeat(), transitionDuration: transition, startsPaused: false)
+            }
         }
         lastSync = 0
     }
@@ -143,6 +172,12 @@ final class SimClipRig {
         guard let key = current, let c = playback, let d = durations[key], d > 0.05, clipT0 != nil, serverNow != nil,
               now - lastSync >= 1.0 else { return }
         lastSync = now
+        if oneShot {                               // a gesture: elapsed time, never wrapped; leave it once it ended
+            let el = (serverNow! - clipT0!) * (rate ?? 1)
+            guard el >= 0, el < d else { return }
+            if abs(c.time - el) > 0.08 { c.time = el }
+            return
+        }
         let want = SimSharedClip.time(clipT0: clipT0, rate: rate, serverNow: serverNow, duration: d)
         let cur = c.time.truncatingRemainder(dividingBy: d)
         let err = abs(want - cur)

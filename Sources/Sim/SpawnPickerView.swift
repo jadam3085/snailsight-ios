@@ -8,6 +8,7 @@ import SnailSightCore
 struct SpawnPickerView: View {
     @EnvironmentObject var model: AppModel
     @Environment(\.dismiss) private var dismiss
+    @ObservedObject private var content = SimContentStore.shared          // 12.8: lab characters appear while open
     @State private var query = ""
     @State private var tab: SimCatalogItem.Category = .animal
     private var catalog: SimCatalog { model.controller.sim.catalog }
@@ -45,6 +46,7 @@ struct SpawnPickerView: View {
             .navigationBarTitleDisplayMode(.inline)
             .searchable(text: $query, placement: .navigationBarDrawer(displayMode: .always), prompt: "Search animals and objects")
             .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Done") { dismiss() } } }
+            .onAppear { content.refresh(reason: "picker") }
         }
     }
 
@@ -160,7 +162,8 @@ private struct SpawnGroup: Identifiable {
 struct SimThumb: View {
     let item: SimCatalogItem
     var body: some View {
-        if let name = item.thumb, let img = UIImage(named: (name as NSString).deletingPathExtension) {
+        if let name = item.thumb, let img = SimContentStore.shared.localURL(for: name).flatMap({ UIImage(contentsOfFile: $0.path) })
+            ?? UIImage(named: (name as NSString).deletingPathExtension) {
             Image(uiImage: img).resizable().scaledToFit()
         } else {
             Image(systemName: item.symbol).font(.title2).foregroundStyle(item.isAnimal ? Color.orange : Color.cyan)

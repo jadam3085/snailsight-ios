@@ -94,14 +94,10 @@ final class SimUI: ObservableObject {
     @Published var objectCount = 0
 }
 
-/// The spawn catalog bundled with the app (Resources/SimModels/catalog.json), or the three 9.7 animals.
+/// The spawn catalog: bundled (Resources/SimModels/catalog.json, or the three 9.7 animals) merged with the map
+/// server's runtime content (12.8, SimContentStore: Helix lab characters with no app release).
 enum SimCatalogStore {
-    static let shared: SimCatalog = {
-        guard let url = Bundle.main.url(forResource: "catalog", withExtension: "json"),
-              let data = try? Data(contentsOf: url), let c = try? SimCatalog.decode(data), !c.items.isEmpty
-        else { return .builtIn }
-        return c
-    }()
+    static var shared: SimCatalog { SimContentStore.shared.catalog }
 }
 
 /// S1 local sim (plan §7 S): RobosnailBob driven by the joystick with real limits, colliding with the real house via
@@ -116,7 +112,7 @@ final class SimController: NSObject, UIGestureRecognizerDelegate {
     private let arView: ARView
     private let root = AnchorEntity(world: matrix_identity_float4x4)
     private let query: SceneQuery
-    let catalog = SimCatalogStore.shared
+    var catalog: SimCatalog { SimContentStore.shared.catalog }     // 12.8: bundled + runtime content
     let library = SimModelLibrary()                     // 10.5: shared with the server sim's drawing (ServerSimClient)
     private var updateSub: Cancellable?
     private var uiSubs: [AnyCancellable] = []

@@ -43,6 +43,8 @@ struct ServerSimSelection: Equatable {
     var drivable = false
     var driveKind: DriveKind = .diff
     var rcCar = false
+    // 12.8: one-shot gesture clips of a runtime character (wave, think, bow …), from the catalog's clip_info
+    var gestures: [String] = []
     var symbol: String { drone ? "airplane" : rcCar ? "car.side.fill" : rover ? "car.side" : role == .object ? "cube" : "pawprint" }
 }
 
@@ -55,6 +57,7 @@ final class ServerSimUI: ObservableObject {
     @Published var droneAssistPending = false
     @Published var patrolPoints = 0
     @Published var showGoToLabel = false
+    @Published var showGestures = false        // 12.8: the Gesture chooser of the selected character
     /// 12.0 O2: what the obstacle sensor / planner just said about the selected drone or rover.
     @Published var opsBanner: ObstacleBanner?
     /// 12.7: another controller holds the selected body's lease ("portal (cop.snail)"); nil = free or mine.
@@ -79,6 +82,7 @@ final class ServerSimClient {
     private let shaper = StickShaper()
     private var drivingID: String?                           // the body the stick last drove (zero on reselect)
     private var selectionSink: AnyCancellable?
+    private var contentSink: AnyCancellable?               // 12.8: runtime sim content arrived -> redraw boxes
     private var cmdInFlight = 0
     private var acks = SimAcks()                             // WS commands waiting for the server's ack
     private var follow = FollowPoseTracker()                 // 12.5: bodies following this phone (Follow me)
@@ -120,6 +124,8 @@ final class ServerSimClient {
                 self.stopDriving()
                 self.model.selectionChanged(id.map { "server.\($0)" })
             }
+        contentSink = SimContentStore.shared.$catalog.dropFirst().receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.contentChanged() }
     }
 
     /// The overlays the previous selection left (goal markers, route ribbon).
@@ -535,9 +541,19 @@ final class ServerSimClient {
                                   objectKeys: Set(cat.items.filter { !$0.isAnimal }.map(\.key)))
     }
 
+    /// 12.8: a body drawn as a box because its kind was unknown gets its model once the runtime content has it.
+    private func contentChanged() {
+        for (id, b) in bodies where b.visual == .box {
+            guard let tr = tracks[id], visual(tr.snap) != .box else { continue }
+            redraw(tr.snap)
+            if let sel = ui.selection, sel.id == id { ui.selection = selection(tr.snap) }
+        }
+    }
+
     private func redraw(_ s: SimEntitySnap) {
         bodies[s.id]?.remove()
         let v = visual(s)
+        if v == .box { SimContentStore.shared.unknownKind(s.kind) }      // 12.8: maybe a new lab character
         let b = ServerSimBody(id: s.id, visual: v, snap: s, library: model.controller.sim.library,
                               catalog: model.controller.sim.catalog, label: layer.makeLabel(title(s.id), size: 0.03),
                               log: { [weak self] e, d in self?.model.log.event(e, d) })
@@ -575,7 +591,15 @@ final class ServerSimClient {
         if follow.followers.contains(s.id) && s.behaviour == "follow" && s.nav?.isProblem != true { d += " · following you" }
         return ServerSimSelection(id: s.id, title: title(s.id), detail: d, rover: s.isRover, drone: s.isDrone,
                                   animal: s.role == .animal, role: s.role, drivable: s.isDrivable, driveKind: s.driveKind,
-                                  rcCar: s.isRCCar)
+                                  rcCar: s.isRCCar,
+                                  gestures: model.controller.sim.catalog.item(s.kind).map(SimContent.gestures) ?? [])
+    }
+
+    /// 12.8: play a one-shot gesture on the selected character for everyone (server cmd {gesture}).
+    func gesture(_ clip: String) {
+        guard let s = ui.selection, let tr = tracks[s.id] else { return }
+        model.log.event("sim_gesture", ["kind": .string(tr.snap.kind), "clip": .string(clip), "id": .string(s.id)])
+        send(.gesture(clip), to: s.id)
     }
 
     // MARK: X-ray + path preview (10.8, API §5.9.11)
@@ -1033,12 +1057,19 @@ struct ServerSimBar: View {
                 case "goto_label": label = ""; ui.showGoToLabel = true
                 case "deter": sim.deterDeer()
                 case "drone_assist": sim.startDroneAssist()
+                case "gesture": ui.showGestures = true
                 default: break
                 }
             case .scale: break
             }
         }
         .sheet(isPresented: $ui.showGoToLabel) { goToSheet.presentationDetents([.height(200)]) }
+        .confirmationDialog("Gesture", isPresented: $ui.showGestures, titleVisibility: .visible) {
+            ForEach(ui.selection?.gestures ?? [], id: \.self) { g in
+                Button(SimContent.gestureLabel(g)) { sim.gesture(g) }
+            }
+            Button("Cancel", role: .cancel) {}
+        }
     }
 
     private var prompt: String? {
@@ -1052,8 +1083,9 @@ struct ServerSimBar: View {
     }
 
     private func extras(_ s: ServerSimSelection) -> [SimBarExtra] {
-        guard s.rover || s.drone else { return [] }
-        var x = [SimBarExtra(id: "goto_label", symbol: "magnifyingglass", label: "Go to…")]
+        let g = s.gestures.isEmpty ? [] : [SimBarExtra(id: "gesture", symbol: "hand.wave", label: "Gesture")]
+        guard s.rover || s.drone else { return g }
+        var x = g + [SimBarExtra(id: "goto_label", symbol: "magnifyingglass", label: "Go to…")]
         if s.rover && !s.drone && !s.rcCar {
             x.append(SimBarExtra(id: "deter", symbol: "hare", label: "Deter deer"))
             x.append(SimBarExtra(id: "drone_assist", symbol: "airplane.departure", label: "Drone assist"))

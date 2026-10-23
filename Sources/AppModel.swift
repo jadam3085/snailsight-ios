@@ -495,6 +495,8 @@ final class AppModel: ObservableObject {
         guard timer == nil else { return }
         let q = queue!, lg = logs!
         Task { await link.whenOnline { Task { try? await lg.syncAll(); await q.kick(reason: "online") } } }
+        let slog = services.log
+        SimContentStore.shared.attach(link: link, log: { e, d in slog.event(e, d) })   // 12.8 runtime sim content
         Task { await link.startMonitoring() }
         Task { [weak self] in
             guard let self else { return }

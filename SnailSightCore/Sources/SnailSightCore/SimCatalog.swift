@@ -84,12 +84,18 @@ public struct SimCatalogItem: Codable, Equatable, Identifiable {
     public var thumb: String?
     public var tris: Int?
     public var source: SimSource?
+    /// 12.8 runtime content (GET /v1/sim/content): file name → content-addressed blob (absent in the bundled catalog)
+    public var blobs: [String: SimBlobRef]?
+    /// 12.8: per clip {action, loop, duration_s}; loop == false = a one-shot gesture (wave, think, bow …)
+    public var clipInfo: [String: SimClipInfo]?
+    /// 12.8: where a runtime item comes from ("helix-lab"); nil = bundled with the app
+    public var origin: String?
 
     public var id: String { key }
 
     enum CodingKeys: String, CodingKey {
-        case key, label, category, group, symbol, nominal, files, physics, behaviour, thumb, tris, source
-        case sizeM = "size_m", spawnCount = "spawn_count"
+        case key, label, category, group, symbol, nominal, files, physics, behaviour, thumb, tris, source, blobs, origin
+        case sizeM = "size_m", spawnCount = "spawn_count", clipInfo = "clip_info"
     }
 
     public init(key: String, label: String, category: Category, group: String, symbol: String, sizeM: [Double],

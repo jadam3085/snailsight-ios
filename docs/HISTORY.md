@@ -371,3 +371,27 @@ API §5.9.10 Turret + Controller lease (live on :8904).
   `controller_mode`, `sim_lease` / `sim_lease_refused`, `fpv_open` / `fpv_fps` / `fpv_close`.
 - Core tests: TurretTests (camera vs the Python reference), TeleopMapTests, GamepadMapTests, DriveModeTests (incl. a
   release event never produces "driven by another").
+
+**12.8 (Runtime sim content: lab characters without an app release)**: owner 2026-10-23 (characters customised in the
+Helix lab should reach the 3D world "without any extra steps"). Until 12.7 every spawnable model was bundled
+(`Resources/SimModels`), so a new character needed an app release.
+- **Runtime catalog** (`Sources/Sim/SimContentStore.swift`): `GET /v1/sim/content` (map server) lists runtime items in the
+  bundled `catalog.json` item shape plus `blobs` (file name → sha256 + bytes), `clip_info` ({action, loop, duration_s}
+  per clip) and `origin`. Every phone file (clip USDZ + thumbnail; the `.glb` web twin is skipped) is fetched once from
+  `/v1/sim/content/blobs/<sha256>.<ext>`, its sha256 verified (CryptoKit) before an atomic move into Application
+  Support/SimContent/blobs (excluded from backup). An item shows only once ALL its files are on disk (never half a
+  character). The last document is kept on disk, so the picker works offline; blobs of the current and the previous
+  revision are kept, older ones pruned. Refresh: launch, every reconnect, opening the spawn picker (5 s debounce), and a
+  shared-sim body whose kind is unknown (at most every 30 s); bodies drawn as boxes get their model once it arrives.
+  `If-None-Match` with the last rev (304 = unchanged).
+- The ONE catalog the picker, the local sim and the shared-sim bodies read is the bundled catalog merged with the ready
+  runtime items (`SimContent.merge`: a runtime item replaces a bundled one with the same key). Model and thumbnail
+  lookups use the cached blob first, else the bundle. Helix lab characters are no longer bundled.
+- **Gestures**: runtime characters carry one-shot clips (wave, think, shrug, bow, …; `clip_info.loop == false`). A shared
+  sim body plays any clip the server names when the item has it (`SimSharedClip.key`), loads gesture models on first use
+  only, plays them once and holds the last frame until the server's clip changes (phase from `clip_t0`, never wrapped).
+  The selection bar shows **Gesture** for such bodies (a chooser of the item's gestures → `cmd {gesture}`).
+- Logs: `sim_content_sync` {reason, rev, items, rejected, fetched, bytes, ms, unchanged?, error?},
+  `sim_content_blob_fail` {sha, reason}, `sim_gesture` {kind, clip, id}.
+- Core: `SimContent.swift` (doc/blob refs/clip info, phone files, missing/ready planner, merge, gestures, portable
+  SHA-256 + CryptoKit), the `gesture` command; SimContentTests.

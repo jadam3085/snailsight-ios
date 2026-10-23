@@ -456,6 +456,8 @@ public enum SimServerAPI {
         case control(TeleopMessage)
         case turret(TurretCommand)
         case release
+        // 12.8 one-shot gesture of a runtime character (clip_info loop == false): {gesture: "wave"}
+        case gesture(String)
 
         /// Short name for logs (sim_cmd).
         public var name: String {
@@ -476,6 +478,7 @@ public enum SimServerAPI {
             case .control(let m): return m.drive != nil ? (m.turret != nil ? "drive_turret" : "drive") : "turret"
             case .turret: return "turret"
             case .release: return "release"
+            case .gesture: return "gesture"
             }
         }
     }
@@ -564,6 +567,8 @@ public enum SimServerAPI {
             return ["turret": t.fields, "ttl": TeleopFrameSender.ttl, "owner": agentID]
         case .release:
             return ["release": true, "owner": agentID]
+        case .gesture(let g):
+            return ["gesture": g, "owner": agentID]
         }
     }
 
@@ -628,6 +633,8 @@ public enum SimSharedClip {
     /// Server clip name → the app's clip key among those loaded (eat / idle / walk / run / static), with the local
     /// sim's fallbacks (SimClips.candidates).
     public static func key(_ serverClip: String?, available: Set<String>) -> String? {
+        // 12.8: a gesture (wave, think, bow …) or any other clip the item has a file for plays as itself
+        if let c = serverClip, !SimContent.locomotion.contains(c), available.contains(c) { return c }
         let gait: AnimalGait
         switch serverClip ?? "idle" {
         case "eat", "graze": gait = .graze
