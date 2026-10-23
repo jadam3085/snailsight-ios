@@ -56,7 +56,9 @@ public enum RobotModel {
     public static let casterRadius = 0.076             // 6 in casters
     public static let lidarHeight = 0.07
 
-    public static func parts(_ p: RobotProfile = .robosnailbob) -> [BodyPart] {
+    /// `served` (12.9: the map server's agents.robot parts, SimAgents.robotParts) replaces the compiled-in drawing.
+    public static func parts(_ p: RobotProfile = .robosnailbob, served: [BodyPart]? = nil) -> [BodyPart] {
+        if let served { return served }
         let c = groundClearance
         let hullTop = c + 0.27
         let hullWidth = p.width - 2 * wheelWidth - 0.02

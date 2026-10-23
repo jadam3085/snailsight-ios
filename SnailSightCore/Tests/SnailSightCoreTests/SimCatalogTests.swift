@@ -158,7 +158,8 @@ final class SimCatalogTests: XCTestCase {
         XCTAssertEqual(back.scale, 0.75)
     }
 
-    // MARK: the real bundled catalog (written by tools/ilidar_build/verify_sim_assets.py)
+    // MARK: the bundled MINIMAL fallback catalog (12.9: one animal; the full catalog is served live and validated server-side
+    // by snailCOP tools/ilidar_build/sync_sim_assets.py + tests/test_sim_content.py)
 
     static var bundledURL: URL {
         URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
@@ -174,8 +175,7 @@ final class SimCatalogTests: XCTestCase {
             throw XCTSkip("catalog.json not next to the package (\(Self.bundledURL.path))")
         }
         let c = try SimCatalog.decode(data)
-        XCTAssertGreaterThanOrEqual(c.animals.count, 10)
-        XCTAssertGreaterThanOrEqual(c.objects.count, 12)
+        XCTAssertGreaterThanOrEqual(c.animals.count, 1)
         XCTAssertEqual(Set(c.items.map { $0.key }).count, c.items.count)
         for it in c.items {
             let s = it.size

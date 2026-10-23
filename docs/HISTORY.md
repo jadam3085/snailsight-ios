@@ -395,3 +395,14 @@ Helix lab should reach the 3D world "without any extra steps"). Until 12.7 every
   `sim_content_blob_fail` {sha, reason}, `sim_gesture` {kind, clip, id}.
 - Core: `SimContent.swift` (doc/blob refs/clip info, phone files, missing/ready planner, merge, gestures, portable
   SHA-256 + CryptoKit), the `gesture` command; SimContentTests.
+
+**12.9 (live models)**: EVERY sim model (animals, objects, thumbnails, the RC car's toy car, plus low-poly RobosnailBob and
+drone parts, `agents` in the document) comes from the map server's one catalog `GET /v1/sim/content`; a model change needs
+no app build. `SimContentStore` fetches it at launch, on reconnect and on the sim socket's `catalog` event, downloads changed
+blobs in the background (spawned bodies' kinds first, then changed, recents, the rest; 600 MB budget, LRU eviction, sha256
+verified), exposes an item only when ALL its files are cached (the old version stays until then) and publishes a diff.
+`ServerSimClient` builds the new `ServerSimBody` off-tree and replaces the old one when its first clip loaded (same id,
+selection and label). `SimModelLibrary` keys templates by blob name. The bundle keeps only the fox (offline fallback);
+a body without a model draws a box that is swapped when it arrives. "Models updating… n/m" pill on the Sim HUD and in the
+spawn picker. Core: `SimLive.swift` (diff, cache policy, fallback, agents, catalog event) + `SimLiveTests`. Logs:
+`sim_content_event`, `sim_content_sync` (+ changed/removed/evicted/cache_bytes), `sim_content_swap(ped)`.

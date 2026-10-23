@@ -70,6 +70,7 @@ final class ServerSimClient {
     private var authority = SimAuthority()
     private var tracks: [String: RemoteTrack] = [:]
     private var bodies: [String: ServerSimBody] = [:]
+    private var pendingSwap: [String: ServerSimBody] = [:]            // 12.9: new model loading beside the old body
     private var statics: [String: SimEntitySnap] = [:]      // entity docs: name, cat, dims, scale
     private var clock = SimServerClock()
     private var drag: (id: String, start: TimeInterval, point: [Double]?)?
@@ -124,8 +125,8 @@ final class ServerSimClient {
                 self.stopDriving()
                 self.model.selectionChanged(id.map { "server.\($0)" })
             }
-        contentSink = SimContentStore.shared.$catalog.dropFirst().receive(on: DispatchQueue.main)
-            .sink { [weak self] _ in self?.contentChanged() }
+        contentSink = SimContentStore.shared.$lastChange.compactMap { $0 }.receive(on: DispatchQueue.main)
+            .sink { [weak self] c in self?.contentChanged(c.diff) }
     }
 
     /// The overlays the previous selection left (goal markers, route ribbon).
@@ -423,6 +424,12 @@ final class ServerSimClient {
 
     private func handle(_ d: Data) {
         guard let m = SimStreamMessage.parse(d) else { return }
+        // 12.9: the catalog moved on the server (or the hello says which rev it has): fetch it now, swap models in place
+        if d.range(of: Data("catalog".utf8)) != nil, let ce = SimCatalogEvent.parse(d) {
+            model.log.event("sim_content_event", ["rev": .string(ce.rev), "changed": .int(ce.changed.count),
+                                                  "removed": .int(ce.removed.count), "hello": .bool(ce.fromHello)])
+            SimContentStore.shared.catalogEvent(ce)
+        }
         if case .lease = m, let e = SimLeaseEvent.parse(d) { leaseEvent(e); lastMessageAt = now; return }
         if case .ack(_, false, 409?, _) = m, let r = LeaseHolder.refusal(d), let id = r.id { leaseRefused(id, r.holder) }
         lastMessageAt = now
@@ -521,6 +528,7 @@ final class ServerSimClient {
         leases.forget(id)
         bodies[id]?.remove()
         bodies[id] = nil
+        pendingSwap[id] = nil
         statics[id] = nil
         held[id] = nil
         if ui.selection?.id == id { ui.selection = nil }
@@ -541,22 +549,78 @@ final class ServerSimClient {
                                   objectKeys: Set(cat.items.filter { !$0.isAnimal }.map(\.key)))
     }
 
-    /// 12.8: a body drawn as a box because its kind was unknown gets its model once the runtime content has it.
-    private func contentChanged() {
-        for (id, b) in bodies where b.visual == .box {
-            guard let tr = tracks[id], visual(tr.snap) != .box else { continue }
-            redraw(tr.snap)
-            if let sel = ui.selection, sel.id == id { ui.selection = selection(tr.snap) }
+    /// 12.9 live models: the catalog / served low-poly models changed. A body drawn as a box whose kind is known now gets
+    /// its model; a body of a changed kind is re-built OFF-tree with the new model and swapped in once that has loaded
+    /// (same id, selection and label kept, no flicker, no despawn).
+    private func contentChanged(_ diff: SimContentDiff) {
+        let kinds = diff.redraw.union(diff.removed)
+        var swapped = 0
+        for (id, b) in bodies {
+            guard let tr = tracks[id] else { continue }
+            let s = tr.snap
+            let nv = visual(s)
+            if nv != b.visual {                                        // box -> its model, or a removed kind -> box
+                redraw(s)
+                if let sel = ui.selection, sel.id == id { ui.selection = selection(s) }
+            } else if affected(b.visual, s, by: kinds) {
+                swapLive(id, snap: s)
+                swapped += 1
+            }
+        }
+        if swapped > 0 || !diff.isEmpty {
+            model.log.event("sim_content_swap", ["changed": .int(diff.changed.count), "added": .int(diff.added.count),
+                                                 "removed": .int(diff.removed.count), "agents": .int(diff.agents.count),
+                                                 "bodies": .int(swapped)])
+        }
+    }
+
+    /// Does a content change of these kinds re-draw this body?
+    private func affected(_ v: SimServerVisual, _ s: SimEntitySnap, by kinds: Set<String>) -> Bool {
+        switch v {
+        case .animal(let k, _), .object(let k, _): return kinds.contains(k)
+        case .rcCar: return kinds.contains("toycar") || kinds.contains(RCCar.key)
+        case .robot: return kinds.contains(SimAgents.robotKey)
+        case .drone: return kinds.contains(SimAgents.droneKey)
+        case .box: return false
+        }
+    }
+
+    private func makeBody(_ s: SimEntitySnap, _ v: SimServerVisual) -> ServerSimBody {
+        ServerSimBody(id: s.id, visual: v, snap: s, library: model.controller.sim.library,
+                      catalog: model.controller.sim.catalog, label: layer.makeLabel(title(s.id), size: 0.03),
+                      log: { [weak self] e, d in self?.model.log.event(e, d) })
+    }
+
+    private func place(_ b: ServerSimBody, _ id: String) {
+        layer.simNode.addChild(b.root)
+        bodies[id] = b
+        if let tr = tracks[id] {
+            b.render(pose: tr.pose(now: now), snap: tr.snap, serverNow: clock.serverNow(local: now), now: now,
+                     turret: turretValue(id, now: now))
+        }
+    }
+
+    /// Build the new model next to the old body; replace once it can draw (the old one keeps showing until then).
+    private func swapLive(_ id: String, snap s: SimEntitySnap) {
+        let nb = makeBody(s, visual(s))
+        pendingSwap[id] = nb
+        nb.whenReady { [weak self, weak nb] in
+            guard let self, let nb, self.pendingSwap[id] === nb else { return }       // superseded or deleted meanwhile
+            self.pendingSwap[id] = nil
+            guard let old = self.bodies[id] else { return }
+            old.remove()
+            self.place(nb, id)
+            if let tr = self.tracks[id], let sel = self.ui.selection, sel.id == id { self.ui.selection = self.selection(tr.snap) }
+            self.model.log.event("sim_content_swapped", ["id": .string(id), "kind": .string(s.kind)])
         }
     }
 
     private func redraw(_ s: SimEntitySnap) {
+        pendingSwap[s.id] = nil
         bodies[s.id]?.remove()
         let v = visual(s)
         if v == .box { SimContentStore.shared.unknownKind(s.kind) }      // 12.8: maybe a new lab character
-        let b = ServerSimBody(id: s.id, visual: v, snap: s, library: model.controller.sim.library,
-                              catalog: model.controller.sim.catalog, label: layer.makeLabel(title(s.id), size: 0.03),
-                              log: { [weak self] e, d in self?.model.log.event(e, d) })
+        let b = makeBody(s, v)
         let drawn: String
         switch v {
         case .animal: drawn = "model"
@@ -568,12 +632,12 @@ final class ServerSimClient {
         }
         model.log.event("sim_server_body", ["id": .string(s.id), "kind": .string(s.kind), "drawn": .string(drawn),
                                             "scale": .double(s.scale ?? 0)])
-        layer.simNode.addChild(b.root)
-        bodies[s.id] = b
-        if let tr = tracks[s.id] {
-            b.render(pose: tr.pose(now: now), snap: tr.snap, serverNow: clock.serverNow(local: now), now: now,
-                     turret: turretValue(s.id, now: now))
-        }
+        place(b, s.id)
+    }
+
+    /// Catalog keys of the bodies in the world (the content store keeps their blobs and fetches them first).
+    var activeKinds: Set<String> {
+        Set(tracks.values.map { $0.snap.kind == RCCar.key ? "toycar" : $0.snap.kind })
     }
 
     private func title(_ id: String) -> String {

@@ -168,3 +168,23 @@ struct SimActionBar: View {
         }
     }
 }
+
+/// 12.9: "Models updating…" while the content store downloads changed sim models in the background (non-blocking;
+/// hides itself when done). Shown on the Sim HUD and in the spawn picker.
+struct ModelsUpdatingPill: View {
+    @ObservedObject private var content = SimContentStore.shared
+
+    var body: some View {
+        if let u = content.updating {
+            HStack(spacing: 6) {
+                ProgressView().controlSize(.mini)
+                Text(u.total > 0 ? "Models updating… \(u.done)/\(u.total)" : "Models updating…")
+                    .font(.caption2.weight(.semibold)).monospacedDigit().lineLimit(1)
+            }
+            .padding(.horizontal, 8).padding(.vertical, 4)
+            .background(.ultraThinMaterial, in: Capsule())
+            .accessibilityLabel("Sim models updating, \(u.done) of \(u.total)")
+            .allowsHitTesting(false)
+        }
+    }
+}

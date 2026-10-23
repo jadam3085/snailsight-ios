@@ -17,6 +17,7 @@ struct SpawnPickerView: View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
+                    ModelsUpdatingPill()                       // 12.9: new / changed models are still arriving
                     if query.isEmpty {
                         Picker("Kind", selection: $tab) {
                             Text("Animals").tag(SimCatalogItem.Category.animal)
@@ -158,7 +159,7 @@ private struct SpawnGroup: Identifiable {
     var id: String { name }
 }
 
-/// Bundled thumbnail (Resources/SimThumbs/<key>.png) or the catalog's SF Symbol.
+/// Cached runtime thumbnail (a server blob), the bundled fallback one (fox), or the catalog's SF Symbol.
 struct SimThumb: View {
     let item: SimCatalogItem
     var body: some View {

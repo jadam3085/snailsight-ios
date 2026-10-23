@@ -38,52 +38,66 @@ enum PartMesh {
     }
 }
 
-/// Bundled USDZ templates, loaded on demand (9.8: 9.7 preloaded every clip of every species at Sim on; with 35
-/// catalog items that would cost memory and heat for things nobody spawned). Callers get the template as soon as it
-/// is loaded — immediately if it already is.
+/// USDZ templates, loaded on demand (9.8: 9.7 preloaded every clip of every species at Sim on; with 35 catalog items that
+/// would cost memory and heat for things nobody spawned). Callers get the template as soon as it is loaded — immediately
+/// if it already is. 12.9: templates are keyed by the BYTES' identity (a runtime blob name, or the bundled file name), so
+/// a model re-exported under the same file name loads fresh, and a file nobody can resolve yet (no cache, no server) waits
+/// for the catalog instead of failing for good.
 final class SimModelLibrary {
-    private var templates: [String: Entity] = [:]
+    private var templates: [String: Entity] = [:]               // by key (blob name / bundled file)
     private var waiting: [String: [(Entity) -> Void]] = [:]
+    private var unresolved: [String: [(Entity) -> Void]] = [:]  // by catalog file name: not on disk, not bundled
+    private var fileOfKey: [String: String] = [:]
     private var subs: [String: AnyCancellable] = [:]
     private(set) var failed = Set<String>()
     var onLoaded: ((String, Entity, Double) -> Void)?          // file, template, ms
     var onError: ((String, String) -> Void)?
 
-    func loaded(_ file: String) -> Entity? { templates[file] }
+    func loaded(_ file: String) -> Entity? { SimContentStore.shared.resolve(file).flatMap { templates[$0.key] } }
 
     func request(_ file: String, _ done: @escaping (Entity) -> Void) {
-        if let t = templates[file] { done(t); return }
-        guard !failed.contains(file) else { return }
-        waiting[file, default: []].append(done)
-        guard subs[file] == nil else { return }
-        let name = (file as NSString).deletingPathExtension
-        // 12.8: a runtime item's file is a verified blob in Application Support/SimContent; else the bundle
-        guard let url = SimContentStore.shared.localURL(for: file)
-                ?? Bundle.main.url(forResource: name, withExtension: "usdz") else {
-            failed.insert(file)
-            waiting[file] = nil
-            onError?(file, "not in the app bundle or the runtime content")
+        guard let r = SimContentStore.shared.resolve(file) else {
+            unresolved[file, default: []].append(done)         // retried by retryUnresolved() when the catalog moves
             return
         }
+        let key = r.key
+        if let t = templates[key] { done(t); return }
+        guard !failed.contains(key) else { return }
+        waiting[key, default: []].append(done)
+        fileOfKey[key] = file
+        guard subs[key] == nil else { return }
         let t0 = CACurrentMediaTime()
-        subs[file] = Entity.loadAsync(contentsOf: url)
+        subs[key] = Entity.loadAsync(contentsOf: r.url)
             .receive(on: DispatchQueue.main)
             .sink(receiveCompletion: { [weak self] done in
                 guard let self else { return }
                 if case .failure(let e) = done {
-                    self.failed.insert(file)
-                    self.waiting[file] = nil
-                    self.subs[file] = nil
+                    self.failed.insert(key)
+                    self.waiting[key] = nil
+                    self.subs[key] = nil
                     self.onError?(file, "\(e)")
                 }
             }, receiveValue: { [weak self] ent in
                 guard let self else { return }
-                self.templates[file] = ent
-                self.subs[file] = nil
-                self.onLoaded?(file, ent, (CACurrentMediaTime() - t0) * 1000)
-                let cbs = self.waiting.removeValue(forKey: file) ?? []
+                self.templates[key] = ent
+                self.subs[key] = nil
+                self.onLoaded?(self.fileOfKey[key] ?? file, ent, (CACurrentMediaTime() - t0) * 1000)
+                let cbs = self.waiting.removeValue(forKey: key) ?? []
                 for cb in cbs { cb(ent) }
             })
+    }
+
+    /// The catalog moved: files that could not be resolved before may be on disk now.
+    func retryUnresolved() {
+        let u = unresolved
+        unresolved = [:]
+        for (f, cbs) in u { for cb in cbs { request(f, cb) } }
+    }
+
+    /// Drop the templates (memory) of models no catalog item references any more; bodies keep their own clones.
+    func retain(_ keys: Set<String>) {
+        for k in templates.keys where !keys.contains(k) { templates[k] = nil; fileOfKey[k] = nil }
+        failed = failed.filter { keys.contains($0) }
     }
 }
 
@@ -207,9 +221,12 @@ final class SimRobot {
     // 12.7 turret (API §5.9.10 robot `turret.spec`): the sensor head is a separable node yawing about origin_m, with a
     // pitch child carrying the head camera at camera_m (model frame: x forward, y up, z = −URDF y).
     let turretYaw = Entity(), turretPitch = Entity()
+    /// 12.9: the map server's low-poly RobosnailBob (agents.robot) when it serves one, else RobotModel.parts().
+    private let parts: [BodyPart]
 
     init(pose: DrivePose, floorY: Float, scale: Double) {
         self.scale = scale
+        parts = RobotModel.parts(served: SimContentStore.shared.robotParts)
         drive = DiffDrive(profile: RobotProfile.robosnailbob.scaled(scale), pose: pose)
         self.floorY = floorY
         support = SupportState(bottom: Double(floorY))
@@ -263,7 +280,7 @@ final class SimRobot {
                                materials: [SimpleMaterial(color: .systemRed, roughness: 0.3, isMetallic: false)])
         lens.position = SIMD3<Float>(0.027, 0, 0)
         turretPitch.addChild(lens)
-        for part in RobotModel.parts(p) {
+        for part in parts {
             let mesh = PartMesh.entity(part, material: Self.material(part.material))
             if part.name == "wheel.left" || part.name == "wheel.right" {
                 let pivot = part.name == "wheel.left" ? leftWheel : rightWheel
@@ -293,7 +310,7 @@ final class SimRobot {
 
     var position: V2 { drive.pose.position }
     /// Drawn size at the current scale (length, height, width).
-    var size: SIMD3<Double> { RobotModel.bounds(RobotModel.parts()).extents * scale }
+    var size: SIMD3<Double> { RobotModel.bounds(parts).extents * scale }
     var velocity: V2 { SimMath.unit(drive.pose.theta) * drive.v }
 
     func render(dt: Double) {

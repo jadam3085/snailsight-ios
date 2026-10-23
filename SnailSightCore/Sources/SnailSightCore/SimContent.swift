@@ -40,16 +40,35 @@ public struct SimContentDoc: Codable, Equatable {
     public var blobPath: String?
     public var items: [SimCatalogItem]
     public var rejected: [SimContentRejected]?
+    /// 12.9: served low-poly models ("robot" = RobosnailBob, "drone"); absent = the compiled-in drawings
+    public var agents: [String: SimAgentModel]?
 
-    enum CodingKeys: String, CodingKey { case version, rev, updated, items, rejected, blobPath = "blob_path" }
+    enum CodingKeys: String, CodingKey { case version, rev, updated, items, rejected, agents, blobPath = "blob_path" }
 
     public init(version: Int = 1, rev: String, updated: String? = nil, blobPath: String? = nil, items: [SimCatalogItem],
-                rejected: [SimContentRejected]? = nil) {
+                rejected: [SimContentRejected]? = nil, agents: [String: SimAgentModel]? = nil) {
         self.version = version; self.rev = rev; self.updated = updated; self.blobPath = blobPath; self.items = items
-        self.rejected = rejected
+        self.rejected = rejected; self.agents = agents
     }
 
     public static func decode(_ data: Data) throws -> SimContentDoc { try JSONDecoder().decode(SimContentDoc.self, from: data) }
+
+    /// One malformed item (an unknown category …) is skipped, never the whole document; a malformed `agents` entry too.
+    public init(from d: Decoder) throws {
+        let c = try d.container(keyedBy: CodingKeys.self)
+        version = (try? c.decode(Int.self, forKey: .version)) ?? 1
+        rev = try c.decode(String.self, forKey: .rev)
+        updated = try? c.decode(String.self, forKey: .updated)
+        blobPath = try? c.decode(String.self, forKey: .blobPath)
+        rejected = try? c.decode([SimContentRejected].self, forKey: .rejected)
+        items = (try? c.decode([Lossy<SimCatalogItem>].self, forKey: .items))?.compactMap(\.value) ?? []
+        agents = (try? c.decode([String: Lossy<SimAgentModel>].self, forKey: .agents))?.compactMapValues(\.value)
+    }
+
+    struct Lossy<T: Decodable>: Decodable {
+        var value: T?
+        init(from d: Decoder) throws { value = try? T(from: d) }
+    }
 }
 
 public enum SimContent {

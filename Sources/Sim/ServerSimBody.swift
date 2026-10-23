@@ -26,6 +26,10 @@ final class ServerSimBody {
     private var ghostedParts = 0
     private(set) var badge: Entity?
     private(set) var badgeText: String?
+    // 12.9: a model that is not on this phone yet (no cache, no server) shows a box of its size; the first clip that
+    // attaches replaces it (and a pending live swap commits when the new body has something to show)
+    private var placeholder: Entity?
+    private var readyWaiters: [() -> Void] = []
 
     /// `label`: the tag drawn above it (shown while selected). `height`: its drawn height (m) for the tag.
     init(id: String, visual: SimServerVisual, snap s: SimEntitySnap, library: SimModelLibrary, catalog: SimCatalog,
@@ -45,6 +49,7 @@ final class ServerSimBody {
                 let sz = item.size
                 body.addChild(SimShadow.make(length: Float(sz.x) * 0.8, width: Float(sz.z) * 1.2))
                 height = sz.y * scale
+                addPlaceholder(sz)
                 rig.load(item, library: library, log: log)
             } else {
                 log("sim_model_fallback", ["kind": .string(key), "why": .string("not in the bundled catalog")])
@@ -53,6 +58,7 @@ final class ServerSimBody {
             body.scale = SIMD3(repeating: Float(scale))
             if let item = catalog.item(key) {
                 height = item.size.y * scale
+                addPlaceholder(item.size)
                 if let f = item.file(clip: "static") ?? item.files?.values.sorted().first {
                     library.request(f) { [weak self] t in self?.rig.attach(clip: "static", template: t) }
                 } else {
@@ -66,6 +72,7 @@ final class ServerSimBody {
             body.scale = SIMD3<Float>(Float(k[0]), Float(k[1]), Float(k[2]))
             let ts = toy?.size ?? SIMD3(RCCar.toycarSizeM[0], RCCar.toycarSizeM[1], RCCar.toycarSizeM[2])
             body.addChild(SimShadow.make(length: Float(ts.x) * 0.9, width: Float(ts.z) * 1.1))
+            addPlaceholder(SIMD3(ts.x, ts.y, ts.z))
             height = RCCar.sizeM[1] * scale
             let file = toy?.file(clip: "static") ?? RCCar.modelFile
             library.request(file) { [weak self] t in self?.rig.attach(clip: "static", template: t) }
@@ -85,6 +92,40 @@ final class ServerSimBody {
         tag.isEnabled = false
         root.addChild(tag)
         self.height = height
+        rig.onAttached = { [weak self] in self?.modelArrived() }
+    }
+
+    /// Code-drawn bodies (RobosnailBob, drone, unknown-kind boxes) are ready at once; model bodies when a clip attached.
+    var isReady: Bool {
+        switch visual {
+        case .robot, .drone, .box: return true
+        default: return !rig.isEmpty
+        }
+    }
+
+    /// Run `done` once there is something real to show (live swap: load the new model, then replace the old body).
+    func whenReady(_ done: @escaping () -> Void) {
+        if isReady { done() } else { readyWaiters.append(done) }
+    }
+
+    private func modelArrived() {
+        placeholder?.removeFromParent()
+        placeholder = nil
+        let w = readyWaiters
+        readyWaiters = []
+        for f in w { f() }
+    }
+
+    /// A translucent box of the model's size (length, height, width at 100 %) under the scaled `body`.
+    private func addPlaceholder(_ size: SIMD3<Double>) {
+        guard placeholder == nil else { return }
+        let m = SimpleMaterial(color: UIColor(red: 0.75, green: 0.7, blue: 0.6, alpha: 0.55), roughness: 0.7, isMetallic: false)
+        let sz = SIMD3<Float>(Float(max(size.x, 0.05)), Float(max(size.y, 0.05)), Float(max(size.z, 0.05)))
+        let e = ModelEntity(mesh: .generateBox(size: sz, cornerRadius: min(sz.x, sz.y, sz.z) * 0.2), materials: [m])
+        e.position = SIMD3<Float>(0, sz.y / 2, 0)
+        e.name = "placeholder"
+        body.addChild(e)
+        placeholder = e
     }
 
     // MARK: X-ray ghost + badge
@@ -176,8 +217,10 @@ final class ServerSimBody {
         root.removeFromParent()
     }
 
-    /// The drawing for kinds the app has no model for (drone, unknown kinds): boxes in the map frame.
+    /// The drawing for kinds the app has no model for (drone, unknown kinds): boxes in the map frame. 12.9: the drone's
+    /// parts come from the map server (agents.drone, map frame) when it serves them.
     static func boxes(_ s: SimEntitySnap) -> [ModelEntity] {
+        if s.isDrone, let served = SimContentStore.shared.droneParts { return served.compactMap(servedPart) }
         let parts: [(SIMD3<Float>, SIMD3<Float>, UIColor)]
         if s.isDrone {
             let c = UIColor(red: 0.9, green: 0.9, blue: 0.95, alpha: 1)
@@ -197,5 +240,35 @@ final class ServerSimBody {
             m.position = off
             return m
         }
+    }
+
+    /// One served part (map frame: x forward, y left, z up).
+    private static func servedPart(_ p: SimPartSpec) -> ModelEntity? {
+        guard p.center.count == 3, p.size.count == 3 else { return nil }
+        let size = SIMD3<Float>(Float(p.size[0]), Float(p.size[1]), Float(p.size[2]))
+        let colour: UIColor
+        if let c = p.rgb { colour = UIColor(red: c.x, green: c.y, blue: c.z, alpha: 1) }
+        else {
+            switch p.material {
+            case "dark": colour = UIColor(white: 0.12, alpha: 1)
+            case "light": colour = UIColor(red: 0.88, green: 0.86, blue: 0.80, alpha: 1)
+            case "grey": colour = UIColor(white: 0.55, alpha: 1)
+            default: colour = UIColor(red: 0.9, green: 0.9, blue: 0.95, alpha: 1)
+            }
+        }
+        let mat = SimpleMaterial(color: colour, roughness: 0.6, isMetallic: false)
+        let m: ModelEntity
+        switch p.shape {
+        case "cylinderZ":
+            m = ModelEntity(mesh: .generateCylinder(height: size.z, radius: size.x / 2), materials: [mat])
+            m.orientation = simd_quatf(angle: .pi / 2, axis: SIMD3(1, 0, 0))
+        case "cylinderY":
+            m = ModelEntity(mesh: .generateCylinder(height: size.y, radius: size.x / 2), materials: [mat])
+        default:
+            m = ModelEntity(mesh: .generateBox(size: size, cornerRadius: Float(p.corner ?? min(size.x, size.y, size.z) * 0.2)),
+                            materials: [mat])
+        }
+        m.position = SIMD3<Float>(Float(p.center[0]), Float(p.center[1]), Float(p.center[2]))
+        return m
     }
 }

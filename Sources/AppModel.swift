@@ -496,7 +496,11 @@ final class AppModel: ObservableObject {
         let q = queue!, lg = logs!
         Task { await link.whenOnline { Task { try? await lg.syncAll(); await q.kick(reason: "online") } } }
         let slog = services.log
-        SimContentStore.shared.attach(link: link, log: { e, d in slog.event(e, d) })   // 12.8 runtime sim content
+        SimContentStore.shared.inUse = { [weak self] in
+            guard let self else { return ([], []) }
+            return (self.serverSim.activeKinds.union(self.controller.sim.activeKinds), self.simRecents.keys)
+        }
+        SimContentStore.shared.attach(link: link, log: { e, d in slog.event(e, d) })   // 12.8 runtime sim content, 12.9 all models
         Task { await link.startMonitoring() }
         Task { [weak self] in
             guard let self else { return }

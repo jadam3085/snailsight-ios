@@ -13,7 +13,7 @@ It is built Mac-less on GitHub Actions and produces an **unsigned** `.ipa`; sign
 - `Sources/` the app (SwiftUI shell, AR session, recorder, upload queue, scans viewer, sim, live map).
 - `SnailSightCore/` Swift package with the pure logic (geometry, networking decisions, log format, sim brains, ...);
   `swift test` runs on Linux in CI.
-- `Resources/` app icon, sim models (CC0 / CC BY, see `Resources/SimModels/ATTRIBUTION.md`) and thumbnails.
+- `Resources/` app icon, the minimal offline sim model (fox; CC BY, see `Resources/SimModels/ATTRIBUTION.md`). Every other sim model is served live by the map server (12.9).
 - `upstream/apple-reconstructed-scene/` Apple's sample code, unmodified (the AR base).
 
 ## Build

@@ -113,6 +113,8 @@ final class SimController: NSObject, UIGestureRecognizerDelegate {
     private let root = AnchorEntity(world: matrix_identity_float4x4)
     private let query: SceneQuery
     var catalog: SimCatalog { SimContentStore.shared.catalog }     // 12.8: bundled + runtime content
+    /// Catalog keys of the local bodies (kept cached by the content store).
+    var activeKinds: Set<String> { Set(animals.map { $0.item.key } + objects.map { $0.item.key }) }
     let library = SimModelLibrary()                     // 10.5: shared with the server sim's drawing (ServerSimClient)
     private var updateSub: Cancellable?
     private var uiSubs: [AnyCancellable] = []
@@ -222,6 +224,12 @@ final class SimController: NSObject, UIGestureRecognizerDelegate {
         pan.maximumNumberOfTouches = 1
         uiSubs.append(ui.$scaleRef.dropFirst().sink { [weak self] on in self?.scaleRefChanged(on) })
         library.onLoaded = { [weak self] file, ent, ms in self?.modelLoaded(file, ent, ms) }
+        // 12.9: models arrive / change at runtime: files that had no source yet load, unreferenced templates go
+        uiSubs.append(SimContentStore.shared.$lastChange.compactMap { $0 }.receive(on: DispatchQueue.main).sink { [weak self] _ in
+            guard let self else { return }
+            self.library.retain(SimContentStore.shared.libraryKeys)
+            self.library.retryUnresolved()
+        })
         library.onError = { [weak self] file, err in
             guard let self else { return }
             let kind = self.catalog.items.first { ($0.files ?? [:]).values.contains(file) }?.key ?? file

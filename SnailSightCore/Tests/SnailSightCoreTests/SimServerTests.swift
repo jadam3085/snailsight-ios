@@ -244,7 +244,7 @@ final class SimServerTests: XCTestCase {
         let dir = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
             .deletingLastPathComponent().deletingLastPathComponent().appendingPathComponent("Resources/SimModels")
         let cat = try SimCatalog.decode(Data(contentsOf: dir.appendingPathComponent("catalog.json")))
-        XCTAssertGreaterThan(cat.items.count, 10)
+        XCTAssertGreaterThanOrEqual(cat.items.count, 1)           // 12.9: the minimal fallback bundle
         let animals = Set(cat.items.filter(\.isAnimal).map(\.key)), objects = Set(cat.items.filter { !$0.isAnimal }.map(\.key))
         for it in cat.items {
             let cat = it.isAnimal ? "animal" : "object"

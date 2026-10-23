@@ -71,6 +71,7 @@ struct HUDView: View {
             if let c = model.cubeSel, !model.recording { CubeBar(cube: c) }
             if model.simOn && !model.recording && model.spawnMode { SpawnModeBanner() }
             if model.simOn && !model.recording {
+                ModelsUpdatingPill()                               // 12.9: sim models download in the background
                 AgentOpsPanel(ui: model.serverSim.ui)              // 12.0 O2: drone / rover ops
                 SimArea(shared: model.serverSim.ui)               // the details card: every command of the selection
             }
