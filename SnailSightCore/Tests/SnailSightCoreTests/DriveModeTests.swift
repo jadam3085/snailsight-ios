@@ -77,7 +77,7 @@ final class DriveModeTests: XCTestCase {
         XCTAssertEqual(t.drivenByOther("r1", serverNow: 100), "portal (cop.snail)")
         XCTAssertNil(t.drivenByOther("r1", serverNow: 110))                 // its lease ran out
         XCTAssertEqual(t.observe(SimLeaseEvent(entityID: "r1", owner: "phone-1", granted: true, takenFrom: "snailcop-portal-a"),
-                                 me: "phone-1").flash(title: "RobosnailBob"), "You took over RobosnailBob from snailcop-portal-a")
+                                 me: "phone-1").flash(title: "RobosnailBob"), "You took over RobosnailBob from portal (cop.snail)")
         XCTAssertNil(t.drivenByOther("r1"))
         // older servers: string detail; a non-409 ack is not a lease refusal
         XCTAssertEqual(LeaseHolder.refusal(Data(#"{"type":"ack","ok":false,"status":409,"detail":"leased"}"#.utf8))?.holder.label,

@@ -217,9 +217,10 @@ public struct LeaseTracker: Equatable {
         if e.granted == true {
             let who = e.owner ?? e.by
             if who == me {
+                let from = e.takenFrom.map { others[id]?.label ?? $0 }      // the people label when we knew the holder
                 others[id] = nil
                 mine.insert(id)
-                return .mine(takenFrom: e.takenFrom)
+                return .mine(takenFrom: from)
             }
             let fromMe = mine.contains(id) || e.takenFrom == me
             mine.remove(id)
