@@ -294,6 +294,47 @@ public struct ChangeMarkers: Equatable {
     }
 }
 
+// MARK: 12.13 ghosts of moved objects
+
+/// A moved chair stays in the textured house tiles until the server promotes the removal and rebuilds the tile
+/// (another session must confirm it, then hours of tile work). Meanwhile the live change detector has already
+/// CONFIRMED that the space is empty: every active `removed` region becomes an occlusion box in AR, so the old base
+/// geometry inside it is not drawn and the real camera image shows through. Over-padding is harmless (it only reveals
+/// the real room), so the box is padded like the server's promotion mask (the region holds only the near faces the
+/// walk saw through) and starts just above its bottom so the floor under the object stays.
+public struct GhostMasks: Equatable {
+    public struct Box: Equatable {
+        public var center: [Double]                 // map x, y, z
+        public var size: [Double]                   // extents
+    }
+    public static let padM = 0.20                   // = server livepromote.REMOVE_PAD_M
+    public static let floorKeepM = 0.03
+    public static let topPadM = 0.10
+    public static let maxCount = 64
+    public private(set) var boxes: [String: Box] = [:]
+    public init() {}
+
+    /// A downlink `change` message. true = the set changed. `bbox` = [xmin, ymin, zmin, xmax, ymax, zmax].
+    @discardableResult
+    public mutating func apply(key: String, kind: String, state: String?, bbox: [Double]?) -> Bool {
+        guard kind == "removed", !key.isEmpty else { return false }
+        if state == "cleared" || state == "dynamic" {
+            return boxes.removeValue(forKey: key) != nil
+        }
+        guard let b = bbox, b.count == 6, b.allSatisfy({ $0.isFinite }), b[3] >= b[0], b[4] >= b[1], b[5] >= b[2]
+        else { return false }
+        let lo = [b[0] - Self.padM, b[1] - Self.padM, b[2] + Self.floorKeepM]
+        let hi = [b[3] + Self.padM, b[4] + Self.padM, max(b[5] + Self.topPadM, b[2] + Self.floorKeepM + 0.05)]
+        let box = Box(center: (0..<3).map { (lo[$0] + hi[$0]) / 2 }, size: (0..<3).map { hi[$0] - lo[$0] })
+        if boxes[key] == box { return false }
+        if boxes[key] == nil && boxes.count >= Self.maxCount { return false }
+        boxes[key] = box
+        return true
+    }
+
+    public mutating func removeAll() { boxes.removeAll() }
+}
+
 // MARK: other agents
 
 /// An agent in GET /v1/live/state (API §6b) or a downlink `agents` message.

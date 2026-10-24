@@ -426,3 +426,11 @@ or "changes", and are not promoted. No AR configuration change. Core: `LiveMask.
 triangle) is hidden wherever a textured house tile is drawn on the same 4 m cell (leaf or parent), unless a change
 marker (something moved) lies in that cell. New territory and Wire / Ghost styles still show the live mesh. Core
 `LiveOverBase` (+ tests). Log `live_mesh_under_base {hidden, tiles}`.
+
+**12.13 (ghosts of moved objects hidden in AR)**: owner: "a lot of objects that won't disappear that used to be in another
+place, like moved chairs". The old chair is in the textured house tiles until the server promotes the removal (another
+session must confirm it) and rebuilds the tile. The live change detector already CONFIRMS the empty space, so every active
+`removed` region from the downlink becomes an occlusion box in AR (`GhostMasks`: padded 20 cm like the server's promotion
+mask, starting 3 cm above the region's bottom so the floor stays): the base geometry inside is not drawn and the camera
+shows the room as it is. The box is removed when the server clears the region (object put back). Side effect: overlay
+content right behind a box (a wall) also shows the camera image there. Log `ghost_masks {boxes}`. Core + tests.
