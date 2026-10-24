@@ -406,3 +406,12 @@ selection and label). `SimModelLibrary` keys templates by blob name. The bundle 
 a body without a model draws a box that is swapped when it arrives. "Models updating… n/m" pill on the Sim HUD and in the
 spawn picker. Core: `SimLive.swift` (diff, cache policy, fallback, agents, catalog event) + `SimLiveTests`. Logs:
 `sim_content_event`, `sim_content_sync` (+ changed/removed/evicted/cache_bytes), `sim_content_swap(ped)`.
+
+**12.10 (sharp live keyframes, mapping v3 plan)**: owner: "multiple walks and mapping runs degrades the appearance of the
+environment rather than improving it ... I need a way to explore and generate continuous map improvement." Root causes
+and the phased fix: `docs/MAPPING-V3-PLAN.md`. App part shipped now:
+- **Blur-gated live keyframes** (`LiveGate.decide`): a due keyframe predicted blurrier than 2 px waits for a sharper
+  frame (≤ 6 px after 0.2 s, anything after 0.4 s; the 2 Hz rate holds). Same blur model and thresholds as the Map mesh
+  keyframes. The live stream used to send the first frame after each tick, often a smeared turn.
+- Live keyframe header: optional `blur_px`, `exposure_s` (extra keys; the server ignores them until it ranks by them).
+- Log `live_off` + `blurry_frames`. Tests: `LiveGateTests.testBlurHold`, `testHeaderQualityKeys`.

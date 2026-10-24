@@ -1,7 +1,8 @@
 // SnailSight 10 "Live map" (plan §8.9 L1; wire contract docs/SNAILSIGHT-API.md §6b "Live keyframe streaming").
 //
 // While the mode is on and ARKit tracks normally, a keyframe is taken at 1–2 Hz (skipped while the phone is still:
-// < 2 cm and < 2° since the last one): RGB 1024×768 JPEG (q 0.5) + LiDAR depth 16-bit PNG (mm) + confidence 8-bit PNG,
+// < 2 cm and < 2° since the last one; 12.10: a frame predicted blurrier than 2 px waits up to 0.4 s for a sharper one,
+// LiveGate.decide): RGB 1024×768 JPEG (q 0.5) + LiDAR depth 16-bit PNG (mm) + confidence 8-bit PNG,
 // K for camera.imageResolution and T_arkit_cam, encoded off the main thread into the binary `SSKF` frame
 // (SnailSightCore.LiveKeyframe) and written to a disk SPOOL (Caches/livespool/<stream_id>/<seq>.kf) BEFORE it is sent,
 // so a Wi-Fi drop, a server restart or memory pressure loses nothing. The uplink (LiveUplink, one serial queue) keeps
@@ -51,6 +52,8 @@ final class LiveStreamer {
     private var snapshot = LiveSnapshot()
     private var pausedReason: String?
     private var skippedStill = 0
+    private var skippedBlurry = 0
+    private var motionPrev: (t: Double, pos: [Double], q: CaptureFormat.Quat)?
     private let ci = CIContext(options: [.cacheIntermediates: false])
     private let enc = DispatchQueue(label: "snailsight.live.encode", qos: .utility)
 
@@ -92,7 +95,8 @@ final class LiveStreamer {
             uplink.start(stream: streamID, mapID: model.liveMapID, rateHz: gate.rateHz)
         } else {
             model.log.event("live_off", ["stream_id": .string(streamID), "last_seq": .int(nextSeq - 1),
-                                         "queue": .int(snapshot.queue), "still_frames": .int(skippedStill)])
+                                         "queue": .int(snapshot.queue), "still_frames": .int(skippedStill),
+                                         "blurry_frames": .int(skippedBlurry)])
             uplink.stop()
         }
         if !model.arSuspended { model.controller.rerunConfiguration() }     // .sceneDepth on / off
@@ -148,13 +152,28 @@ final class LiveStreamer {
             model.log.event("live_pause", ["reason": .string(paused ?? "resumed")])
             publish()
         }
-        guard paused == nil, !encoding, let depth = f.sceneDepth else { return }
+        guard paused == nil, let depth = f.sceneDepth else { motionPrev = nil; return }
         let M = f.camera.transform
         var T = [Double](repeating: 0, count: 16)          // row-major camera → world
         for c in 0..<4 { for r in 0..<4 { T[r * 4 + c] = Double(M[c][r]) } }
-        switch gate.check(t: f.timestamp, T: T) {
+        // 12.10 blur hold: predicted blur from the frame-to-frame motion (as MeshMapper), sharp frames win the tick
+        let pos = [T[3], T[7], T[11]], q = CaptureFormat.quaternion(rows: [[T[0], T[1], T[2]], [T[4], T[5], T[6]],
+                                                                          [T[8], T[9], T[10]]])
+        var blur: Double?
+        if let p = motionPrev, f.timestamp > p.t {
+            let dt = f.timestamp - p.t
+            let dx = pos[0] - p.pos[0], dy = pos[1] - p.pos[1], dz = pos[2] - p.pos[2]
+            blur = KeyframeQuality.predictedBlurPx(
+                angularSpeedRadS: AdaptiveCapture.rotationDegrees(p.q, q) * .pi / 180 / dt,
+                linearSpeedMS: (dx * dx + dy * dy + dz * dz).squareRoot() / dt, depthM: 1.5,
+                exposureS: f.camera.exposureDuration, focalPx: Double(f.camera.intrinsics[0][0]))
+        }
+        motionPrev = (f.timestamp, pos, q)
+        guard !encoding else { return }
+        switch gate.decide(t: f.timestamp, T: T, blurPx: blur) {
         case .capture: break
         case .still: skippedStill += 1; return
+        case .blurry: skippedBlurry += 1; return
         case .tooSoon: return
         }
         gate.commit(t: f.timestamp, T: T)
@@ -167,6 +186,7 @@ final class LiveStreamer {
         let conf = depth.confidenceMap.map { CaptureRecorder.copyBytes($0) }
         let img = CIImage(cvPixelBuffer: f.capturedImage)
         let stream = streamID, stamp = f.timestamp, wall = Date().timeIntervalSince1970
+        let exposure = f.camera.exposureDuration, kfBlur = blur
         enc.async { [weak self] in
             guard let self else { return }
             let rgb = self.jpeg(img)
@@ -182,7 +202,7 @@ final class LiveStreamer {
                 let seq = self.nextSeq                              // seqs stay contiguous: assigned only on success
                 self.nextSeq += 1
                 let h = LiveKeyframeHeader(seq: seq, streamID: stream, t: stamp, wall: wall, T: T, K: Kv,
-                                           imageSize: size, tracking: "normal")
+                                           imageSize: size, tracking: "normal", blurPx: kfBlur, exposureS: exposure)
                 var blobs: [(name: String, data: Data)] = [(name: "depth_png", data: dp), (name: "rgb_jpg", data: rgb)]
                 if let cp { blobs.append((name: "conf_png", data: cp)) }
                 self.uplink.enqueue(h, blobs: blobs)

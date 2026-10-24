@@ -90,6 +90,47 @@ final class LiveGateTests: XCTestCase {
         XCTAssertEqual(g.check(t: 0.7, T: pose()), .capture)
     }
 
+    func testBlurHold() {
+        var g = LiveGate(rateHz: 2)
+        XCTAssertEqual(g.decide(t: 0, T: pose(), blurPx: nil), .capture)          // unknown blur: at once
+        g.commit(t: 0, T: pose())
+        XCTAssertEqual(g.decide(t: 0.5, T: pose(x: 1), blurPx: 1.5), .capture)    // sharp: at once
+        g.commit(t: 0.5, T: pose(x: 1))
+        XCTAssertNil(g.dueSince)
+        XCTAssertEqual(g.decide(t: 1.0, T: pose(x: 2), blurPx: 9), .blurry)       // smeared turn: wait
+        XCTAssertEqual(g.dueSince, 1.0)
+        XCTAssertEqual(g.decide(t: 1.1, T: pose(x: 2), blurPx: 5), .blurry)       // ≤ 6 px, but < 0.2 s
+        XCTAssertEqual(g.decide(t: 1.15, T: pose(x: 2), blurPx: 1.9), .capture)   // sharp one arrives
+        g.commit(t: 1.15, T: pose(x: 2))
+        XCTAssertEqual(g.decide(t: 1.7, T: pose(x: 3), blurPx: 9), .blurry)
+        XCTAssertEqual(g.decide(t: 1.95, T: pose(x: 3), blurPx: 5), .capture)     // ≤ 6 px after 0.2 s
+        g.commit(t: 1.95, T: pose(x: 3))
+        XCTAssertEqual(g.decide(t: 2.5, T: pose(x: 4), blurPx: 20), .blurry)
+        XCTAssertEqual(g.decide(t: 2.85, T: pose(x: 4), blurPx: 20), .blurry)
+        XCTAssertEqual(g.decide(t: 2.95, T: pose(x: 4), blurPx: 20), .capture)    // ≥ 0.4 s: take it anyway
+        g.commit(t: 2.95, T: pose(x: 4))
+        XCTAssertEqual(g.decide(t: 3.5, T: pose(x: 5), blurPx: 9), .blurry)
+        XCTAssertEqual(g.decide(t: 3.6, T: pose(x: 4.01), blurPx: 9), .still)     // back where it was: no keyframe
+        XCTAssertNil(g.dueSince)                                                    // ... and the hold restarts
+        XCTAssertEqual(g.decide(t: 3.7, T: pose(x: 5), blurPx: 9), .blurry)
+        XCTAssertEqual(g.dueSince, 3.7)
+    }
+
+    func testHeaderQualityKeys() {
+        let T = [Double](repeating: 0, count: 16)
+        var h = LiveKeyframeHeader(seq: 1, streamID: "ar-00000001", t: 1, wall: 2, T: T, K: [1, 1, 0, 0], imageSize: [4, 3])
+        var o = LiveKeyframe.headerObject(h, blobs: [])
+        XCTAssertNil(o["blur_px"])
+        XCTAssertNil(o["exposure_s"])
+        h.blurPx = 1.25
+        h.exposureS = .nan
+        o = LiveKeyframe.headerObject(h, blobs: [])
+        XCTAssertEqual(o["blur_px"] as? Double, 1.25)
+        XCTAssertEqual(o["exposure_s"] as? Double, 0)                               // non-finite -> 0, never NaN
+        let data = LiveKeyframe.encode(h, blobs: [(name: "rgb_jpg", data: Data([1, 2]))])
+        XCTAssertEqual(LiveKeyframe.parse(data!)?.header["blur_px"] as? Double, 1.25)
+    }
+
     func testRateClamp() {
         XCTAssertEqual(LiveGate.clampRate(0.3), 1)
         XCTAssertEqual(LiveGate.clampRate(1), 1)

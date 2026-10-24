@@ -31,11 +31,16 @@ public struct LiveKeyframeHeader: Equatable {
     public var K: [Double]               // fx, fy, cx, cy for imageSize
     public var imageSize: [Int]          // [w, h] the size K refers to (camera.imageResolution)
     public var tracking: String
+    /// 12.10, optional (omitted when nil): predicted motion blur in full-res px and the exposure time, so the server can
+    /// rank keyframes by sharpness for colour / promotion (extra header keys; older servers ignore them).
+    public var blurPx: Double?
+    public var exposureS: Double?
 
     public init(seq: Int, streamID: String, t: Double, wall: Double, T: [Double], K: [Double], imageSize: [Int],
-                tracking: String = "normal") {
+                tracking: String = "normal", blurPx: Double? = nil, exposureS: Double? = nil) {
         self.seq = seq; self.streamID = streamID; self.t = t; self.wall = wall
         self.T = T; self.K = K; self.imageSize = imageSize; self.tracking = tracking
+        self.blurPx = blurPx; self.exposureS = exposureS
     }
 }
 
@@ -46,7 +51,7 @@ public enum LiveKeyframe {
 
     /// The header JSON object, `blobs` = [[name, byteLength], …] in payload order.
     public static func headerObject(_ h: LiveKeyframeHeader, blobs: [(name: String, length: Int)]) -> [String: Any] {
-        [
+        var o: [String: Any] = [
             "seq": h.seq,
             "stream_id": h.streamID,
             "t": fin(h.t),
@@ -57,6 +62,9 @@ public enum LiveKeyframe {
             "tracking": h.tracking,
             "blobs": blobs.map { [$0.name, $0.length] as [Any] },
         ]
+        if let b = h.blurPx { o["blur_px"] = fin(b) }
+        if let e = h.exposureS { o["exposure_s"] = fin(e) }
+        return o
     }
 
     /// `b"SSKF"` + uint32 big-endian header length + header JSON (UTF-8) + blobs back to back. nil only if the header
@@ -110,22 +118,47 @@ public enum LiveKeyframe {
 
 /// Take a keyframe at most every 1 / rateHz s, and only when the phone moved ≥ 2 cm or turned ≥ 2° since the last
 /// keyframe (a still phone sends nothing; no keep-alive frames).
+///
+/// 12.10 blur hold (`decide`): a due frame predicted blurrier than `blurOK` px is skipped (`.blurry`) while a sharper
+/// one may still come: ≤ `blurLate` px is taken after `holdS` / 2, anything after `holdS`. The server's live colour,
+/// the change ledger and M7 promotion all read these frames, and the first frame after the tick was often a smeared
+/// turn (the Map mesh / recorder keyframes have picked sharp frames since 9.4; the live stream never did).
 public struct LiveGate {
-    public enum Decision: Equatable { case capture, tooSoon, still }
+    public enum Decision: Equatable { case capture, tooSoon, still, blurry }
     public static let minMoveM = 0.02
     public static let minTurnDeg = 2.0
     public static let allowedRates: [Double] = [1, 2]
+    public static let blurOK = MeshMapGate.blurOK          // 2 px
+    public static let blurLate = MeshMapGate.blurLate      // 6 px
+    public static let holdS = 0.4                          // < the 0.5 s interval at 2 Hz: the rate still holds
 
     public var rateHz: Double
     public private(set) var lastT: Double?
     private var lastPos: [Double]?
     private var lastQ: CaptureFormat.Quat?
+    public private(set) var dueSince: Double?
 
     public init(rateHz: Double = 2) { self.rateHz = Self.clampRate(rateHz) }
 
     public static func clampRate(_ r: Double) -> Double { r <= 1.5 ? 1 : 2 }
 
-    public mutating func reset() { lastT = nil; lastPos = nil; lastQ = nil }
+    public mutating func reset() { lastT = nil; lastPos = nil; lastQ = nil; dueSince = nil }
+
+    /// `check` + the blur hold. `blurPx` = predicted motion blur (KeyframeQuality.predictedBlurPx), nil = unknown
+    /// (taken at once, as before). Call `commit` when the answer is `.capture`.
+    public mutating func decide(t: Double, T: [Double], blurPx: Double?) -> Decision {
+        let d = check(t: t, T: T)
+        guard d == .capture else {
+            if d == .still { dueSince = nil }
+            return d
+        }
+        guard let b = blurPx, b > Self.blurOK else { return .capture }
+        let since = dueSince ?? t
+        dueSince = since
+        let waited = t - since
+        if waited >= Self.holdS || (waited >= Self.holdS / 2 && b <= Self.blurLate) { return .capture }
+        return .blurry
+    }
 
     /// `T` = row-major camera → world.
     public func check(t: Double, T: [Double]) -> Decision {
@@ -140,6 +173,7 @@ public struct LiveGate {
     public mutating func commit(t: Double, T: [Double]) {
         guard T.count == 16 else { return }
         lastT = t
+        dueSince = nil
         lastPos = [T[3], T[7], T[11]]
         lastQ = Self.quat(T)
     }
