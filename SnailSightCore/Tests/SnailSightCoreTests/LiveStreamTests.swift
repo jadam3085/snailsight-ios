@@ -131,6 +131,19 @@ final class LiveGateTests: XCTestCase {
         XCTAssertEqual(LiveKeyframe.parse(data!)?.header["blur_px"] as? Double, 1.25)
     }
 
+    func testPersonMaskBinarize() {
+        XCTAssertNil(LiveMask.binarize([]))
+        XCTAssertNil(LiveMask.binarize([UInt8](repeating: 200, count: 1) + [UInt8](repeating: 0, count: 999)))  // 0.1 %
+        var conf = [UInt8](repeating: 10, count: 1000)
+        for i in 0..<10 { conf[i] = 128 }                                   // 1 %
+        conf[10] = 127
+        let m = LiveMask.binarize(conf)
+        XCTAssertEqual(m?.count, 1000)
+        XCTAssertEqual(m?.filter { $0 == 255 }.count, 10)
+        XCTAssertEqual(m?[10], 0)
+        XCTAssertEqual(LiveMask.blobName, "mask_png")
+    }
+
     func testRateClamp() {
         XCTAssertEqual(LiveGate.clampRate(0.3), 1)
         XCTAssertEqual(LiveGate.clampRate(1), 1)

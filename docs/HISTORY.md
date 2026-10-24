@@ -415,3 +415,9 @@ and the phased fix: `docs/MAPPING-V3-PLAN.md`. App part shipped now:
   keyframes. The live stream used to send the first frame after each tick, often a smeared turn.
 - Live keyframe header: optional `blur_px`, `exposure_s` (extra keys; the server ignores them until it ranks by them).
 - Log `live_off` + `blurry_frames`. Tests: `LiveGateTests.testBlurHold`, `testHeaderQualityKeys`.
+
+**12.11 (people masked out of the live map)**: each live keyframe runs Vision person segmentation (balanced, on the
+encode queue, ≤ 2 Hz) and sends a 0 / 255 `mask_png` blob when ≥ 0.2 % of the image is a person. The server (snailCOP
+d77a3b2) zeroes those depth pixels at decode, so people walking through never become ghosts in the mesh, colour smears
+or "changes", and are not promoted. No AR configuration change. Core: `LiveMask.binarize` (+ test). Log `live_off` +
+`masked_frames`.

@@ -114,6 +114,28 @@ public enum LiveKeyframe {
     }
 }
 
+// MARK: - exclusion mask (12.11, mapping v3 L2)
+
+/// People in a live keyframe: Vision person segmentation (0…255 confidence per pixel) → a 0 / 255 mask sent as the
+/// optional `mask_png` blob; the server zeroes those depth pixels, so a person walking through never becomes a ghost in
+/// the mesh, a colour smear or a "change". No blob when (almost) nobody is in view.
+public enum LiveMask {
+    public static let blobName = "mask_png"
+    public static let threshold: UInt8 = 128
+    public static let minFraction = 0.002            // < 0.2 % of the image: segmentation noise, send nothing
+
+    /// 0 / 255 per pixel, or nil when fewer than `minFraction` of the pixels reach `threshold`.
+    public static func binarize(_ conf: [UInt8]) -> [UInt8]? {
+        guard !conf.isEmpty else { return nil }
+        var n = 0
+        let out = conf.map { c -> UInt8 in
+            if c >= threshold { n += 1; return 255 }
+            return 0
+        }
+        return Double(n) >= minFraction * Double(conf.count) ? out : nil
+    }
+}
+
 // MARK: - capture gate (rate + stillness)
 
 /// Take a keyframe at most every 1 / rateHz s, and only when the phone moved ≥ 2 cm or turned ≥ 2° since the last

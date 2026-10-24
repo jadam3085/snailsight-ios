@@ -2,7 +2,8 @@
 //
 // While the mode is on and ARKit tracks normally, a keyframe is taken at 1–2 Hz (skipped while the phone is still:
 // < 2 cm and < 2° since the last one; 12.10: a frame predicted blurrier than 2 px waits up to 0.4 s for a sharper one,
-// LiveGate.decide): RGB 1024×768 JPEG (q 0.5) + LiDAR depth 16-bit PNG (mm) + confidence 8-bit PNG,
+// LiveGate.decide): RGB 1024×768 JPEG (q 0.5) + LiDAR depth 16-bit PNG (mm) + confidence 8-bit PNG (+ 12.11: a person
+// mask PNG when Vision finds people, so the server leaves them out of the map),
 // K for camera.imageResolution and T_arkit_cam, encoded off the main thread into the binary `SSKF` frame
 // (SnailSightCore.LiveKeyframe) and written to a disk SPOOL (Caches/livespool/<stream_id>/<seq>.kf) BEFORE it is sent,
 // so a Wi-Fi drop, a server restart or memory pressure loses nothing. The uplink (LiveUplink, one serial queue) keeps
@@ -22,6 +23,7 @@ import CoreImage
 import Foundation
 import SnailSightCore
 import UIKit
+import Vision
 
 /// What the uplink reports to the HUD (main thread), once a second.
 struct LiveSnapshot: Equatable {
@@ -53,6 +55,13 @@ final class LiveStreamer {
     private var pausedReason: String?
     private var skippedStill = 0
     private var skippedBlurry = 0
+    private var maskedFrames = 0
+    private let personRequest: VNGeneratePersonSegmentationRequest = {     // used on `enc` only (serial)
+        let r = VNGeneratePersonSegmentationRequest()
+        r.qualityLevel = .balanced
+        r.outputPixelFormat = kCVPixelFormatType_OneComponent8
+        return r
+    }()
     private var motionPrev: (t: Double, pos: [Double], q: CaptureFormat.Quat)?
     private let ci = CIContext(options: [.cacheIntermediates: false])
     private let enc = DispatchQueue(label: "snailsight.live.encode", qos: .utility)
@@ -96,7 +105,7 @@ final class LiveStreamer {
         } else {
             model.log.event("live_off", ["stream_id": .string(streamID), "last_seq": .int(nextSeq - 1),
                                          "queue": .int(snapshot.queue), "still_frames": .int(skippedStill),
-                                         "blurry_frames": .int(skippedBlurry)])
+                                         "blurry_frames": .int(skippedBlurry), "masked_frames": .int(maskedFrames)])
             uplink.stop()
         }
         if !model.arSuspended { model.controller.rerunConfiguration() }     // .sceneDepth on / off
@@ -184,7 +193,8 @@ final class LiveStreamer {
         let size = [Int(res.width), Int(res.height)]
         let (d, dw, dh) = CaptureRecorder.copyDepth(depth.depthMap)
         let conf = depth.confidenceMap.map { CaptureRecorder.copyBytes($0) }
-        let img = CIImage(cvPixelBuffer: f.capturedImage)
+        let pixels = f.capturedImage
+        let img = CIImage(cvPixelBuffer: pixels)
         let stream = streamID, stamp = f.timestamp, wall = Date().timeIntervalSince1970
         let exposure = f.camera.exposureDuration, kfBlur = blur
         enc.async { [weak self] in
@@ -192,6 +202,7 @@ final class LiveStreamer {
             let rgb = self.jpeg(img)
             let dp = CaptureRecorder.png(d, width: dw, height: dh, bits: 16)
             let cp = conf.flatMap { CaptureRecorder.png($0.0, width: $0.1, height: $0.2, bits: 8) }
+            let mp = self.personMaskPNG(pixels)
             DispatchQueue.main.async {
                 self.encoding = false
                 guard let dp, let rgb else {
@@ -205,9 +216,24 @@ final class LiveStreamer {
                                            imageSize: size, tracking: "normal", blurPx: kfBlur, exposureS: exposure)
                 var blobs: [(name: String, data: Data)] = [(name: "depth_png", data: dp), (name: "rgb_jpg", data: rgb)]
                 if let cp { blobs.append((name: "conf_png", data: cp)) }
+                if let mp {
+                    blobs.append((name: LiveMask.blobName, data: mp))
+                    self.maskedFrames += 1
+                }
                 self.uplink.enqueue(h, blobs: blobs)
             }
         }
+    }
+
+    /// 12.11: people in the keyframe (Vision person segmentation, encode queue only, ≤ 2 Hz) as a 0 / 255 PNG at the
+    /// segmentation's own size; nil when nobody is in view or Vision fails (the keyframe goes out without a mask).
+    private func personMaskPNG(_ pixels: CVPixelBuffer) -> Data? {
+        let handler = VNImageRequestHandler(cvPixelBuffer: pixels, orientation: .up)
+        guard (try? handler.perform([personRequest])) != nil,
+              let out = personRequest.results?.first?.pixelBuffer else { return nil }
+        let (raw, w, h) = CaptureRecorder.copyBytes(out)
+        guard let bin = LiveMask.binarize([UInt8](raw)) else { return nil }
+        return CaptureRecorder.png(Data(bin), width: w, height: h, bits: 8)
     }
 
     private func jpeg(_ img: CIImage) -> Data? {
