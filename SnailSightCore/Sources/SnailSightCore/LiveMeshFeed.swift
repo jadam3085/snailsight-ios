@@ -290,3 +290,39 @@ public enum TilePlanRaster {
         r.isEmpty ? 0 : Double(r.filter { $0 != 0 }.count) / Double(r.count)
     }
 }
+
+
+// MARK: - 12.12 live mesh under the house tiles (mapping v3 B1)
+
+/// The live mesh (5 cm voxels, one colour per triangle) used to be drawn on top of the textured house tiles and hid
+/// them. Now a live tile is drawn only where no textured base tile covers its 4 m cell, or where a change marker
+/// (something moved) lies in that cell. Both layers key leaves "level/tx/ty" on the same 4 m grid and storey numbers;
+/// a drawn parent "level/size/tx/ty" covers every leaf inside it.
+public enum LiveOverBase {
+    public static let cellM = 4.0
+
+    /// The 4 m leaf keys covered by the drawn base tiles.
+    public static func coveredLeaves(_ drawn: Set<String>) -> Set<String> {
+        var out = Set<String>()
+        for k in drawn {
+            let p = k.split(separator: "/").compactMap { Int($0) }
+            if p.count == 3 { out.insert(k); continue }
+            guard p.count == 4, p[1] > 0 else { continue }
+            let n = max(1, Int((Double(p[1]) / cellM).rounded()))          // leaves per side
+            guard n <= 64 else { continue }
+            for dx in 0..<n { for dy in 0..<n { out.insert("\(p[0])/\(p[2] * n + dx)/\(p[3] * n + dy)") } }
+        }
+        return out
+    }
+
+    /// Draw this live tile? `changeCentres` = map-frame [x, y, z] of the current change markers.
+    public static func showLive(key: String, covered: Set<String>, changeCentres: [[Double]]) -> Bool {
+        guard covered.contains(key) else { return true }
+        let p = key.split(separator: "/").compactMap { Int($0) }
+        guard p.count == 3 else { return true }
+        let x0 = Double(p[1]) * cellM, y0 = Double(p[2]) * cellM
+        return changeCentres.contains { c in
+            c.count >= 2 && c[0] >= x0 && c[0] < x0 + cellM && c[1] >= y0 && c[1] < y0 + cellM
+        }
+    }
+}

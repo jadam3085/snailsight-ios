@@ -421,3 +421,8 @@ encode queue, ≤ 2 Hz) and sends a 0 / 255 `mask_png` blob when ≥ 0.2 % of th
 d77a3b2) zeroes those depth pixels at decode, so people walking through never become ghosts in the mesh, colour smears
 or "changes", and are not promoted. No AR configuration change. Core: `LiveMask.binarize` (+ test). Log `live_off` +
 `masked_frames`.
+
+**12.12 (live mesh no longer covers the house)**: with House = Model, a live mesh tile (5 cm voxels, one colour per
+triangle) is hidden wherever a textured house tile is drawn on the same 4 m cell (leaf or parent), unless a change
+marker (something moved) lies in that cell. New territory and Wire / Ghost styles still show the live mesh. Core
+`LiveOverBase` (+ tests). Log `live_mesh_under_base {hidden, tiles}`.

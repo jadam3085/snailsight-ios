@@ -106,6 +106,8 @@ final class TileStreamer {
 
     var memMB: Double { Double(ledger.totalMem) / 1_048_576 }
     var drawnCount: Int { drawnKeys.count }
+    /// 12.12: keys of the textured house tiles on screen (Model style only; Wire / Ghost let the live mesh show).
+    var drawnModelKeys: Set<String> { model.drawHouse == .model && node.isEnabled ? drawnKeys : [] }
 
     // MARK: tick (main, every 0.5 s while the map is aligned)
 

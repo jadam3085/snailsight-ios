@@ -38,6 +38,7 @@ final class LiveMapClient {
     private var tilePhoto: [String: TextureResource] = [:]                    // photo strip of each coloured tile
     private var drawnColour: MeshColour?
     private var changes = ChangeMarkers()
+    private var hiddenUnderBase = 0
     private var changeEntities: [String: Entity] = [:]
     private var stats = (msgs: 0, tiles: 0, drawn: 0, changes: 0, docs: 0)
     private var lastStats: TimeInterval = 0
@@ -126,6 +127,7 @@ final class LiveMapClient {
             for (k, d) in tileData { drawTile(key: k, mesh: d.mesh, rgb: d.rgb) }
         }
         restyleFresh()
+        hideUnderBase()
         if model.arAgents && model.serverBase != nil && !model.showScans && t - downlinkAgentsAt > 5
             && t - lastPoll >= 2 && !polling {
             poll()
@@ -420,6 +422,23 @@ final class LiveMapClient {
                 layer.liveNode.addChild(e)
                 baseOutlines[k] = (e, o.at, st, o.box)
             }
+        }
+    }
+
+    /// 12.12: a live tile is hidden where a textured house tile is drawn (unless something changed there), so the
+    /// coarse live mesh no longer covers the better base texture (LiveOverBase).
+    private func hideUnderBase() {
+        let covered = LiveOverBase.coveredLeaves(layer.tiles.drawnModelKeys)
+        let centres = changes.markers.map(\.center)
+        var hidden = 0
+        for (k, e) in tileEntities {
+            let show = LiveOverBase.showLive(key: k, covered: covered, changeCentres: centres)
+            if e.isEnabled != show { e.isEnabled = show }
+            if !show { hidden += 1 }
+        }
+        if hidden != hiddenUnderBase {
+            hiddenUnderBase = hidden
+            model.log.event("live_mesh_under_base", ["hidden": .int(hidden), "tiles": .int(tileEntities.count)])
         }
     }
 

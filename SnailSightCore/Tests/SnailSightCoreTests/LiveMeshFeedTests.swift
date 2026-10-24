@@ -158,3 +158,18 @@ final class LiveMeshFeedTests: XCTestCase {
         XCTAssertGreaterThan(feed.liveCount, 0)
     }
 }
+
+
+final class LiveOverBaseTests: XCTestCase {
+    func testCoveredLeavesAndShowLive() {
+        let cov = LiveOverBase.coveredLeaves(["1/0/-1", "0/8/1/1", "2/bad", "0/1000/0/0"])
+        XCTAssertTrue(cov.contains("1/0/-1"))
+        for k in ["0/2/2", "0/3/2", "0/2/3", "0/3/3"] { XCTAssertTrue(cov.contains(k), k) }     // 8 m parent (1, 1)
+        XCTAssertFalse(cov.contains("0/1/1"))
+        XCTAssertEqual(cov.count, 5)                                                            // oversized parent ignored
+        XCTAssertTrue(LiveOverBase.showLive(key: "0/9/9", covered: cov, changeCentres: []))    // new territory
+        XCTAssertFalse(LiveOverBase.showLive(key: "1/0/-1", covered: cov, changeCentres: []))  // base drawn there
+        XCTAssertTrue(LiveOverBase.showLive(key: "1/0/-1", covered: cov, changeCentres: [[1.5, -2.0, 0.3]]))  // a change
+        XCTAssertFalse(LiveOverBase.showLive(key: "1/0/-1", covered: cov, changeCentres: [[4.5, -2.0, 0.3]]))
+    }
+}
