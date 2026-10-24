@@ -201,9 +201,63 @@ or stay the same in every tile. Localization A/B must pass (`tools/loc_ab.py`).
 
 ## 7. Open questions
 
-1. Which iPhone 15 model is the test phone? A non-Pro iPhone 15 has no LiDAR, and every mapping path in the app
-   requires LiDAR depth today.
+1. ~~Which iPhone 15 model?~~ **15 Pro** (LiDAR), owner 2026-10-24.
 2. Which camera is in the L1 combo (model, resolution, global or rolling shutter, hardware trigger)? This decides
    whether colour can be time-synced to the L1 sweep.
-3. Should V3.2 (splats in AR) come before the server work? It gives the biggest visible jump soonest, using splats the
-   server already builds.
+3. ~~Order~~: owner 2026-10-24: server work goes straight to `main` in small, separately revertible commits; pick from
+   the menu in §8.
+
+## 8. Menu of updates (owner 2026-10-24: "a list of available updates to improve a live and fast update to the world
+map in addition to the 2 cm update ... lighting may make this an odd patchwork ... environments change over time with
+objects, tables, chairs, branches and vehicles")
+
+Status: **exists** = already in the server, only needs wiring; **partial** = some of it exists; **new**. Effort is in
+agent-days. Each item is one or a few commits that can be reverted on their own.
+
+### 8.1 Faster, live updates
+
+| # | Update | Where | Status | Effort | Why |
+|---|---|---|---|---|---|
+| L1 | Blur-gated live keyframes + blur / exposure in the header | app | **done 12.10** | – | sharp input everywhere downstream |
+| L2 | **Person masks from the phone**: ARKit `personSegmentationWithDepth` mask as a `mask_png` blob; the server leaves those pixels out of fusion, colour and change evidence | app + `livefront` / `livetiles` | new | 1–2 | people walking through never become ghosts or "changes" |
+| L3 | Full-res HQ keyframes on the live stream, novelty-gated (§4.1), HEIC instead of JPEG (about half the bytes) | app + ingest | new | 3–5 | the live stream becomes the capture; no record/upload step |
+| L4 | **Per-tile refine queue** (§3.3): a dirty tile is rebuilt about 2 min after the last keyframe in it, ranked by expected gain | server | partial (`tile_fast` + textured pass) | 3–5 | minutes instead of 70 min / next night |
+| L5 | **Splat warm-start per block**: continue from the current Gaussians with the new frames, 1–2k iterations, unchanged regions frozen | server + farm `splat.train` | new | 3–4 | splat updates in about 1 min per block, not nightly from scratch |
+| L6 | Provisional, then settled: fuse at once with the live pose, re-fuse a keyframe when the pose graph (`livegraph` iSAM2) moves it more than 1 cm | server | partial | 2–3 | fast without baking in drift |
+| L7 | Smaller near tiles (1 m sub-leaves inside 4 m leaves) and delta blobs (only changed charts or Gaussians) | server + app | new | 3–4 | a small change costs KB, not a whole tile |
+| L8 | Finer live voxels near agents (2–3 cm within 2 m, 5 cm beyond), or move the live TSDF to the GPU (Open3D CUDA, or NVIDIA **nvblox**, Apache-2.0: GPU TSDF, ESDF, people masking, LiDAR + depth) | server | new | 2 (CPU) / 5–8 (nvblox) | sharper live geometry; nvblox also gives robots an ESDF for planning |
+| L9 | Instant projected texture: until the bake lands, the newest sharp keyframe is projected onto the live mesh near you | app | new | 3–4 | you see high-res colour seconds after looking |
+| L10 | Coverage gaps layer ("look here") for people and robot explore goals (§3.4) | server + app | partial (Explore gaps) | 2–3 | exploration aims at what improves the map |
+
+### 8.2 Lighting without a patchwork
+
+| # | Update | Where | Status | Effort | Why |
+|---|---|---|---|---|---|
+| C1 | **Per-tile splats onto the v2 gsplat trainer** with `appearance` (per-walk gain + bias), `people`, `pose_opt` on. The tile batch still runs OpenSplat v1 (no exposure or pose refinement; its own comment: walks that disagree get "needles") | server `splattiles.py` | **exists** (v2 trainer in `tools/splat_v2`) | 1 | removes most lighting patchwork in splats at once |
+| C2 | One global per-frame exposure / white-balance gain solve shared by the live colour, the bake and the splats (today: luma-only gain in live, a separate solve in the bake) | server | partial (`texbake.solve_gains`) | 2–3 | one consistent lighting reference for every product |
+| C3 | Phone exposure discipline: AE/AWB locked per ~10 s segment while mapping; send `exposure_s`, ISO, ARKit light estimate (ambient intensity, colour temperature) | app | partial (CameraPolicy; `exposure_s` 12.10) | 1–2 | fewer unknowns for C2; colour stops drifting mid-room |
+| C4 | Lighting-consistency term in the best-view score: a view far from the patch's consensus brightness/colour loses even if sharper | server (§3.1) | new | with §3.1 | one dark or lamp-lit walk cannot win a few patches and speckle the wall |
+| C5 | Gradient-domain seam blending (Poisson / Waechter global + local adjustment) across charts **and across tile borders** | server | partial (`level_seams` per texture tile) | 2–3 | no visible boxes where two views or two tiles meet |
+| C6 | Lighting states: keep top-k per lighting bucket (day / night-lamps; outdoors by sun elevation), each tile renders one bucket consistently, picked by time or by the device's light estimate | server + app | new | 4–6 | night visits stop overwriting day texture; AR can match the current light |
+| C7 | Store linear radiance (exposure × ISO normalised) rather than camera-processed sRGB; tone-map once on output | server | new | 2–3 | exposure differences cancel in maths instead of by heuristics |
+
+### 8.3 Environments that change
+
+| # | Update | Where | Status | Effort | Why |
+|---|---|---|---|---|---|
+| D1 | **Persistence classes per region**: static (walls, floors), semi-static (furniture, parked cars: moves over days), dynamic (people, pets, moving cars, swaying branches). Built on the `livechange` evidence cells + the ARKit mesh classes + YOLOE labels | server | partial (`livechange` dynamic tiles, door state) | 3–4 | each class gets its own update rule instead of one rule for everything |
+| D2 | **Movable objects as entities**: chairs, tables, bins, vehicles become object entities with their own mesh, texture and splat (`object_build`); a moved chair moves its entity, the base gets the floor under it, no ghost | server + app | partial (objects per leaf, entities, P4) | 5–8 | furniture moves never smear the texture of the room |
+| D3 | Change-gated texture replace: inside a confirmed change region the best-view history is reset (recency wins there, rank 3); everywhere else quality wins | server | partial (ratchet bypass for change evidence) | 1–2 | a repainted wall or a new rug shows up instead of losing to old sharper photos |
+| D4 | Free-space carving with decay: what is repeatedly seen through is removed, with a half-life per class (fast for dynamic, slow for static) | server | partial (`livechange` removed + 2-agent rule) | 2–3 | old car / moved table disappears on its own, walls never do |
+| D5 | Vegetation: per-voxel temporal variance marks swaying regions; leaves and branches go to splat + soft cost only, trunks stay hard geometry; seasonal change by D3 | server | partial (lidar trees, estimated layer) | 3–4 | wind and seasons stop corrupting the yard mesh and nav |
+| D6 | Vehicle / parking slots: a slot is a semi-static region; whatever vehicle is there is an entity, the base keeps the empty ground | server | new | 2 | the driveway does not become a melted car average |
+| D7 | Map snapshots for sim: "static + semi-static as of time T" exported as a USD scene (mesh colliders + splat visuals + entities) | server | partial (`usd_compliance`, sim world) | 2–3 | reproducible sim environments from the living map |
+
+### 8.4 Recommended order
+
+1. **C1** (1 day: biggest lighting win, code exists), **L2** (people masks), **D3** (change-gated replace).
+2. **L4 + L5** (minutes instead of hours), with **C2 + C3** so the faster loop stays colour-consistent.
+3. §3.1 best-view store with **C4 + C5** (the 2 cm item), then **D1 + D2 + D4** (persistence classes, movable
+   entities, decay).
+4. App display: splats in AR (V3.2), **L9**, 2048² near atlas.
+5. **L3** HQ live keyframes, then **L8** (nvblox) and the multi-sensor profiles (§3.5).
