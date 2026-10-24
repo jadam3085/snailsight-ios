@@ -157,6 +157,7 @@ final class LiveStreamer {
         else if model.thermal == "CRITICAL" { paused = "too hot" }
         else if case .normal = f.camera.trackingState {} else { paused = "tracking" }
         if paused != pausedReason {
+            if paused == "recording" { uplink.noteRecorded(streamID) }  // 12.14: this stream's bye says recorded
             pausedReason = paused
             model.log.event("live_pause", ["reason": .string(paused ?? "resumed")])
             publish()
@@ -322,6 +323,7 @@ final class LiveUplink {
     private var lastInbound = 0.0
     private var lastPing = 0.0
     private var byeSentAt: Double?
+    private var recordedStreams = Set<String>()        // 12.14 (on q): streams a capture was recorded during
     private var httpBusy = false
     private var lastProbe = 0.0
     private var everWelcomed = Set<String>()
@@ -409,6 +411,12 @@ final class LiveUplink {
     }
 
     /// Spool one keyframe (written to disk before anything is sent), then send it when the window allows.
+    /// 12.14: a capture was recorded while this stream existed (its upload may cover it): the bye says so, and only
+    /// then does the server's promotion wait for that upload (otherwise it promotes the keyframes after 2 min).
+    func noteRecorded(_ stream: String) {
+        q.async { self.recordedStreams.insert(stream) }
+    }
+
     func enqueue(_ h: LiveKeyframeHeader, blobs: [(name: String, data: Data)]) {
         q.async {
             guard let data = LiveKeyframe.encode(h, blobs: blobs) else {
@@ -656,12 +664,14 @@ final class LiveUplink {
         guard let t = target else { return }
         let last = lastSeq[t] ?? -1
         byeSentAt = Self.now
-        log.event("live_bye", ["stream_id": .string(t), "last_seq": .int(last), "mode": .string(mode == .ws ? "ws" : "http")])
+        let rec = recordedStreams.contains(t)
+        log.event("live_bye", ["stream_id": .string(t), "last_seq": .int(last), "mode": .string(mode == .ws ? "ws" : "http"),
+                               "recorded": .bool(rec)])
         if mode == .ws {
-            sendText(["type": "bye", "last_seq": last], g: gen)
+            sendText(["type": "bye", "last_seq": last, "recorded": rec], g: gen)
         } else {
             let g = gen, lk = link, path = "/v1/agents/\(agentID)/live/bye"
-            let body = JSON.body(["stream_id": t, "last_seq": last])
+            let body = JSON.body(["stream_id": t, "last_seq": last, "recorded": rec])
             httpBusy = true
             Task { [weak self] in
                 let r = try? await lk.request("POST", path, body: body, timeout: 10)

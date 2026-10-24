@@ -434,3 +434,9 @@ session must confirm it) and rebuilds the tile. The live change detector already
 mask, starting 3 cm above the region's bottom so the floor stays): the base geometry inside is not drawn and the camera
 shows the room as it is. The box is removed when the server clears the region (object put back). Side effect: overlay
 content right behind a box (a wall) also shows the camera image there. Log `ghost_masks {boxes}`. Core + tests.
+
+**12.14 (moved objects leave the house map)**: the live `bye` carries `recorded` (true when a capture was recorded while
+the stream existed). The server (snailCOP 825c15b) promotes a stream whose phone recorded nothing after 2 min instead of
+waiting 30 min for an upload that never comes, and a removal confirmed by one session in ≥ 8 keyframes over ≥ 60 s now
+promotes on its own (was: a 2nd session or agent required), so a moved chair leaves the base tiles at the next tile
+rebuild. Log `live_bye` + `recorded`.
