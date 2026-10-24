@@ -253,7 +253,21 @@ agent-days. Each item is one or a few commits that can be reverted on their own.
 | D6 | Vehicle / parking slots: a slot is a semi-static region; whatever vehicle is there is an entity, the base keeps the empty ground | server | new | 2 | the driveway does not become a melted car average |
 | D7 | Map snapshots for sim: "static + semi-static as of time T" exported as a USD scene (mesh colliders + splat visuals + entities) | server | partial (`usd_compliance`, sim world) | 2–3 | reproducible sim environments from the living map |
 
-### 8.4 Recommended order
+### 8.4 Shipped (2026-10-24), each a separate commit on `main`
+
+| What | Repo / commit | Rollback |
+|---|---|---|
+| L1 blur-gated live keyframes + `blur_px` / `exposure_s` | app 12.10 | revert the commit |
+| Live colour = best view per voxel (score = sample weight x keyframe sharpness; worse views ignored, 6 h half-life so later walks / changes still win), fixes "more walks blur the live mesh" | snailCOP `67c043c` | `SNAILSIGHT_LIVE_COLOUR_MODE=average` in `snailsight.env`, restart `snailsight-live` |
+| L2 person masks: server zeroes `mask_png` pixels at depth decode (no TSDF / colour / change / promotion) | snailCOP `d77a3b2` | revert (an app without masks is unaffected) |
+| L2 person masks: app runs Vision person segmentation on each live keyframe, sends `mask_png` | app 12.11 | revert the commit |
+| Splat tiles train on the sharpest distinct views of each walk (was an even sample of all frames) | snailCOP `0a26026` | `SNAILSIGHT_SPLAT_TILE_SELECT=even` |
+| B1 live mesh hidden where a textured house tile is drawn (unless a change marker is in that cell) | app 12.12 | revert the commit |
+
+Not switched: **C1** (tile splats on the v2 trainer). The 2026-10-13 whole-house A/B measured v2 below v1 on held-out
+PSNR (17.8 vs 19.8 dB), so it needs a per-block A/B on the battlestation first.
+
+### 8.5 Recommended order
 
 1. **C1** (1 day: biggest lighting win, code exists), **L2** (people masks), **D3** (change-gated replace).
 2. **L4 + L5** (minutes instead of hours), with **C2 + C3** so the faster loop stays colour-consistent.
