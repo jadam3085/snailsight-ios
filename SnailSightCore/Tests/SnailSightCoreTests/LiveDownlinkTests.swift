@@ -141,27 +141,3 @@ final class LiveDownlinkTests: XCTestCase {
         XCTAssertTrue(ServerFeatures(["sim_server"]).serverSim(forced: false))
     }
 }
-
-
-final class GhostMaskTests: XCTestCase {
-    func testRemovedRegionsBecomePaddedBoxesUntilCleared() {
-        var g = GhostMasks()
-        XCTAssertFalse(g.apply(key: "a", kind: "added", state: "confirmed", bbox: [0, 0, 0, 1, 1, 1]))   // only removals
-        XCTAssertTrue(g.apply(key: "r1", kind: "removed", state: "confirmed", bbox: [1, 2, 0.0, 1.5, 2.4, 0.9]))
-        let b = g.boxes["r1"]!
-        XCTAssertEqual(b.size[0], 0.5 + 0.4, accuracy: 1e-9)
-        XCTAssertEqual(b.size[1], 0.4 + 0.4, accuracy: 1e-9)
-        XCTAssertEqual(b.center[2] - b.size[2] / 2, 0.03, accuracy: 1e-9)       // floor under the chair stays
-        XCTAssertEqual(b.center[2] + b.size[2] / 2, 1.0, accuracy: 1e-9)
-        XCTAssertFalse(g.apply(key: "r1", kind: "removed", state: "confirmed", bbox: [1, 2, 0.0, 1.5, 2.4, 0.9]))
-        XCTAssertFalse(g.apply(key: "r2", kind: "removed", state: "confirmed", bbox: [1, 2, 0, 0.5, 2.4, 0.9])) // bad box
-        XCTAssertFalse(g.apply(key: "r3", kind: "removed", state: nil, bbox: [1, 2, 0]))
-        XCTAssertTrue(g.apply(key: "r1", kind: "removed", state: "cleared", bbox: nil))    // put back
-        XCTAssertTrue(g.boxes.isEmpty)
-        XCTAssertTrue(g.apply(key: "f", kind: "removed", state: "confirmed", bbox: [0, 0, 0.5, 0.1, 0.1, 0.5]))
-        XCTAssertGreaterThan(g.boxes["f"]!.size[2], 0.04)                         // flat region keeps a height
-        XCTAssertTrue(g.apply(key: "f", kind: "removed", state: "dynamic", bbox: nil))
-        for i in 0..<70 { g.apply(key: "k\(i)", kind: "removed", state: "confirmed", bbox: [0, 0, 0, 1, 1, 1]) }
-        XCTAssertEqual(g.boxes.count, GhostMasks.maxCount)
-    }
-}

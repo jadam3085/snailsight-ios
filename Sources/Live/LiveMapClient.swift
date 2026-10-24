@@ -39,8 +39,6 @@ final class LiveMapClient {
     private var drawnColour: MeshColour?
     private var changes = ChangeMarkers()
     private var hiddenUnderBase = 0
-    private var ghosts = GhostMasks()
-    private var ghostEntities: [String: ModelEntity] = [:]
     private var changeEntities: [String: Entity] = [:]
     private var stats = (msgs: 0, tiles: 0, drawn: 0, changes: 0, docs: 0)
     private var lastStats: TimeInterval = 0
@@ -367,7 +365,6 @@ final class LiveMapClient {
             stats.changes += 1
             let fz = (layer.cameraMap?[2] ?? 1.4) - 1.4
             if changes.add(key: key, kind: kind, state: state, bbox: bbox, floorZ: fz, now: now) { renderChanges(now: now) }
-            if ghosts.apply(key: key, kind: kind, state: state, bbox: bbox) { renderGhosts() }
         case .rebase(let v), .commit(let v):
             // keep drawing the old tiles until their re-fused versions (new base_version) arrive (API §6b.1)
             tiles.rebase(v)
@@ -426,27 +423,6 @@ final class LiveMapClient {
                 baseOutlines[k] = (e, o.at, st, o.box)
             }
         }
-    }
-
-    /// 12.13: one occlusion box per confirmed removal (moved chair): the house tiles inside are not drawn, the
-    /// camera image shows the room as it is now. Removed when the server clears the region (object put back).
-    private func renderGhosts() {
-        for (k, e) in ghostEntities where ghosts.boxes[k] == nil {
-            e.removeFromParent()
-            ghostEntities[k] = nil
-        }
-        for (k, b) in ghosts.boxes {
-            let size = SIMD3<Float>(Float(b.size[0]), Float(b.size[1]), Float(b.size[2]))
-            let e = ghostEntities[k] ?? {
-                let n = ModelEntity()
-                layer.ghostNode.addChild(n)
-                ghostEntities[k] = n
-                return n
-            }()
-            e.model = ModelComponent(mesh: .generateBox(size: size), materials: [OcclusionMaterial()])
-            e.position = SIMD3<Float>(Float(b.center[0]), Float(b.center[1]), Float(b.center[2]))
-        }
-        model.log.event("ghost_masks", ["boxes": .int(ghosts.boxes.count)])
     }
 
     /// 12.12: a live tile is hidden where a textured house tile is drawn (unless something changed there), so the

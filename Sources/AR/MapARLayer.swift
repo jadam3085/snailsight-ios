@@ -68,8 +68,6 @@ final class MapARLayer {
     let markNode = Entity()
     /// 12.6 articulated door leaves (DoorStore) at their latest angle, with a state label above each.
     let doorNode = Entity()
-    /// 12.13 occlusion boxes over confirmed removals (GhostMasks): the old base geometry of a moved object is not drawn.
-    let ghostNode = Entity()
     private var doorRev = -1
     private var doorLabels: [Entity] = []
 
@@ -125,7 +123,7 @@ final class MapARLayer {
         self.arView = arView
         root.name = "map.root"
         root.addChild(mapFrame)
-        for n in [labelNode, objectNode, terrainNode, pathNode, agentNode, liveNode, simNode, markNode, doorNode, ghostNode] { mapFrame.addChild(n) }
+        for n in [labelNode, objectNode, terrainNode, pathNode, agentNode, liveNode, simNode, markNode, doorNode] { mapFrame.addChild(n) }
         mapFrame.addChild(tiles.node)
         root.isEnabled = false
         arView.scene.addAnchor(root)

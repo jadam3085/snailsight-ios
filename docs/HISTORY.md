@@ -440,3 +440,8 @@ the stream existed). The server (snailCOP 825c15b) promotes a stream whose phone
 waiting 30 min for an upload that never comes, and a removal confirmed by one session in ≥ 8 keyframes over ≥ 60 s now
 promotes on its own (was: a 2nd session or agent required), so a moved chair leaves the base tiles at the next tile
 rebuild. Log `live_bye` + `recorded`.
+
+**12.15 (12.13 ghost boxes removed)**: owner: "I don't want to clutter the map with invisible boxes. I want direct and
+immediate map updates." The AR occlusion boxes of 12.13 are gone (reverted). The map itself now changes instead: the
+server's live editor (snailCOP `liveedit.py`) edits the shared base tiles as soon as a change is confirmed, and the app
+swaps the held tiles in place through the existing M4 tile sync (no app code needed for that).
