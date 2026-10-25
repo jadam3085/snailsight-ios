@@ -366,6 +366,7 @@ private struct FullSections: View {
                 ForEach(HouseStyle.allCases) { Text($0.rawValue).tag($0) }
             } label: { Label("House overlay", systemImage: "house") }
             Toggle(isOn: $model.rawScan) { Label("Raw scan (instead of structure)", systemImage: "cube.transparent") }
+            Toggle(isOn: $model.cleanLook) { Label("Clean look (lit, visual only)", systemImage: "sparkles") }
             Toggle(isOn: $model.arObjects) { Label("Objects", systemImage: "shippingbox") }
             Toggle(isOn: $model.arDoors) { Label("Doors", systemImage: "door.left.hand.open") }
             Toggle(isOn: $model.arTerrain) { Label("Robot terrain", systemImage: "square.grid.3x3.topleft.filled") }

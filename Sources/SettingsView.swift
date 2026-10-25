@@ -86,6 +86,7 @@ struct SettingsView: View {
                         ForEach(HouseStyle.allCases) { Text($0.rawValue).tag($0) }
                     }
                     Toggle("Raw scan", isOn: $model.rawScan)
+                    Toggle("Clean look", isOn: $model.cleanLook)
                     Toggle("Objects", isOn: $model.arObjects)
                     Toggle("Doors", isOn: $model.arDoors)
                     Toggle("Robot terrain", isOn: $model.arTerrain)

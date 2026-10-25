@@ -215,7 +215,7 @@ final class TileStreamer {
             }
             return
         }
-        guard let v = tb.variant(raw: model.rawScan), let path = tb.tilesetPath(v) else { return }
+        guard let v = tb.variant(raw: model.rawScan, clean: model.cleanLook), let path = tb.tilesetPath(v) else { return }
         if v == variant && tb.rev == tilesetRev { return }
         guard !fetchingTileset, t >= tilesetRetryAt, let link = model.link else { return }
         fetchingTileset = true
@@ -403,7 +403,7 @@ final class TileStreamer {
         holder.orientation = simd_quatf(angle: .pi / 2, axis: SIMD3<Float>(1, 0, 0))   // usdz Y-up → map Z-up
         holder.addChild(e)
         var mats: [(Entity, [RealityKit.Material])] = []
-        Self.unlit(e, into: &mats)
+        if variant == "clean" { Self.record(e, into: &mats) } else { Self.unlit(e, into: &mats) }   // 12.16: clean = lit
         originals[key] = mats
         holder.isEnabled = false
         node.addChild(holder)
@@ -449,6 +449,12 @@ final class TileStreamer {
             out.append((e, mc.materials))
         }
         for c in e.children { unlit(c, into: &out) }
+    }
+
+    /// 12.16 clean tiles: their own (lit, physically based) materials as loaded, recorded for Wire / Ghost restore.
+    private static func record(_ e: Entity, into out: inout [(Entity, [RealityKit.Material])]) {
+        if let mc = e.components[ModelComponent.self] { out.append((e, mc.materials)) }
+        for c in e.children { record(c, into: &out) }
     }
 
     private func applyStyle() {

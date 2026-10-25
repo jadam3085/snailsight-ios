@@ -445,3 +445,10 @@ rebuild. Log `live_bye` + `recorded`.
 immediate map updates." The AR occlusion boxes of 12.13 are gone (reverted). The map itself now changes instead: the
 server's live editor (snailCOP `liveedit.py`) edits the shared base tiles as soon as a change is confirmed, and the app
 swaps the held tiles in place through the existing M4 tile sync (no app code needed for that).
+
+**12.16 (clean look; the map carves itself)**: Layers ▸ House ▸ **Clean look** (and Settings) draws the server's `clean`
+tile variant (snailCOP `tileclean.py`: plane textures de-lit, furniture smoothed; visual only, never for navigation) LIT
+instead of unlit, in AR and in Map 3D (sun with shadows + a fill light). Raw scan wins over it; without a published
+clean tileset the structure tiles are drawn as before. Server side, live carving (snailCOP `livecarve.py`) now removes
+base surfaces the LiDAR sees through as you walk (moved chairs, floating bits) and the M4 tile sync swaps the leaves in
+place: no app change needed for that. Core `MapTiles.variant(raw:clean:)` + test.

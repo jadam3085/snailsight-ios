@@ -40,8 +40,10 @@ public struct MapTiles: Codable, Equatable {
         defaultVariant = try? c.decodeIfPresent(String.self, forKey: .defaultVariant)
     }
 
-    /// The variant to draw: the wanted one when the server has it, else the server's default, else any.
-    public func variant(raw: Bool) -> String? {
+    /// The variant to draw: the wanted one when the server has it, else the server's default, else any. 12.16: `clean`
+    /// (the server's visual-only clean look, tileclean.py) wins when asked for and published; Raw scan wins over it.
+    public func variant(raw: Bool, clean: Bool = false) -> String? {
+        if clean && !raw && tilesets["clean"] != nil { return "clean" }
         let want = raw ? "raw" : "structure"
         if tilesets[want] != nil { return want }
         if let d = defaultVariant, tilesets[d] != nil { return d }

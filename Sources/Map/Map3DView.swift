@@ -121,7 +121,7 @@ final class Map3DModel: ObservableObject {
             .sink { [weak self] _ in self?.memoryWarning() }.store(in: &bag)
         var ev = MemoryProbe.fields()
         ev["tiles_rev"] = .int(model.mapFollower.tiles?.rev ?? -1)
-        ev["variant"] = .string(model.mapFollower.tiles?.variant(raw: model.rawScan) ?? "")
+        ev["variant"] = .string(model.mapFollower.tiles?.variant(raw: model.rawScan, clean: model.cleanLook) ?? "")
         ev["shared_ar_tiles"] = .int(model.controller.mapLayer.tiles.drawnCount)
         ev["levels"] = .int(data.levels.count)
         model.log.event("map3d_open", ev)
@@ -536,7 +536,7 @@ final class Map3DTileLoader {
     // MARK: tileset
 
     private func ensureTileset() {
-        guard let tb = model.mapFollower.tiles, let v = tb.variant(raw: model.rawScan), let p = tb.tilesetPath(v) else { return }
+        guard let tb = model.mapFollower.tiles, let v = tb.variant(raw: model.rawScan, clean: model.cleanLook), let p = tb.tilesetPath(v) else { return }
         if v == variant && tb.rev == rev { return }
         guard !fetchingTileset, now >= retryAt, let link = model.link else { return }
         fetchingTileset = true
@@ -651,7 +651,7 @@ final class Map3DTileLoader {
         Task { @MainActor [weak self] in
             do {
                 let e = try await Entity(contentsOf: file)
-                ScanModelLoader.makeUnlit(e)                        // the texture IS the photographed light
+                if self?.variant != "clean" { ScanModelLoader.makeUnlit(e) }   // photo light; 12.16 clean = lit
                 self?.attach(e, node: n, key: key, hash: hash)
             } catch {
                 self?.failed(key, hash: hash, what: "load", err: error.localizedDescription)
@@ -730,8 +730,13 @@ final class Map3DOverlays {
         for n in [live, terrain, doorNode, cameraNode, treeNode, bodyNode, routeNode] { root.addChild(n) }
         let sun = DirectionalLight()
         sun.light.intensity = 2500
+        sun.shadow = DirectionalLightComponent.Shadow(maximumDistance: 40, depthBias: 2)   // 12.16 clean look: shadows
         sun.look(at: .zero, from: SIMD3(20, 40, 15), relativeTo: nil)
         root.addChild(sun)
+        let fill = DirectionalLight()                                // 12.16: soft fill so lit tiles have no black sides
+        fill.light.intensity = 900
+        fill.look(at: .zero, from: SIMD3(-25, 30, -20), relativeTo: nil)
+        root.addChild(fill)
     }
 
     var liveCount: Int { liveSources.count }

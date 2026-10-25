@@ -239,6 +239,11 @@ final class TileSelectTests: XCTestCase {
         // only raw: the structure toggle falls back to what exists
         let only = MapTiles(rev: 1, tilesets: ["raw": .init(hash: "aa")], defaultVariant: "raw")
         XCTAssertEqual(only.variant(raw: false), "raw")
+        XCTAssertEqual(only.variant(raw: false, clean: true), "raw")             // no clean tileset yet: what exists
+        let all = MapTiles(rev: 2, tilesets: ["raw": .init(hash: "a"), "structure": .init(hash: "b"), "clean": .init(hash: "c")])
+        XCTAssertEqual(all.variant(raw: false, clean: true), "clean")
+        XCTAssertEqual(all.variant(raw: true, clean: true), "raw")               // Raw scan wins
+        XCTAssertEqual(all.variant(raw: false), "structure")
         XCTAssertEqual(only.tilesetPath("raw"), "/v1/blobs/aa.json")
         // round trip through the UserDefaults cache
         let back = MapHead.decode(try! JSONEncoder().encode(h))

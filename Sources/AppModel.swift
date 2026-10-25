@@ -228,6 +228,10 @@ final class AppModel: ObservableObject {
     @Published var rawScan: Bool = UserDefaults.standard.bool(forKey: "ar.tiles.raw") {
         didSet { UserDefaults.standard.set(rawScan, forKey: "ar.tiles.raw") }
     }
+    /// 12.16 Clean look: the server's `clean` variant (de-lit planes, smoothed furniture; visual only), drawn LIT.
+    @Published var cleanLook: Bool = UserDefaults.standard.bool(forKey: "ar.tiles.clean") {
+        didSet { UserDefaults.standard.set(cleanLook, forKey: "ar.tiles.clean") }
+    }
 
     // 12.4 View presets + the "3D world" master switch (core: ViewPresets.swift). Individual settings stay as they are;
     // `worldOn` only masks what is drawn / fetched, so switching it back on restores everything.
