@@ -131,6 +131,42 @@ final class LiveGateTests: XCTestCase {
         XCTAssertEqual(LiveKeyframe.parse(data!)?.header["blur_px"] as? Double, 1.25)
     }
 
+    func testHeaderMapLock() {
+        let T = [Double](repeating: 0, count: 16)
+        var h = LiveKeyframeHeader(seq: 1, streamID: "ar-00000001", t: 1, wall: 2, T: T, K: [1, 1, 0, 0], imageSize: [4, 3])
+        var o = LiveKeyframe.headerObject(h, blobs: [])
+        XCTAssertNil(o["T_map_arkit"])                                              // not locked: keys omitted
+        XCTAssertNil(o["lock"])
+        let M: [Double] = [1, 0, 0, 2, 0, 0, -1, 3, 0, 1, 0, 0.5, 0, 0, 0, 1]
+        h.mapLock = LiveMapLock(T_map_arkit: M, source: "server")
+        o = LiveKeyframe.headerObject(h, blobs: [])
+        XCTAssertEqual(o["T_map_arkit"] as? [Double], M)
+        let bare = o["lock"] as? [String: Any]
+        XCTAssertEqual(bare?["source"] as? String, "server")
+        XCTAssertNil(bare?["sigma_cm"])                                             // unknown: omitted
+        XCTAssertNil(bare?["age_s"])
+        h.mapLock = LiveMapLock(T_map_arkit: M, source: "carried", sigmaCm: 3.5, ageS: 12.25)
+        let data = LiveKeyframe.encode(h, blobs: [(name: "rgb_jpg", data: Data([1, 2]))])
+        let back = LiveKeyframe.parse(data!)!.header
+        XCTAssertEqual((back["T_map_arkit"] as? [NSNumber])?.map { $0.doubleValue }, M)
+        let lock = back["lock"] as? [String: Any]
+        XCTAssertEqual(lock?["source"] as? String, "carried")
+        XCTAssertEqual((lock?["sigma_cm"] as? NSNumber)?.doubleValue, 3.5)
+        XCTAssertEqual((lock?["age_s"] as? NSNumber)?.doubleValue, 12.25)
+        h.mapLock = LiveMapLock(T_map_arkit: [1, 2, 3], source: "server")             // malformed: never sent
+        XCTAssertNil(LiveKeyframe.headerObject(h, blobs: [])["T_map_arkit"])
+        var bad = M; bad[0] = .nan
+        h.mapLock = LiveMapLock(T_map_arkit: bad, source: "server")
+        XCTAssertNil(LiveKeyframe.headerObject(h, blobs: [])["lock"])
+    }
+
+    func testMapLockSendable() {
+        XCTAssertTrue(LiveMapLock.sendable(source: "server", hasAlignment: true))
+        XCTAssertTrue(LiveMapLock.sendable(source: "carried", hasAlignment: true))
+        XCTAssertFalse(LiveMapLock.sendable(source: "place_cache", hasAlignment: true))
+        XCTAssertFalse(LiveMapLock.sendable(source: "server", hasAlignment: false))
+    }
+
     func testPersonMaskBinarize() {
         XCTAssertNil(LiveMask.binarize([]))
         XCTAssertNil(LiveMask.binarize([UInt8](repeating: 200, count: 1) + [UInt8](repeating: 0, count: 999)))  // 0.1 %

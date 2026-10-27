@@ -35,12 +35,34 @@ public struct LiveKeyframeHeader: Equatable {
     /// rank keyframes by sharpness for colour / promotion (extra header keys; older servers ignore them).
     public var blurPx: Double?
     public var exposureS: Double?
+    /// 12.17, optional (omitted when nil): the phone's map lock while it is server-locked, so the server can seed its
+    /// per-keyframe mesh ICP before the live graph has placed the stream (it still gates the result itself).
+    public var mapLock: LiveMapLock?
 
     public init(seq: Int, streamID: String, t: Double, wall: Double, T: [Double], K: [Double], imageSize: [Int],
-                tracking: String = "normal", blurPx: Double? = nil, exposureS: Double? = nil) {
+                tracking: String = "normal", blurPx: Double? = nil, exposureS: Double? = nil,
+                mapLock: LiveMapLock? = nil) {
         self.seq = seq; self.streamID = streamID; self.t = t; self.wall = wall
         self.T = T; self.K = K; self.imageSize = imageSize; self.tracking = tracking
-        self.blurPx = blurPx; self.exposureS = exposureS
+        self.blurPx = blurPx; self.exposureS = exposureS; self.mapLock = mapLock
+    }
+}
+
+/// 12.17: the map lock a keyframe carries. Header keys `T_map_arkit` (16 numbers, row-major, map z-up <- ARKit world)
+/// and `lock` = {"source": .., "sigma_cm": .. (optional), "age_s": .. (optional)}.
+public struct LiveMapLock: Equatable {
+    public var T_map_arkit: [Double]     // 16, row-major
+    public var source: String            // MapLocalizer.lockSource: "server" | "carried" | ...
+    public var sigmaCm: Double?
+    public var ageS: Double?             // seconds since the last accepted fix
+
+    public init(T_map_arkit: [Double], source: String, sigmaCm: Double? = nil, ageS: Double? = nil) {
+        self.T_map_arkit = T_map_arkit; self.source = source; self.sigmaCm = sigmaCm; self.ageS = ageS
+    }
+
+    /// Only a server-confirmed (or carried server) lock is worth sending; the same rule TileStreamer uses.
+    public static func sendable(source: String, hasAlignment: Bool) -> Bool {
+        hasAlignment && ["server", "carried"].contains(source)
     }
 }
 
@@ -64,6 +86,13 @@ public enum LiveKeyframe {
         ]
         if let b = h.blurPx { o["blur_px"] = fin(b) }
         if let e = h.exposureS { o["exposure_s"] = fin(e) }
+        if let l = h.mapLock, l.T_map_arkit.count == 16, l.T_map_arkit.allSatisfy({ $0.isFinite }) {
+            o["T_map_arkit"] = l.T_map_arkit
+            var lock: [String: Any] = ["source": l.source]
+            if let s = l.sigmaCm, s.isFinite { lock["sigma_cm"] = s }
+            if let a = l.ageS, a.isFinite { lock["age_s"] = a }
+            o["lock"] = lock
+        }
         return o
     }
 

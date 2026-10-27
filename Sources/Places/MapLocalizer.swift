@@ -84,6 +84,10 @@ final class MapLocalizer {
     var isLocked: Bool { alignment != nil || pendingCarry != nil }
     /// 10.1 AR 1:1 status: "server" | "place_cache" | "" (no lock), seconds searching, attempts that matched.
     var lockSource: String { source }
+    /// 12.17: seconds since the last accepted fix (nil before the first), for the live keyframe `lock` header.
+    var lastFixAge: Double? { lastFixAt.map { now - $0 } }
+    /// 12.17: the server's last reported lock sigma (cm), nil when it gave none.
+    private(set) var lastSigmaCm: Double?
     var searchSeconds: Double { now - streamStart }
     var matchCount: Int { matches }
 
@@ -124,6 +128,7 @@ final class MapLocalizer {
         source = ""
         lastFixAt = nil
         lastRmseCm = nil
+        lastSigmaCm = nil
         pendingApply = nil
         if sessionRunFollows { depthWanted = true } else { setDepthWanted(true) }
         if let pid = placeID, let cached = MapFrameCache.get(pid) {      // fast path: the place knows its map alignment
@@ -290,6 +295,7 @@ final class MapLocalizer {
                                        "lock_rule": .string(a.lockRule ?? "")])
         guard a.locked, let T = a.T_map_arkit else { return }
         if a.anyAccepted || source != "server" { lastFixAt = now }
+        if let sc = a.confidence?.sigmaCm, sc >= 0 { lastSigmaCm = sc }
         if let r = a.bestRmseCm { lastRmseCm = r }
         let next = MapAlignment(mapID: a.mapID, version: a.mapVersion, T: T, at: now,
                                 inliers: a.gate?.inliers?.max(), spreadCm: a.gate?.spreadCm, method: a.shownMethod)

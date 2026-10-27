@@ -81,6 +81,7 @@ actor ServerLink {
     private var rewakeScheduled = false
     private var probing = false
     private var lastProbe: Date = .distantPast
+    private var lastFailProbe: Double?                      // 12.17: rate limit of the re-probes after a timeout
     private let monitor = NWPathMonitor()
 
     init(info: AgentInfo, report: @escaping (String?, String) -> Void) {
@@ -174,6 +175,32 @@ actor ServerLink {
         return nil
     }
 
+    /// 12.17: after a non-connection failure (timeout), at most once per 10 s, re-check the current server's `GET /v1`
+    /// in the background. It answering 200 keeps everything as is (no re-register / onOnline storm while one backend
+    /// is hung); anything else runs the full `probe(force: true)`, which marks offline only if no candidate answers.
+    private func failProbe() {
+        let t = Date().timeIntervalSince1970
+        guard NetFailure.probeDue(now: t, last: lastFailProbe) else { return }
+        lastFailProbe = t
+        Task { [weak self] in await self?.recheck() }
+    }
+
+    private func recheck() async {
+        guard !probing else { return }
+        if let b = base, let url = URL(string: b + "/" + ServerConfig.apiVersion) {
+            var r = URLRequest(url: url)
+            r.timeoutInterval = 4
+            r.setValue(wakeClass, forHTTPHeaderField: CopWake.header)
+            r.setValue(Identity.agentID, forHTTPHeaderField: CopWake.agentHeader)
+            if let (data, resp) = try? await session.data(for: r) {
+                let status = (resp as? HTTPURLResponse)?.statusCode ?? 0
+                if let gate = CopState.parse(status: status, body: data) { copAnswer(gate); return }
+                if status == 200 { return }
+            }
+        }
+        _ = await probe(force: true)
+    }
+
     private func registerAgent() async {
         let body: [String: Any] = ["agent_type": Identity.agentType, "name": info.name, "device": info.device,
                                    "app_version": info.appVersion, "client": Identity.client]
@@ -181,7 +208,8 @@ actor ServerLink {
     }
 
     /// One request against the current server (probing first if needed). Returns (body, HTTP status).
-    /// Network failures mark the server offline so the next call re-probes; HTTP errors are returned, not thrown.
+    /// Connection failures mark the server offline so the next call re-probes; timeouts only re-probe (12.17).
+    /// HTTP errors are returned, not thrown.
     func request(_ method: String, _ path: String, query: [URLQueryItem] = [], body: Data? = nil,
                  contentType: String = "application/json", timeout: TimeInterval = 30,
                  headers: [String: String] = [:]) async throws -> (Data, Int) {
@@ -218,7 +246,13 @@ actor ServerLink {
             }
             return (data, status)
         } catch {
-            if (error as? URLError) != nil { setOffline() }
+            // 12.17: only connection failures mean "server gone". A timeout (a hung backend behind the map server, e.g.
+            // the live service) re-probes GET /v1 in the background; only that probe failing marks it offline.
+            if let u = error as? URLError {
+                let code = u.code.rawValue
+                if NetFailure.marksOffline(code: code) { setOffline() }
+                else if NetFailure.wantsProbe(code: code) { failProbe() }
+            }
             throw error
         }
     }

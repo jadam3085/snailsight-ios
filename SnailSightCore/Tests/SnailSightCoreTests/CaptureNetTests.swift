@@ -185,3 +185,32 @@ final class CaptureFormatTests: XCTestCase {
         XCTAssertFalse(CaptureFormat.shouldSave(now: 1, last: 0, rateHz: 0))
     }
 }
+
+final class NetFailureTests: XCTestCase {
+    func testTimeoutDoesNotMarkOffline() {
+        XCTAssertFalse(NetFailure.marksOffline(code: -1001))                        // .timedOut: re-probe instead
+        XCTAssertTrue(NetFailure.wantsProbe(code: -1001))
+    }
+
+    func testConnectionFailuresMarkOffline() {
+        for c in [-1003, -1004, -1005, -1006, -1009, -1200] {                        // host / connect / lost / dns / no net / tls
+            XCTAssertTrue(NetFailure.marksOffline(code: c), "\(c)")
+            XCTAssertFalse(NetFailure.wantsProbe(code: c))
+        }
+    }
+
+    func testOtherErrorsOnlyReprobe() {
+        for c in [-1011, -1017, -1103] {                                            // bad response / parse / too big
+            XCTAssertFalse(NetFailure.marksOffline(code: c))
+            XCTAssertTrue(NetFailure.wantsProbe(code: c))
+        }
+        XCTAssertFalse(NetFailure.marksOffline(code: -999))                         // cancelled: ours, no verdict
+        XCTAssertFalse(NetFailure.wantsProbe(code: -999))
+    }
+
+    func testProbeRateLimit() {
+        XCTAssertTrue(NetFailure.probeDue(now: 100, last: nil))
+        XCTAssertFalse(NetFailure.probeDue(now: 105, last: 100))
+        XCTAssertTrue(NetFailure.probeDue(now: 110, last: 100))
+    }
+}

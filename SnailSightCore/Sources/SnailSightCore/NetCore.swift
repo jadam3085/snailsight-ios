@@ -156,3 +156,29 @@ public enum Backoff {
         min(cap, base * pow(2, Double(max(0, attempt))))
     }
 }
+
+/// 12.17: which transport failures mean "the server is gone". Only connection-level ones: a timeout on an ordinary
+/// request (a slow or hung backend behind the map server) must not flip the whole app offline; the caller re-probes
+/// `GET /v1` instead, and only that probe failing marks it offline. Codes are `URLError.Code.rawValue` (NSURLError*),
+/// kept as Int so this stays pure on every platform.
+public enum NetFailure {
+    public static let timedOut = -1001
+    /// cannotFindHost, cannotConnectToHost, networkConnectionLost, dnsLookupFailed, notConnectedToInternet,
+    /// internationalRoamingOff, callIsActive, dataNotAllowed, secureConnectionFailed, cannotLoadFromNetwork.
+    public static let connectionCodes: Set<Int> = [-1003, -1004, -1005, -1006, -1009, -1018, -1019, -1020, -1200, -2000]
+
+    /// Does this failure of an ordinary request mark the server offline at once?
+    public static func marksOffline(code: Int) -> Bool { connectionCodes.contains(code) }
+
+    public static let cancelled = -999
+
+    /// Should it trigger a background `GET /v1` re-probe instead? Timeouts and any other transport error that is not
+    /// a connection failure (those go offline at once) or a cancellation (ours, says nothing about the server).
+    public static func wantsProbe(code: Int) -> Bool { code != cancelled && !marksOffline(code: code) }
+
+    /// Rate limit for those re-probes: at most one per `interval` seconds.
+    public static func probeDue(now: Double, last: Double?, interval: Double = 10) -> Bool {
+        guard let last else { return true }
+        return now - last >= interval
+    }
+}

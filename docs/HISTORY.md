@@ -452,3 +452,12 @@ instead of unlit, in AR and in Map 3D (sun with shadows + a fill light). Raw sca
 clean tileset the structure tiles are drawn as before. Server side, live carving (snailCOP `livecarve.py`) now removes
 base surfaces the LiDAR sees through as you walk (moved chairs, floating bits) and the M4 tile sync swaps the leaves in
 place: no app change needed for that. Core `MapTiles.variant(raw:clean:)` + test.
+
+**12.17 (timeouts are not "offline"; keyframes carry the lock)**: timeouts no longer mark the server offline (only
+connection failures: no network, host not found / refused, connection lost, DNS, TLS). On 10-25 a hung live backend made
+proxied requests time out and the whole app flapped to "Server offline" every 10-20 s while `GET /v1` answered fine; now
+a timeout re-checks `GET /v1` in the background (at most once per 10 s) and only that failing goes offline. Core
+`NetFailure.marksOffline(code:)` + tests. Live keyframes carry the map lock so live carving starts at once: while the
+phone is server-locked (`server` / `carried`) each keyframe header adds `T_map_arkit` (16 numbers, row-major, map z-up
+<- ARKit world) and `lock` = `{source, sigma_cm?, age_s?}` (omitted otherwise; older servers ignore them). The server
+uses it only to seed its own per-keyframe mesh ICP. Core `LiveMapLock` + header test.

@@ -213,8 +213,17 @@ final class LiveStreamer {
                 guard stream == self.streamID, self.model.liveOn else { return }   // world frame changed / mode off meanwhile
                 let seq = self.nextSeq                              // seqs stay contiguous: assigned only on success
                 self.nextSeq += 1
+                // 12.17: the phone's map lock (server / carried only, as TileStreamer) so the server can seed its
+                // per-keyframe mesh ICP before the live graph has placed this stream.
+                let loc = self.model.mapLocalizer
+                var lock: LiveMapLock?
+                if let al = loc.alignment, LiveMapLock.sendable(source: loc.lockSource, hasAlignment: true) {
+                    lock = LiveMapLock(T_map_arkit: al.T.m, source: loc.lockSource,
+                                       sigmaCm: loc.lastSigmaCm ?? loc.errorEstimate, ageS: loc.lastFixAge)
+                }
                 let h = LiveKeyframeHeader(seq: seq, streamID: stream, t: stamp, wall: wall, T: T, K: Kv,
-                                           imageSize: size, tracking: "normal", blurPx: kfBlur, exposureS: exposure)
+                                           imageSize: size, tracking: "normal", blurPx: kfBlur, exposureS: exposure,
+                                           mapLock: lock)
                 var blobs: [(name: String, data: Data)] = [(name: "depth_png", data: dp), (name: "rgb_jpg", data: rgb)]
                 if let cp { blobs.append((name: "conf_png", data: cp)) }
                 if let mp {
