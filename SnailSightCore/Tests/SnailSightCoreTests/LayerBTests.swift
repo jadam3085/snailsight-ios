@@ -100,3 +100,56 @@ final class LayerBTests: XCTestCase {
         XCTAssertEqual(s.phoneMs ?? 0, 2100, accuracy: 0.01)
     }
 }
+
+/// Replay of the server's own Layer B frames (services/snailsight/layerb.py integrating a REAL recorded phone stream,
+/// dumped by snailCOP scratch layerb_frames.py): every delta in arrival order must end in exactly the state of the
+/// final full frames, and a dropped delta must be caught as a gap. Skipped unless SNAILSIGHT_LAYERB_REPLAY is set.
+final class LayerBReplayTests: XCTestCase {
+    func testServerFrames() throws {
+        guard let path = ProcessInfo.processInfo.environment["SNAILSIGHT_LAYERB_REPLAY"] else {
+            throw XCTSkip("set SNAILSIGHT_LAYERB_REPLAY to a layerb_frames.py dump")
+        }
+        let o = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: path))) as? [String: Any])
+        let frames = (o["frames"] as! [String]).map { Data($0.utf8) }
+        let finals = (o["finals"] as! [String]).map { Data($0.utf8) }
+        var live = LayerBStore(), ref = LayerBStore()
+        var applied = 0, gaps = 0, deltas = 0
+        let t0 = Date()
+        for d in frames {
+            XCTAssertTrue(SurfaceFrame.isSurface(d))
+            let f = try XCTUnwrap(SurfaceFrame.parse(d))
+            if f.since != nil { deltas += 1 }
+            switch live.apply(f, now: 0) {
+            case .applied: applied += 1
+            case .gap: gaps += 1
+            }
+        }
+        let ms = Date().timeIntervalSince(t0) * 1000
+        for d in finals { _ = ref.apply(try XCTUnwrap(SurfaceFrame.parse(d)), now: 0) }
+        XCTAssertEqual(gaps, 0)
+        XCTAssertEqual(live.superseded, ref.superseded)
+        // tiles the server allocated but never revised (live_seq 0, no block states) are never sent: ignore them
+        let refKeys = Set(ref.tiles.filter { !$0.value.blocks.isEmpty }.keys)
+        XCTAssertEqual(Set(live.tiles.filter { !$0.value.blocks.isEmpty }.keys), refKeys)
+        var tris = 0
+        for k in refKeys {
+            XCTAssertEqual(live.tiles[k]?.ver, ref.tiles[k]?.ver, k)
+            let a = live.tileMesh(k)?.mesh.triangleCount, b = ref.tileMesh(k)?.mesh.triangleCount
+            XCTAssertEqual(a, b, k)
+            tris += b ?? 0
+        }
+        // a client that missed one delta of a tile sees the next one as a gap
+        var lossy = LayerBStore()
+        var dropped: String?
+        var caught = false
+        for d in frames {
+            let f = try XCTUnwrap(SurfaceFrame.parse(d))
+            if dropped == nil, f.since != nil { dropped = f.key; continue }
+            if case .gap = lossy.apply(f, now: 0), f.key == dropped { caught = true }
+        }
+        XCTAssertTrue(caught || dropped == nil)
+        print("LAYERB_REPLAY frames \(frames.count) (deltas \(deltas)) applied \(applied) tiles \(ref.tiles.count) " +
+              "cubes \(ref.blockCount) surface_blocks \(ref.surfaceBlocks) triangles \(tris) gap_caught \(caught) " +
+              String(format: "apply_ms_total %.1f", ms))
+    }
+}
