@@ -56,3 +56,27 @@ final class NavLayerTests: XCTestCase {
         XCTAssertTrue(st.summary(now: 3, blocked: 400).contains("1.0 m² blocked"))
     }
 }
+
+/// A real `GET /v1/live/nav` answer decodes into the robot band pictures. Skipped unless SNAILSIGHT_NAV_REPLAY is set.
+final class NavLayerReplayTests: XCTestCase {
+    func testLiveAnswer() throws {
+        guard let path = ProcessInfo.processInfo.environment["SNAILSIGHT_NAV_REPLAY"] else {
+            throw XCTSkip("set SNAILSIGHT_NAV_REPLAY to a saved /v1/live/nav answer")
+        }
+        let doc = try JSONDecoder().decode(LiveNavDoc.self, from: Data(contentsOf: URL(fileURLWithPath: path)))
+        var st = LiveNavState()
+        let changed = st.apply(doc, now: 0)
+        XCTAssertEqual(changed.count, doc.tiles.count)
+        var blocked = 0, free = 0
+        for t in doc.tiles {
+            XCTAssertEqual(t.occ.count, t.nc * t.nc, t.key)
+            XCTAssertEqual(t.free.count, t.nc * t.nc, t.key)
+            let c = NavBand.counts(NavBand.classes(t))
+            blocked += c.blocked
+            free += c.free
+            XCTAssertEqual(NavBand.rgba(NavBand.classes(t), n: t.nc).count, t.nc * t.nc * 4)
+        }
+        XCTAssertGreaterThan(blocked + free, 0)
+        print("NAV_REPLAY rev \(doc.rev ?? -1) tiles \(doc.tiles.count) blocked \(blocked) free \(free) · \(st.summary(now: 1, blocked: blocked))")
+    }
+}
