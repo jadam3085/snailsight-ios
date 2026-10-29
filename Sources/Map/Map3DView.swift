@@ -116,6 +116,7 @@ final class Map3DModel: ObservableObject {
         camera.onTap = { [weak self] p, size in self?.tap(p, size) }
         camera.onDoubleTap = { [weak self] p, size in self?.doubleTap(p, size) }
         tiles.onTileset = { [weak self] in self?.frameSite(force: false) }
+        model.map3DTiles = tiles                                    // 12.18 Layer B cube changes reach the viewer
         frameSite(force: false)
         NotificationCenter.default.publisher(for: UIApplication.didReceiveMemoryWarningNotification)
             .sink { [weak self] _ in self?.memoryWarning() }.store(in: &bag)
@@ -468,6 +469,10 @@ final class Map3DTileLoader {
     private var drawn = Set<String>()
     private var cam: [Double] = [0, 0, 0]
     private var firstDrawnLogged = false
+    /// 12.18 Layer B: base faces inside live surface / empty cubes are hidden here too (never two surfaces).
+    private var faceMasks: [String: TileFaceMask] = [:]
+    private var blockDirty = Set<String>()
+    private var blocksOn: Bool?
 
     private(set) var fetchedCount = 0
     private(set) var sharedCount = 0
@@ -520,6 +525,12 @@ final class Map3DTileLoader {
             if e.isEnabled != on { e.isEnabled = on }
         }
         drawn = d
+        if blocksOn != model.meshLive {
+            blocksOn = model.meshLive
+            blockDirty.formUnion(entities.keys)
+        }
+        var n = 0
+        while n < 3, let key = blockDirty.popFirst() { remask(key); n += 1 }
         if !firstDrawnLogged, !d.isEmpty {
             firstDrawnLogged = true
             model.log.event("map3d_first_tiles", ["drawn": .int(d.count), "shared": .int(sharedCount)])
@@ -678,11 +689,37 @@ final class Map3DTileLoader {
         entities[key] = holder
         loadedHash[key] = hash
         loadedMem[key] = n.mem
+        faceMasks[key] = nil
+        if model.blocks.store.blockCount > 0 { blockDirty.insert(key) }
+    }
+
+    /// Layer B cubes changed inside these 4 m squares (map frame).
+    func blocksChanged(squares: [[Double]]) {
+        for k in entities.keys {
+            guard let b = nodeIndex[k]?.box, b.count >= 8 else { continue }
+            let sq = [b[0] - b[3], b[1] - b[7], b[0] + b[3], b[1] + b[7]]
+            if squares.contains(where: { $0[0] <= sq[2] && $0[2] >= sq[0] && $0[1] <= sq[3] && $0[3] >= sq[1] }) {
+                blockDirty.insert(k)
+            }
+        }
+    }
+
+    private func remask(_ key: String) {
+        guard let holder = entities[key] else { return }
+        let st = model.blocks.store
+        if faceMasks[key] == nil {
+            guard model.meshLive, st.blockCount > 0 else { return }
+            faceMasks[key] = TileFaceMask(holder: holder, frame: node) { SIMD3<Float>($0.x, -$0.z, $0.y) }   // viewer → map
+        }
+        guard let fm = faceMasks[key] else { return }
+        fm.apply(model.meshLive && st.blockCount > 0 ? st.hiddenFaces(centroids: fm.centroids).mask : [])
     }
 
     private func release(_ key: String) {
         guard let e = entities.removeValue(forKey: key) else { return }
         e.removeFromParent()
+        faceMasks[key] = nil
+        blockDirty.remove(key)
         loadedHash[key] = nil
         loadedMem[key] = nil
         drawn.remove(key)
@@ -703,6 +740,11 @@ final class Map3DOverlays {
     private let terrain = mapFrameHolder("map3d.terrain")
     private let doorNode = mapFrameHolder("map3d.doors")
     private var doorRev = -1
+    /// 12.18 Layer A (robot obstacles) and Layer B (live block mesh): clones of the AR entities.
+    private let navClones = mapFrameHolder("map3d.nav")
+    private let blockClones = mapFrameHolder("map3d.blocks")
+    private var navRev = -1
+    private var blockRev = -1
     private let cameraNode = Entity()
     private let treeNode = Entity()
     private let bodyNode = Entity()
@@ -719,6 +761,7 @@ final class Map3DOverlays {
     private var terrainBuilding = false
     private var routeKey = ""
     private var lastLiveClone: TimeInterval = 0
+    private var lastBlockClone: TimeInterval = 0
 
     private lazy var sphere = MeshResource.generateSphere(radius: 1)
     private lazy var cylinder = MeshResource.generateCylinder(height: 1, radius: 1)
@@ -727,7 +770,7 @@ final class Map3DOverlays {
         self.model = model
         self.data = data
         root.name = "map3d.overlays"
-        for n in [live, terrain, doorNode, cameraNode, treeNode, bodyNode, routeNode] { root.addChild(n) }
+        for n in [live, terrain, doorNode, cameraNode, treeNode, bodyNode, routeNode, navClones, blockClones] { root.addChild(n) }
         let sun = DirectionalLight()
         sun.light.intensity = 2500
         sun.shadow = DirectionalLightComponent.Shadow(maximumDistance: 40, depthBias: 2)   // 12.16 clean look: shadows
@@ -743,7 +786,9 @@ final class Map3DOverlays {
     var bodyCount: Int { bodies.count }
 
     func clear() {
-        for n in [live, terrain, doorNode, cameraNode, treeNode, bodyNode, routeNode] { n.children.removeAll() }
+        for n in [live, terrain, doorNode, cameraNode, treeNode, bodyNode, routeNode, navClones, blockClones] { n.children.removeAll() }
+        navRev = -1
+        blockRev = -1
         doorRev = -1
         liveSources = []
         bodies = [:]
@@ -771,8 +816,8 @@ final class Map3DOverlays {
             live.children.removeAll()
             liveSources = []
             let src = model.controller.mapLayer.liveNode
-            for c in src.children {
-                let b = c.visualBounds(relativeTo: src)
+            for c in model.liveMap.map3DSources() {                 // 12.18: unmasked (no device view in Map 3D)
+                let b = c.visualBounds(relativeTo: c.parent ?? src)
                 let cl = c.clone(recursive: true)
                 cl.isEnabled = true
                 live.addChild(cl)
@@ -782,6 +827,19 @@ final class Map3DOverlays {
         for s in liveSources {
             let on = cutZ.map { Double(s.minZ) < $0 } ?? true
             if s.clone.isEnabled != on { s.clone.isEnabled = on }
+        }
+        navClones.isEnabled = model.showNav
+        if model.showNav, model.navStore.rev != navRev {
+            navRev = model.navStore.rev
+            navClones.children.removeAll()
+            for c in model.controller.mapLayer.navNode.children { navClones.addChild(c.clone(recursive: true)) }
+        }
+        blockClones.isEnabled = model.meshLive
+        if model.meshLive, model.blocks.rev != blockRev, t - lastBlockClone >= 1 {
+            lastBlockClone = t
+            blockRev = model.blocks.rev
+            blockClones.children.removeAll()
+            for c in model.blocks.map3DSources() { blockClones.addChild(c) }
         }
         doorNode.isEnabled = model.drawDoors
         if model.drawDoors {

@@ -178,6 +178,11 @@ struct MapPlanView: View {
             gg.draw(Image(decorative: img, scale: 1), in: rect(fp.bounds))
         }
         if model.meshLive, let l = shownLevel?.level { drawLiveMesh(&g, level: l, now: now) }
+        if model.showNav, let l = shownLevel?.level {                    // 12.18 Layer A: what the robots plan around
+            for p in model.navStore.pictures.values where p.level == l {
+                g.draw(Image(decorative: p.image, scale: 1).interpolation(.none), in: rect(p.square))
+            }
+        }
         if yard { drawTrees(&g) }
         drawRooms(&g, level: shownLevel)
         if model.drawDoors { drawDoors(&g, level: shownLevel) }

@@ -49,6 +49,7 @@ final class LiveStreamer {
     private var nextSeq = 0
     private var encoding = false
     private var closedStreams = Set<String>()       // bye acknowledged: the next "on" needs a new stream id
+    private var lastStagesLogged = -1               // 12.18: live_stages logged every 10th keyframe
     private var baseKnown = false
     private var lastBase: String?
     private var snapshot = LiveSnapshot()
@@ -84,6 +85,23 @@ final class LiveStreamer {
         uplink.onCorrection = { [weak self] T, stream, placed in
             guard let self, self.model.liveMapID == self.model.mapLocalizer.mapID else { return }
             self.model.controller.mapLayer.liveCorrection(T_map_arkit: T, stream: stream, placed: placed)
+        }
+        }
+        uplink.onAck = { [weak self] o in                               // 12.18 M0 latency line
+            guard let self else { return }
+            if self.model.liveStages.ack(o) {
+                self.model.liveStagesChanged()
+                if let st = o["stages"] as? [String: Any], let seq = (st["seq"] as? NSNumber)?.intValue, seq != self.lastStagesLogged,
+                   seq % 10 == 0 {
+                    self.lastStagesLogged = seq
+                    var ev: [String: LogValue] = ["seq": .int(seq), "gate": .string(self.model.liveStages.gate ?? "")]
+                    for (k, v) in self.model.liveStages.ms { ev["ms_" + k] = .double(v.rounded()) }
+                    if let t = self.model.liveStages.totalMs { ev["total_ms"] = .double(t.rounded()) }
+                    if let p = self.model.liveStages.phoneMs { ev["phone_ms"] = .double(p.rounded()) }
+                    if let d = self.model.liveStages.drawnMs { ev["drawn_ms"] = .double(d.rounded()) }
+                    self.model.log.event("live_stages", ev)
+                }
+            }
         }
     }
 
@@ -287,6 +305,8 @@ final class LiveUplink {
     var onStreamClosed: ((String) -> Void)?
     /// 10.1: (T_map_arkit, stream_id, placed) of a `correction` (main thread).
     var onCorrection: ((Mat4, String, Bool) -> Void)?
+    /// 12.18: an ack carrying `stages` / `gate` (main thread).
+    var onAck: (([String: Any]) -> Void)?
 
     static let window = 8
     static let ackTimeoutS = 15.0
@@ -825,6 +845,10 @@ final class LiveUplink {
         for s in (spool[t] ?? []) where s <= contiguous { deleteFile(t, s) }
         acked += 1
         if (o["dup"] as? Bool) == true { dups += 1 }
+        if o["stages"] != nil || o["gate"] != nil {                    // 12.18 M0 stage timestamps + stream gate
+            let oc = o
+            DispatchQueue.main.async { [weak self] in self?.onAck?(oc) }
+        }
         if let lag = (o["lag_ms"] as? NSNumber)?.doubleValue {
             recentLags.append(lag)
             if recentLags.count > 20 { recentLags.removeFirst(recentLags.count - 20) }

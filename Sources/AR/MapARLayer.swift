@@ -68,6 +68,10 @@ final class MapARLayer {
     let markNode = Entity()
     /// 12.6 articulated door leaves (DoorStore) at their latest angle, with a state label above each.
     let doorNode = Entity()
+    /// 12.18 Layer A: the robots' obstacle view (NavLayerClient), flat on each storey floor.
+    let navNode = Entity()
+    /// 12.18 Layer B: live block-mesh surface (LayerBClient).
+    let blockNode = Entity()
     private var doorRev = -1
     private var doorLabels: [Entity] = []
 
@@ -100,6 +104,8 @@ final class MapARLayer {
     static let maxBoxes = 25
     /// 11.0: the streamed house tiles (Model / Wire / Ghost) under the map frame.
     private(set) lazy var tiles = TileStreamer(model: model, layer: self)
+    /// 12.18: the device surface is truth near you (stored faces this phone has seen are hidden).
+    private(set) lazy var surface = DeviceSurface(model: model)
     private(set) var camForwardWorld = SIMD3<Float>(0, 0, -1)
 
     lazy var wireMaterial: UnlitMaterial = {
@@ -123,7 +129,7 @@ final class MapARLayer {
         self.arView = arView
         root.name = "map.root"
         root.addChild(mapFrame)
-        for n in [labelNode, objectNode, terrainNode, pathNode, agentNode, liveNode, simNode, markNode, doorNode] { mapFrame.addChild(n) }
+        for n in [labelNode, objectNode, terrainNode, pathNode, agentNode, liveNode, simNode, markNode, doorNode, navNode, blockNode] { mapFrame.addChild(n) }
         mapFrame.addChild(tiles.node)
         root.isEnabled = false
         arView.scene.addAnchor(root)
@@ -171,7 +177,9 @@ final class MapARLayer {
         if t - lastSlow >= 0.5 {
             lastSlow = t
             slowTick(pivot: pivot)
+            surface.tick()
         }
+        surface.frame(f, align: shown)
         let show = shown != nil && status.opacity > 0 && t >= hiddenUntil && !model.recording && !model.arSuspended
         if root.isEnabled != show { root.isEnabled = show }
         guard show else { return }
@@ -222,6 +230,7 @@ final class MapARLayer {
 
     /// The ARKit world frame changed: every alignment belongs to the old frame.
     func worldFrameChanged() {
+        surface.worldReset()
         liveAlign = nil
         blender.reset()
         shown = nil

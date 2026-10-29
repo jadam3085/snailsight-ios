@@ -215,6 +215,21 @@ final class AppModel: ObservableObject {
     @Published var showPaths: Bool = UserDefaults.standard.object(forKey: "layers.paths") as? Bool ?? true {
         didSet { UserDefaults.standard.set(showPaths, forKey: "layers.paths") }
     }
+    /// 12.18 Layers ▸ Device surface near you (default on): stored map faces this phone has seen this session are
+    /// hidden in AR, so the real room (camera + the phone's own scene mesh) is what you see near you.
+    @Published var deviceTruth: Bool = UserDefaults.standard.object(forKey: "layers.deviceTruth") as? Bool ?? true {
+        didSet {
+            UserDefaults.standard.set(deviceTruth, forKey: "layers.deviceTruth")
+            if deviceTruth != oldValue { log.event("layer", ["name": .string("device_truth"), "on": .bool(deviceTruth)]) }
+        }
+    }
+    /// 12.18 Layers ▸ Robot obstacles (live nav layer A, API §6b.6): what the robots plan around, on the Map and in AR.
+    @Published var showNav: Bool = UserDefaults.standard.bool(forKey: "layers.nav") {
+        didSet {
+            UserDefaults.standard.set(showNav, forKey: "layers.nav")
+            if showNav != oldValue { log.event("layer", ["name": .string("nav"), "on": .bool(showNav)]) }
+        }
+    }
     let meshStore = LiveMeshStore()
     private(set) lazy var planData = MapPlanData(model: self)
 
@@ -384,6 +399,29 @@ final class AppModel: ObservableObject {
     private(set) lazy var roomScanner = RoomScanner(model: self)
     private(set) lazy var terrainLayer = TerrainARLayer(model: self)
     private(set) lazy var liveMap = LiveMapClient(model: self)
+    /// 12.18 Layer A: the robots' obstacle view (Layers ▸ Robot obstacles).
+    private(set) lazy var navStore = NavLayerClient(model: self)
+    /// 12.18 Layer B: live block-mesh deltas (server Layer B wire, API §6b).
+    private(set) lazy var blocks = LayerBClient(model: self)
+    /// 12.18 Map ▸ 3D tile loader while the viewer is open (Layer B cube changes re-mask its base tiles).
+    weak var map3DTiles: Map3DTileLoader?
+    /// 12.18 M0: server stage timestamps (uplink acks) + this phone's receive / draw of its own keyframes.
+    var liveStages = LiveStages()
+    /// Short + detail lines under the live line (nil = hidden).
+    @Published var liveStagesText: String?
+    @Published var liveStagesDetail: String?
+    @Published var liveStagesOpen = false
+
+    func liveStagesChanged() {
+        let s = liveStages.short, d = liveStages.detail
+        if liveStagesText != s { liveStagesText = s }
+        if liveStagesDetail != d { liveStagesDetail = d }
+    }
+
+    func map3DBlocksChanged(squares: [[Double]]) {
+        guard let t = map3DTiles else { return }
+        MainActor.assumeIsolated { t.blocksChanged(squares: squares) }
+    }
     private(set) lazy var serverSim = ServerSimClient(model: self)
     /// 12.7 drive mode: twin sticks, turret, gamepad, FPV (Sources/Drive).
     private(set) lazy var drive = DriveController(model: self)
@@ -478,6 +516,7 @@ final class AppModel: ObservableObject {
         let lg = services.log
         recorder.onEvent = { ev, data in lg.event(ev, data) }
         UIApplication.shared.isIdleTimerDisabled = true
+        DispatchQueue.main.async { [weak self] in self?.navStore.start() }     // 12.18 Layer A poller (idle unless shown)
     }
 
     /// Screen stays awake while AR runs and while a capture uploads in front (set at launch and re-asserted here,

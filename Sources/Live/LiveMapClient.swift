@@ -39,6 +39,11 @@ final class LiveMapClient {
     private var drawnColour: MeshColour?
     private var changes = ChangeMarkers()
     private var hiddenUnderBase = 0
+    /// 12.18 device surface: faces of each live tile this phone has seen (hidden in AR; the device mesh is truth there).
+    private var liveMasks: [String: [Bool]] = [:]
+    /// Unmasked meshes of masked tiles, built on demand for Map ▸ 3D (which shows everything: it has no device view).
+    private var fullMeshes: [String: MeshResource] = [:]
+    private var fullPhoto: [String: TextureResource] = [:]
     private var changeEntities: [String: Entity] = [:]
     private var stats = (msgs: 0, tiles: 0, drawn: 0, changes: 0, docs: 0)
     private var lastStats: TimeInterval = 0
@@ -77,7 +82,7 @@ final class LiveMapClient {
 
     /// 12.0: what the downlink subscribes to: the live layers, + the estimated world's tree events when the server has it.
     private var layers: [String] {
-        LiveSubscribe.layers + (model.serverFeatures.estimatedWorld ? ["estimated"] : [])
+        LiveSubscribe.layers + ["surface"] + (model.serverFeatures.estimatedWorld ? ["estimated"] : [])   // 12.18 Layer B
     }
 
     /// Fresh tile looks (literal opacities): just arrived / changed = bright, then fading, then the settled amber.
@@ -128,6 +133,7 @@ final class LiveMapClient {
         }
         restyleFresh()
         hideUnderBase()
+        model.blocks.tick()                                             // 12.18 Layer B looks / switches
         if model.arAgents && model.serverBase != nil && !model.showScans && t - downlinkAgentsAt > 5
             && t - lastPoll >= 2 && !polling {
             poll()
@@ -255,7 +261,8 @@ final class LiveMapClient {
         subHalf = bboxHalf
         let half = subHalf
         let sub = LiveSubscribe.message(agentID: model.agentID, mapID: mapID, baseVersion: tiles.baseVersion ?? layer.mapVersion,
-                                        tiles: tiles.allSince, epoch: epoch, seq: lastSeq,
+                                        tiles: tiles.allSince.merging(model.blocks.heldSince) { a, _ in a },
+                                        epoch: epoch, seq: lastSeq,
                                         bbox: c.map { Self.bbox($0, half: half) }, layers: layers)
         tk.send(.string(String(decoding: sub, as: UTF8.self))) { [weak self] err in
             guard let err else { return }
@@ -325,6 +332,7 @@ final class LiveMapClient {
 
     private func handle(_ d: Data) {
         stats.msgs += 1
+        if model.blocks.handle(d) { stats.tiles += 1; return }     // 12.18 Layer B `surface` deltas
         model.mapFollower.liveMessage(d)            // 10.7: `rev` (map head) rides this socket too
         guard let (m, seq) = LiveDownMessage.parseWithSeq(d) else { return }
         if let q = seq { lastSeq = max(lastSeq ?? q, q) }
@@ -336,6 +344,7 @@ final class LiveMapClient {
                 }
             }
             if let e, e != epoch { epoch = e; lastSeq = q }
+            model.blocks.setEpoch(e)                                    // 12.18: Layer B revisions are per live run
             if let v { model.liveBaseVersion = v; if tiles.baseVersion == nil { tiles.rebase(v) } }
         case .agents(let list):
             downlinkAgentsAt = now
@@ -351,7 +360,19 @@ final class LiveMapClient {
                 let rgb = LiveMeshTile.decodeColour(base64: h.rgb, vertexCount: mesh.vertexCount)
                 let applied = model.meshStore.applyLive(h, mesh: mesh, rgb: rgb, floorZ: floorZ[h.levelIndex], me: model.agentID)
                 tileData[key] = (mesh, rgb)
+                liveMasks[key] = nil
+                if let w = h.hwWall, h.agents.contains(model.agentID) { model.liveStages.tileArrived(hwWall: w, now: now) }
                 drawTile(key: key, mesh: mesh, rgb: rgb)
+                if let w = h.hwWall, h.agents.contains(model.agentID) {        // 12.18 M0: our keyframe is on screen
+                    model.liveStages.tileDrawn(hwWall: w, now: now)
+                    model.liveStagesChanged()
+                }
+                layer.surface.register(id: "live|" + key,
+                                       centroids: CoveredFaces.centroids(positions: mesh.positions, indices: mesh.indices)) { [weak self] hidden, n in
+                    guard let self, let d = self.tileData[key], d.mesh.triangleCount == hidden.count || n == 0 else { return }
+                    self.liveMasks[key] = n > 0 ? hidden : nil
+                    self.drawTile(key: key, mesh: d.mesh, rgb: d.rgb)
+                }
                 if applied == .new, !loggedFirstMesh {
                     loggedFirstMesh = true
                     model.log.event("live_mesh_first", ["key": .string(key), "agents": .string(h.agents.joined(separator: ",")),
@@ -430,9 +451,10 @@ final class LiveMapClient {
     private func hideUnderBase() {
         let covered = LiveOverBase.coveredLeaves(layer.tiles.drawnModelKeys)
         let centres = changes.markers.map(\.center)
+        let layerB = model.blocks.surfaceKeys                           // 12.18: Layer B supersedes the old live mesh
         var hidden = 0
         for (k, e) in tileEntities {
-            let show = LiveOverBase.showLive(key: k, covered: covered, changeCentres: centres)
+            let show = !layerB.contains(k) && LiveOverBase.showLive(key: k, covered: covered, changeCentres: centres)
             if e.isEnabled != show { e.isEnabled = show }
             if !show { hidden += 1 }
         }
@@ -475,35 +497,21 @@ final class LiveMapClient {
                        provider: prov, decode: nil, shouldInterpolate: false, intent: .defaultIntent)
     }
 
-    private func drawTile(key: String, mesh m: FlatMesh, rgb: [UInt8]?) {
-        var d = MeshDescriptor(name: "live")
-        tilePhoto[key] = nil
-        if model.meshColour == .photo, let rgb, let ft = LiveMeshTile.faceTextured(m, rgb: rgb),
-           let img = Self.stripImage(ft.rgba, w: ft.width, h: ft.rows),
-           let tex = try? TextureResource.generate(from: img, options: .init(semantic: .color, mipmapsMode: .none)) {
-            var pos = [SIMD3<Float>](), uv = [SIMD2<Float>]()
-            pos.reserveCapacity(ft.positions.count / 3)
-            uv.reserveCapacity(ft.uvs.count / 2)
-            var i = 0
-            while i + 2 < ft.positions.count { pos.append(SIMD3<Float>(ft.positions[i], ft.positions[i + 1], ft.positions[i + 2])); i += 3 }
-            i = 0
-            while i + 1 < ft.uvs.count { uv.append(SIMD2<Float>(ft.uvs[i], ft.uvs[i + 1])); i += 2 }
-            d.positions = MeshBuffers.Positions(pos)
-            d.textureCoordinates = MeshBuffers.TextureCoordinates(uv)
-            d.primitives = .triangles(ft.indices)
-            tilePhoto[key] = tex
-        } else {
-            var pos = [SIMD3<Float>]()
-            pos.reserveCapacity(m.vertexCount)
-            var i = 0
-            while i + 2 < m.positions.count {
-                pos.append(SIMD3<Float>(m.positions[i], m.positions[i + 1], m.positions[i + 2]))
-                i += 3
+    private func drawTile(key: String, mesh full: FlatMesh, rgb: [UInt8]?) {
+        var m = full
+        if let mask = liveMasks[key], mask.count == full.triangleCount {      // 12.18: seen faces leave (device truth)
+            var idx = [UInt32]()
+            idx.reserveCapacity(full.indices.count)
+            for f in 0..<mask.count where !mask[f] {
+                idx.append(full.indices[f * 3]); idx.append(full.indices[f * 3 + 1]); idx.append(full.indices[f * 3 + 2])
             }
-            d.positions = MeshBuffers.Positions(pos)
-            d.primitives = .triangles(m.indices)
+            m = FlatMesh(positions: full.positions, indices: idx.isEmpty ? [0, 0, 0] : idx)
         }
-        guard let res = try? MeshResource.generate(from: [d]) else { return }
+        guard let built = buildMesh(m, rgb: rgb) else { return }
+        let res = built.0
+        tilePhoto[key] = built.1
+        fullMeshes[key] = nil
+        fullPhoto[key] = nil
         let st = model.meshStore.step(key: key)                         // a new / changed tile glows, then settles
         if let e = tileEntities[key] {
             e.model?.mesh = res                                         // in place: same entity, new mesh
@@ -515,6 +523,58 @@ final class LiveMapClient {
         }
         if st > 0 { tileStep[key] = st }
         stats.drawn += 1
+    }
+
+    /// One live tile as a RealityKit mesh: photo-coloured (one texel per triangle) when Mesh colour is Photo and the
+    /// tile has colour, else plain positions for the wire look.
+    private func buildMesh(_ m: FlatMesh, rgb: [UInt8]?) -> (MeshResource, TextureResource?)? {
+        var d = MeshDescriptor(name: "live")
+        var tex: TextureResource?
+        if model.meshColour == .photo, let rgb, let ft = LiveMeshTile.faceTextured(m, rgb: rgb),
+           let img = Self.stripImage(ft.rgba, w: ft.width, h: ft.rows),
+           let t = try? TextureResource.generate(from: img, options: .init(semantic: .color, mipmapsMode: .none)) {
+            var pos = [SIMD3<Float>](), uv = [SIMD2<Float>]()
+            pos.reserveCapacity(ft.positions.count / 3)
+            uv.reserveCapacity(ft.uvs.count / 2)
+            var i = 0
+            while i + 2 < ft.positions.count { pos.append(SIMD3<Float>(ft.positions[i], ft.positions[i + 1], ft.positions[i + 2])); i += 3 }
+            i = 0
+            while i + 1 < ft.uvs.count { uv.append(SIMD2<Float>(ft.uvs[i], ft.uvs[i + 1])); i += 2 }
+            d.positions = MeshBuffers.Positions(pos)
+            d.textureCoordinates = MeshBuffers.TextureCoordinates(uv)
+            d.primitives = .triangles(ft.indices)
+            tex = t
+        } else {
+            var pos = [SIMD3<Float>]()
+            pos.reserveCapacity(m.vertexCount)
+            var i = 0
+            while i + 2 < m.positions.count {
+                pos.append(SIMD3<Float>(m.positions[i], m.positions[i + 1], m.positions[i + 2]))
+                i += 3
+            }
+            d.positions = MeshBuffers.Positions(pos)
+            d.primitives = .triangles(m.indices)
+        }
+        guard let res = try? MeshResource.generate(from: [d]) else { return nil }
+        return (res, tex)
+    }
+
+    /// 12.18 Map ▸ 3D: entities to clone for every live tile, at full content (a tile masked by the device surface in
+    /// AR gets its unmasked mesh, built once per version).
+    func map3DSources() -> [Entity] {
+        var out: [Entity] = []
+        let layerB = model.blocks.surfaceKeys
+        for (k, e) in tileEntities where !layerB.contains(k) {
+            guard liveMasks[k] != nil, let d = tileData[k] else { out.append(e); continue }
+            if fullMeshes[k] == nil, let built = buildMesh(d.mesh, rgb: d.rgb) {
+                fullMeshes[k] = built.0
+                fullPhoto[k] = built.1
+            }
+            guard let res = fullMeshes[k] else { out.append(e); continue }
+            let mat: any RealityKit.Material = fullPhoto[k].map { Self.photoMaterial($0, step: 0) } ?? Self.liveMaterial
+            out.append(ModelEntity(mesh: res, materials: [mat]))
+        }
+        return out
     }
 
     /// L4 markers: thin outlines, three opacity steps as they age (literal opacities only).

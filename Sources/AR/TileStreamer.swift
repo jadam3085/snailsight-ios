@@ -55,6 +55,12 @@ final class TileStreamer {
     private var want: [String: TileSelect.Want] = [:]
     private var drawnKeys: Set<String> = []
     private var styleApplied: HouseStyle?
+    /// 12.18 device surface: each loaded tile's meshes (original + per-part indices) for masking seen faces.
+    private var masks: [String: TileFaceMask] = [:]
+    private var deviceHidden: [String: [Bool]] = [:]
+    private var blockDirty = Set<String>()
+    /// Tiles drawn with some faces hidden (the Map 3D viewer must not clone their masked meshes).
+    private var masked = Set<String>()
 
     // disk cache
     private var disk = TileDiskLRU()
@@ -135,6 +141,7 @@ final class TileStreamer {
         want = TileSelect.select(roots, cam: cam, heading: heading, speed: motion.speed,
                                  camLevel: TileSelect.cameraLevel(z: cam[2], levels: levels))
         refresh()
+        remaskDirty()
         if !model.recording && !model.arSuspended { schedule(t) }
         if t - lastStatus >= Self.statusEveryS {
             lastStatus = t
@@ -412,6 +419,7 @@ final class TileStreamer {
         heldGen += 1
         disk.touch(hash, now: now)
         style(key, model.drawHouse)
+        registerSurface(key: key, hash: hash, holder: holder)
         refresh()
         if loadMs > 1500 { model.log.event("tile_slow_load", ["key": .string(key), "ms": .int(Int(loadMs))]) }
     }
@@ -421,6 +429,10 @@ final class TileStreamer {
         heldGen += 1
         entities.removeValue(forKey: key)?.removeFromParent()
         originals[key] = nil
+        if masks.removeValue(forKey: key) != nil { layer.surface.unregister(id: "base|\(key)|\(it.hash)") }
+        masked.remove(key)
+        deviceHidden[key] = nil
+        blockDirty.remove(key)
         drawnKeys.remove(key)
         evictions += 1
         model.log.event("tile_evict", ["key": .string(key), "mem_mb": .double(Self.mb(it.mem)), "reason": .string(reason),
@@ -475,6 +487,53 @@ final class TileStreamer {
         }
     }
 
+    // MARK: 12.18 never two surfaces: faces this phone has seen (DeviceSurface) or inside Layer B cubes are hidden
+
+    /// Face centroids of a freshly attached tile (map frame), registered with the device surface.
+    private func registerSurface(key: String, hash: String, holder: Entity) {
+        let fm = TileFaceMask(holder: holder, frame: node)
+        guard !fm.isEmpty else { return }
+        masks[key] = fm
+        deviceHidden[key] = nil
+        layer.surface.register(id: "base|\(key)|\(hash)", centroids: fm.centroids) { [weak self] hidden, n in
+            guard let self, self.ledger.items[key]?.hash == hash else { return }
+            self.deviceHidden[key] = n > 0 ? hidden : nil
+            self.remask(key)
+        }
+        if model.blocks.store.blockCount > 0 { remask(key) }
+    }
+
+    /// Layer B cubes changed in these 4 m squares: re-mask the tiles that touch them (≤ 3 per tick, the rest queued).
+    func blocksChanged(squares: [[Double]]) {
+        for (k, fm) in masks where squares.contains(where: { fm.touches(square: $0) }) { blockDirty.insert(k) }
+    }
+
+    /// Layer B shown / hidden: every tile re-masks (queued).
+    func remaskAll() { blockDirty.formUnion(masks.keys) }
+
+    private func remaskDirty() {
+        var n = 0
+        while n < 3, let k = blockDirty.popFirst() {
+            remask(k)
+            n += 1
+        }
+    }
+
+    /// Device-seen OR inside a Layer B cube (surface / empty) → hidden.
+    private func remask(_ key: String) {
+        guard let fm = masks[key] else { return }
+        var mask = deviceHidden[key] ?? []
+        if model.blocks.store.blockCount > 0, model.meshLive {
+            let b = model.blocks.store.hiddenFaces(centroids: fm.centroids)
+            if b.count > 0 {
+                if mask.count != b.mask.count { mask = b.mask } else { for i in 0..<mask.count where b.mask[i] { mask[i] = true } }
+            }
+        }
+        if fm.apply(mask) {
+            if fm.appliedCount > 0 { masked.insert(key) } else { masked.remove(key) }
+        }
+    }
+
     // MARK: 12.3 Map ▸ 3D shares the blob cache and the tiles loaded here
 
     /// The cached file of a tile blob (nil = not on disk).
@@ -504,7 +563,7 @@ final class TileStreamer {
     /// viewer clones it (a clone shares the mesh + texture resources: no second copy in memory).
     func sharedContent(key: String, hash: String) -> Entity? {
         guard ledger.items[key]?.hash == hash, model.drawHouse == .model, styleApplied == .model,
-              let holder = entities[key] else { return nil }
+              !masked.contains(key), let holder = entities[key] else { return nil }
         return holder.children.first
     }
 

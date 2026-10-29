@@ -103,6 +103,7 @@ final class ARSessionController: NSObject, ARSessionDelegate {
         // P2b: LiDAR depth also while localizing against the house map (MapLocalizer, the first minute or so)
         let wantDepth = depthCapture || model.mapLocalizer.wantsDepth || model.liveStreamer.wantsDepth   // 10.0 Live map
             || model.meshMapper.wantsDepth                                                               // 10.2 Map mesh
+            || mapLayer.surface.depthWanted                                                              // 12.18 device surface
         if model.peopleOcclusion && Self.supportsPeople && !wantDepth { c.frameSemantics.insert(.personSegmentationWithDepth) }
         if wantDepth && Self.supportsDepth { c.frameSemantics.insert(.sceneDepth) }
         c.environmentTexturing = depthCapture ? .none : .automatic

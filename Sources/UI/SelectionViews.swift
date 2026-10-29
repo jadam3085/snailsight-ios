@@ -329,6 +329,24 @@ struct LayersSheet: View {
                         Text("Layers show in AR and on the Map. Mesh (live) needs the house map to place you; turn on Live map to add your own walk to it. Any change here sets the view to Custom.")
                     }
                     Section {
+                        Toggle(isOn: $model.deviceTruth) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Label("Device surface near you", systemImage: "camera.metering.matrix")
+                                Text(model.controller.mapLayer.surface.summary).font(.caption).foregroundStyle(.secondary)
+                            }
+                        }
+                        .frame(minHeight: 44)
+                        Toggle(isOn: $model.showNav) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Label("Robot obstacles", systemImage: "exclamationmark.triangle")
+                                Text(model.navStore.summary).font(.caption).foregroundStyle(.secondary)
+                            }
+                        }
+                        .frame(minHeight: 44)
+                    } header: { Text("Live world") } footer: {
+                        Text("Device surface: where this phone's LiDAR has seen the room, the stored map steps aside and you see the room as it is now (stored map only where the phone has not looked). Robot obstacles: what the robots plan around (red = blocked, green = seen free), on the Map, in Map 3D and on the floor in AR.")
+                    }
+                    Section {
                         Picker(selection: $model.meshColour) {
                             ForEach(MeshColour.allCases) { Text($0.rawValue).tag($0) }
                         } label: { Label("Mesh colour", systemImage: "paintpalette") }
