@@ -461,3 +461,27 @@ a timeout re-checks `GET /v1` in the background (at most once per 10 s) and only
 phone is server-locked (`server` / `carried`) each keyframe header adds `T_map_arkit` (16 numbers, row-major, map z-up
 <- ARKit world) and `lock` = `{source, sigma_cm?, age_s?}` (omitted otherwise; older servers ignore them). The server
 uses it only to seed its own per-keyframe mesh ICP. Core `LiveMapLock` + header test.
+
+**12.18 (live world: the device surface is truth near you; Layer B + Layer A consumers; M0 latency line)**: owner on
+12.17 in the utility room (locked ±6 cm, Live map on): the stored textured base was drawn over reality slightly
+misaligned (doubled red compressor tank, black patches on the water heaters, grey wire patches), and Live map did not
+replace it. Now, what ARKit / Quest / HoloLens do:
+- **Device surface near you** (Layers ▸ Live world ▸ Device surface near you, default on; `Sources/AR/DeviceSurface.swift`,
+  core `DeviceCoverage.swift`): every ~0.4 s one LiDAR depth frame (confidence ≥ medium, ≤ 4.5 m) marks the 10 cm cells
+  of the ARKit world its rays crossed or ended in (≤ 10 cm behind the measured surface). Every stored face drawn in AR
+  (base tiles, server live tiles, Layer B blocks) whose DRAWN place is such a cell is hidden for the rest of the session
+  (per face, by centroid; `TileFaceMask` rebuilds a tile's MeshResource without them, the shared resources stay intact).
+  There you see the camera picture, RealityKit's occlusion from the ARKit scene mesh (depth-only) and, with Mesh
+  (live), the faint wire of the phone's own scene mesh. Stored faces draw only where the phone has not looked. LiDAR
+  depth stays on while the house is drawn after a lock. A world-frame change clears the coverage.
+- **Layer B consumer** (API §6b.7, `Sources/Live/LayerBClient.swift`, core `LayerB.swift`): the downlink subscribes to
+  `surface`; block-mesh deltas apply in arrival order (since = held → at once; gap → GET the tile in full; since null →
+  replace; epoch change → start over; resume sends `since.tiles` `surface:<key>`). Each tile's surface blocks draw as
+  one mesh (photo colour or wire) in AR and Map 3D; base faces inside every `surface` / `empty` cube are hidden in AR and
+  Map 3D and come back on `removed`; the old live `mesh` tile of the same key is not drawn while Layer B covers it.
+- **Layer A on the Map / AR** (Layers ▸ Robot obstacles, off by default; `Sources/Live/NavLayerClient.swift`, core
+  `NavLayer.swift`): `GET /v1/live/nav?since=` every 1.5 s while looked at; each 4 m tile's robot body band (floor +
+  0.10 … 1.00 m) → red blocked / faint green seen free, on the Map, flat on the floor in AR, cloned in Map 3D.
+- **M0 latency line** (core `LiveStages.swift`): ack `stages` / `gate` (API §6b.8/§6b.9) plus this phone's own receive and
+  draw of tiles carrying its keyframes → a line under LIVE ("capture→drawn 2.2 s · server 1.9 s · gate trusted"); tap
+  for every stage. Logs device_surface*, layerb_*, nav_layer_*, live_stages.
