@@ -86,13 +86,11 @@ final class LiveStreamer {
             guard let self, self.model.liveMapID == self.model.mapLocalizer.mapID else { return }
             self.model.controller.mapLayer.liveCorrection(T_map_arkit: T, stream: stream, placed: placed)
         }
-        }
         uplink.onAck = { [weak self] o in                               // 12.18 M0 latency line
             guard let self else { return }
             if self.model.liveStages.ack(o) {
                 self.model.liveStagesChanged()
-                if let st = o["stages"] as? [String: Any], let seq = (st["seq"] as? NSNumber)?.intValue, seq != self.lastStagesLogged,
-                   seq % 10 == 0 {
+                if let st = o["stages"] as? [String: Any], let seq = (st["seq"] as? NSNumber)?.intValue, seq >= self.lastStagesLogged + 10 || seq < self.lastStagesLogged {
                     self.lastStagesLogged = seq
                     var ev: [String: LogValue] = ["seq": .int(seq), "gate": .string(self.model.liveStages.gate ?? "")]
                     for (k, v) in self.model.liveStages.ms { ev["ms_" + k] = .double(v.rounded()) }
