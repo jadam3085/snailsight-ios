@@ -1,7 +1,7 @@
 // SnailSight 11.3 "Room scan" (structure layer S4, API §8.11b). Apple RoomPlan runs on the app's OWN ARSession
 // (`RoomCaptureSession(arSession:)`, iOS 17+), so every wall / door / window / opening / floor / furniture box it reports
 // is in the ARKit world frame the localizer already maps with T_map_arkit. Flow:
-//   More ▸ Mapping ▸ "Room scan" (needs the map lock) → RoomPlan captures while the user walks the room (HUD line counts
+//   Sheet ▸ Mapping ▸ "Clean walls (Room scan)" (12.19: no longer a quick action; needs the map lock) → RoomPlan captures while the user walks the room (HUD line counts
 //   walls / doors / windows) → "Room scan" again (or leaving the app) stops it → RoomBuilder → CapturedRoom →
 //   the normalized room (SnailSightCore/RoomScan.swift) + Apple's CapturedRoom JSON + the USDZ export when ≤ 8 MB +
 //   the CURRENT T_map_arkit → spooled to Documents/roomplan/<id>.json BEFORE sending → POST /v1/maps/site/roomplan.
@@ -21,6 +21,7 @@ final class RoomScanner: NSObject, RoomCaptureSessionDelegate {
     private var lastHUD = 0.0
     private var sending = false
     private var savedDelegate: ARSessionDelegate?
+    private var meshBefore = 0
     private(set) var active = false
 
     init(model: AppModel) {
@@ -63,9 +64,11 @@ final class RoomScanner: NSObject, RoomCaptureSessionDelegate {
         model.log.event("roomscan_delegate", ["taken": .bool((ar.delegate as AnyObject?) !== (savedDelegate as AnyObject?))])
         model.roomScanOn = true
         model.roomScanText = RoomScanText.scanning(nil)
+        meshBefore = model.controller.meshAnchorCount
         model.log.event("roomscan_start", ["locked": .bool(model.mapLocalizer.isLocked),
-                                           "err_cm": .double(model.mapLocalizer.errorEstimate ?? -1)])
-        model.flash("Room scan: walk slowly around the room, point at every wall, then tap Room scan again", seconds: 4)
+                                           "err_cm": .double(model.mapLocalizer.errorEstimate ?? -1),
+                                           "live": .bool(model.liveOn), "mesh_anchors": .int(meshBefore)])
+        model.flash("Clean walls: walk slowly around the room, point at every wall, then tap the Room scan line at the top to stop", seconds: 4)
     }
 
     func stop(reason: String) {
@@ -99,6 +102,15 @@ final class RoomScanner: NSObject, RoomCaptureSessionDelegate {
             guard let self else { return }
             if (ar.delegate as AnyObject?) !== (self.savedDelegate as AnyObject?) { ar.delegate = self.savedDelegate }
             self.model.controller.rerunConfiguration()                 // back to the app's own configuration (no reset)
+            // 12.19 evidence for "can RoomPlan run inside Live map?": RoomPlan re-runs the shared session with its own
+            // configuration; 12.18 logs showed the LiDAR mesh drop 88 → 11 anchors after a 1.3 s scan.
+            let before = self.meshBefore
+            DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
+                guard let self else { return }
+                self.model.log.event("roomscan_mesh_after", ["before": .int(before),
+                                                             "after_5s": .int(self.model.controller.meshAnchorCount),
+                                                             "live": .bool(self.model.liveOn)])
+            }
         }
         if let error {
             DispatchQueue.main.async { [weak self] in self?.finished(nil, error: "\(error.localizedDescription)") }

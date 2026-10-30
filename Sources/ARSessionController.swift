@@ -19,6 +19,8 @@ final class ARSessionController: NSObject, ARSessionDelegate {
     unowned let model: AppModel
     private let renderer: SceneRenderer
     private let meshOverlay = MeshOverlay()
+    /// 12.19: LiDAR mesh anchors drawn now (Room scan logs it before / after: RoomPlan re-runs the shared ARSession).
+    var meshAnchorCount: Int { meshOverlay.count }
     private var fpsMeter = FPSMeter(window: 1.0)
     private var lastHUD: TimeInterval = 0
     private var lastFPSLog: TimeInterval = 0

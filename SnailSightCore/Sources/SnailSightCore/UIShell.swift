@@ -43,25 +43,25 @@ public enum SheetDetent: Int, CaseIterable, Equatable {
     }
 }
 
-/// The collapsed sheet's four quick actions (concept C1).
+/// The collapsed sheet's four quick actions (concept C1; 12.19: Room scan left the row for Settings, see SheetCategory).
 public enum QuickAction: String, CaseIterable, Equatable {
-    case spawn, roomScan, liveMap, record
+    case spawn, liveMap, record, settings
 
     public var title: String {
         switch self {
         case .spawn: return "Spawn"
-        case .roomScan: return "Room scan"
         case .liveMap: return "Live map"
         case .record: return "Record"
+        case .settings: return "Settings"
         }
     }
 
     public var symbol: String {
         switch self {
         case .spawn: return "plus.circle"
-        case .roomScan: return "square.split.bottomrightquarter"
         case .liveMap: return "dot.radiowaves.left.and.right"
         case .record: return "record.circle"
+        case .settings: return "slider.horizontal.3"
         }
     }
 
@@ -69,11 +69,125 @@ public enum QuickAction: String, CaseIterable, Equatable {
     public func accessibility(on: Bool) -> String {
         switch self {
         case .spawn: return on ? "End spawn mode" : "Spawn an animal or object"
-        case .roomScan: return on ? "Stop room scan" : "Start a room scan"
         case .liveMap: return on ? "Stop the live map" : "Start the live map: your walk builds the shared mesh"
         case .record: return on ? "Stop recording" : "Record the room"
+        case .settings: return on ? "Close settings" : "Open the settings by category"
         }
     }
+}
+
+// MARK: sheet categories (12.19)
+
+/// 12.19 (owner 2026-10-30: "the settings is a long scroll down from Near you"): the half / full sheet shows ONE category
+/// at a time, picked from a sticky chip row under the quick actions. Every former section lives in exactly one category
+/// (`SheetSection`), so nothing is lost; search always shows Near.
+public enum SheetCategory: String, CaseIterable, Equatable, Identifiable {
+    case near, view, mapping, sim, device
+
+    public var id: String { rawValue }
+
+    /// Chip label (short: the five fit one row at 343 pt, the narrowest portrait sheet).
+    public var title: String {
+        switch self {
+        case .near: return "Near"
+        case .view: return "View"
+        case .mapping: return "Mapping"
+        case .sim: return "Sim"
+        case .device: return "Device"
+        }
+    }
+
+    public var symbol: String {
+        switch self {
+        case .near: return "location.circle"
+        case .view: return "eye"
+        case .mapping: return "dot.radiowaves.left.and.right"
+        case .sim: return "pawprint"
+        case .device: return "iphone"
+        }
+    }
+
+    /// One-line subtitle under the chips.
+    public var subtitle: String {
+        switch self {
+        case .near: return "Bodies, robots, cameras and rooms near you"
+        case .view: return "What is drawn: layers, house overlay, mesh, tap tool"
+        case .mapping: return "Live map, mesh, clean walls, cameras, places, capture"
+        case .sim: return "Animals, robots, drones and their tools"
+        case .device: return "Cubes, AR reset, logs, app settings"
+        }
+    }
+
+    /// The sections shown for this category, top to bottom.
+    public var sections: [SheetSection] {
+        switch self {
+        case .near: return [.near, .places]
+        case .view: return [.tapTool, .view, .house]
+        case .mapping: return [.liveMap, .mesh, .roomScan, .cameras, .place, .capture]
+        case .sim: return [.sim, .robotTools]
+        case .device: return [.session]
+        }
+    }
+
+    public var isSettings: Bool { self != .near }
+
+    /// Chip width estimate (pt): text only at footnote-semibold (≤ 7 pt / char) + 2 × 12 padding.
+    public var chipWidth: Double { Double(title.count) * 7 + 24 }
+
+    /// Total chip-row width with `spacing` between chips.
+    public static func rowWidth(spacing: Double = 6) -> Double {
+        allCases.map(\.chipWidth).reduce(0, +) + spacing * Double(allCases.count - 1)
+    }
+
+    /// Persisted value → category (unknown / missing → Near).
+    public static func restore(_ raw: String?) -> SheetCategory { raw.flatMap(SheetCategory.init(rawValue:)) ?? .near }
+
+    /// Which category the Settings quick action opens: the current one if it is a settings category, else the last
+    /// settings category used, else View.
+    public static func settingsTarget(current: SheetCategory, last: SheetCategory?) -> SheetCategory {
+        if current.isSettings { return current }
+        if let last, last.isSettings { return last }
+        return .view
+    }
+}
+
+/// Every group of the half / full sheet (12.0 full-detent sections, regrouped in 12.19).
+public enum SheetSection: String, CaseIterable, Equatable {
+    case near, places
+    case tapTool, view, house
+    case liveMap, mesh, roomScan, cameras, place, capture
+    case sim, robotTools
+    case session
+
+    public var title: String {
+        switch self {
+        case .near: return "Near you"
+        case .places: return "Places"
+        case .tapTool: return "Tap tool"
+        case .view: return "View"
+        case .house: return "House overlay (AR 1:1)"
+        case .liveMap: return "Live map"
+        case .mesh: return "Mesh"
+        case .roomScan: return "Clean walls"
+        case .cameras: return "Cameras"
+        case .place: return "Place"
+        case .capture: return "Capture"
+        case .sim: return "Sim"
+        case .robotTools: return "Robot tools"
+        case .session: return "Session"
+        }
+    }
+
+    public var category: SheetCategory { SheetCategory.allCases.first { $0.sections.contains(self) } ?? .near }
+}
+
+/// 12.19: what Room scan is for, in the app (Mapping ▸ Clean walls). Live map streams raw LiDAR surface (adds and
+/// removes geometry); RoomPlan gives parametric walls / doors / windows / furniture boxes for the structure layer.
+public enum RoomScanRole {
+    public static let title = "Clean walls (Room scan)"
+    public static let subtitle = "Optional. Apple RoomPlan measures this room's straight walls, doors and windows for the "
+        + "floor plan. Live map already keeps the surface current."
+    public static let caution = "Uses the AR camera on its own while it runs; the phone's mesh rebuilds after."
 }
 
 // MARK: near you

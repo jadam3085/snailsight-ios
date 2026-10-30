@@ -15,9 +15,46 @@ final class UIShellTests: XCTestCase {
     }
 
     func testQuickActionsAreTheFourFromC1WithLabels() {
-        XCTAssertEqual(QuickAction.allCases.map(\.title), ["Spawn", "Room scan", "Live map", "Record"])
+        // 12.19: Room scan left the primary row (it is Mapping ▸ Clean walls); Settings took the slot
+        XCTAssertEqual(QuickAction.allCases.map(\.title), ["Spawn", "Live map", "Record", "Settings"])
         XCTAssertEqual(QuickAction.record.accessibility(on: true), "Stop recording")
         XCTAssertTrue(QuickAction.liveMap.accessibility(on: false).contains("shared mesh"))
+        XCTAssertFalse(QuickAction.allCases.map(\.rawValue).contains("roomScan"))
+    }
+
+    func testSheetCategoriesPartitionEverySectionOnce() {
+        var seen: [SheetSection: SheetCategory] = [:]
+        for c in SheetCategory.allCases {
+            XCTAssertFalse(c.sections.isEmpty, c.rawValue)
+            XCTAssertFalse(c.subtitle.isEmpty)
+            for s in c.sections {
+                XCTAssertNil(seen[s], "\(s) is in \(seen[s]?.rawValue ?? "") and \(c.rawValue)")
+                seen[s] = c
+                XCTAssertEqual(s.category, c)
+            }
+        }
+        XCTAssertEqual(Set(seen.keys), Set(SheetSection.allCases), "every section reachable from one chip")
+        XCTAssertEqual(SheetSection.roomScan.category, .mapping)
+        XCTAssertEqual(SheetSection.liveMap.category, .mapping)
+        XCTAssertEqual(SheetCategory.allCases.first, .near)
+        XCTAssertFalse(SheetCategory.near.isSettings)
+    }
+
+    func testSheetChipsFitTheNarrowestPortraitSheet() {
+        // narrowest supported portrait phone 375 pt − 2 × 16 pt sheet padding = 343 pt (portrait-only app)
+        XCTAssertLessThanOrEqual(SheetCategory.rowWidth(), 343)
+        for c in SheetCategory.allCases { XCTAssertGreaterThanOrEqual(c.chipWidth, 44, "tap target") }
+    }
+
+    func testSheetCategoryRestoreAndSettingsTarget() {
+        XCTAssertEqual(SheetCategory.restore(nil), .near)
+        XCTAssertEqual(SheetCategory.restore("bogus"), .near)
+        XCTAssertEqual(SheetCategory.restore("sim"), .sim)
+        XCTAssertEqual(SheetCategory.settingsTarget(current: .near, last: nil), .view)
+        XCTAssertEqual(SheetCategory.settingsTarget(current: .near, last: .device), .device)
+        XCTAssertEqual(SheetCategory.settingsTarget(current: .near, last: .near), .view)
+        XCTAssertEqual(SheetCategory.settingsTarget(current: .mapping, last: .device), .mapping)
+        XCTAssertTrue(RoomScanRole.subtitle.contains("Live map"))
     }
 
     func testNearListSortsByDistanceAndFilters() {

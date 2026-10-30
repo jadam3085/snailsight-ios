@@ -175,6 +175,20 @@ final class AppModel: ObservableObject {
     // 12.0 UI shell (concepts C + A2 + B2 + O1/O2): one pull-up sheet, the Map, the layers button
     @Published var sheetDetent: SheetDetent = .collapsed
     @Published var sheetQuery = ""
+    /// 12.19 the sheet's chip row: ONE category shown at a time (Near / View / Mapping / Sim / Device), remembered.
+    @Published var sheetCategory: SheetCategory = SheetCategory.restore(UserDefaults.standard.string(forKey: "sheet.category")) {
+        didSet {
+            UserDefaults.standard.set(sheetCategory.rawValue, forKey: "sheet.category")
+            if sheetCategory.isSettings { lastSettingsCategory = sheetCategory }
+        }
+    }
+    var lastSettingsCategory: SheetCategory?
+    /// 12.19 the Settings quick action / "All tools and settings": open the sheet on a settings category.
+    func openSettings(from: String, category: SheetCategory? = nil) {
+        sheetCategory = category ?? SheetCategory.settingsTarget(current: sheetCategory, last: lastSettingsCategory)
+        sheetDetent = .full
+        log.event("sheet_category", ["category": .string(sheetCategory.rawValue), "from": .string(from)])
+    }
     @Published var showMap = false
     /// 12.3 Map ▸ 3D: the full-screen non-AR 3D viewer of the whole colour map (over the Map). The AR session is paused
     /// while it is up (one renderer at a time; resume = the Scans path: no reset, normal relocalization).

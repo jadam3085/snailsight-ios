@@ -3,7 +3,7 @@ import SnailSightCore
 
 // 12.0 HUD (owner-approved concepts, 2026-10-18): a clean AR view —
 //  - top: the localization pill (+ the compact status pill and its card), a right rail with Map · Layers · tap tool
-//  - bottom: ONE pull-up sheet (MainSheet: search + Spawn / Room scan / Live map / Record; near you; every tool)
+//  - bottom: ONE pull-up sheet (MainSheet: search + Spawn / Live map / Record / Settings; 12.19 category chips)
 //  - contextual: recording / upload / measure / live capsules, the selection's details card, drone / rover ops (O2);
 //    the command ring around a selected body is drawn by CommandRingOverlay (ContentView)
 // Every 11.3 function is still reachable: the old bottom toolbar + More menu moved into the sheet's full detent.
@@ -18,7 +18,11 @@ struct HUDView: View {
                 VStack(spacing: 4) {                                    // 10.2: "am I localized?" at the top edge
                     LocalizationPill()
                     if let m = model.meshMapText { MappingLine(text: m, live: model.meshMapLive) }
-                    if let r = model.roomScanText { MappingLine(text: r, live: model.roomScanOn) }
+                    if let r = model.roomScanText {                      // 12.19: tap the line to stop (no quick action now)
+                        MappingLine(text: model.roomScanOn ? r + " · tap to stop" : r, live: model.roomScanOn)
+                            .onTapGesture { if model.roomScanOn { model.roomScanner.stop(reason: "hud") } }
+                            .accessibilityAddTraits(model.roomScanOn ? .isButton : [])
+                    }
                     if model.locExpanded { LocCard().transition(.move(edge: .top).combined(with: .opacity)) }
                 }
                 .frame(maxWidth: .infinity)

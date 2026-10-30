@@ -485,3 +485,18 @@ replace it. Now, what ARKit / Quest / HoloLens do:
 - **M0 latency line** (core `LiveStages.swift`): ack `stages` / `gate` (API §6b.8/§6b.9) plus this phone's own receive and
   draw of tiles carrying its keyframes → a line under LIVE ("capture→drawn 2.2 s · server 1.9 s · gate trusted"); tap
   for every stage. Logs device_surface*, layerb_*, nav_layer_*, live_stages.
+
+**12.19 (sheet categories + Room scan's role, owner feedback on 12.18.302)**: "what's the point of Room scan (is this
+already done under live map?)" and "settings is a long scroll down from Near you".
+- **Category chips** (core `SheetCategory` / `SheetSection` in `UIShell.swift`, `Sources/UI/MainSheet.swift`): a sticky
+  row under the quick actions at half / full height: **Near · View · Mapping · Sim · Device**, one category shown at a
+  time with a one-line subtitle, remembered across launches. Every former full-sheet section lives in exactly one
+  category (partition test); typing in search shows Near. The five chips fit one row at 343 pt (the narrowest portrait
+  sheet; the app is portrait-only) and the row scrolls if Dynamic Type grows. Log `sheet_chips` {row_pt, avail_pt, fit}
+  once per launch, `sheet_category` {category, from}.
+- **Room scan left the quick-action row** (now Spawn · Live map · Record · **Settings**, which opens the last settings
+  category). It is Mapping ▸ **Clean walls (Room scan)** with a subtitle: Apple RoomPlan measures one room's straight
+  walls, doors, windows and furniture boxes for the structure layer; Live map already keeps the surface current. It
+  cannot run silently inside Live map: `RoomCaptureSession(arSession:)` shares our ARSession but re-runs it with its own
+  configuration (12.18 log: the LiDAR mesh fell from 88 to 11 anchors after a 1.3 s scan), so it stays an explicit,
+  optional step. Tap the HUD "Room scan" line to stop. Logs `roomscan_start` + live/mesh_anchors, `roomscan_mesh_after`.

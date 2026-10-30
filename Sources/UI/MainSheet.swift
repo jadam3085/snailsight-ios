@@ -1,8 +1,9 @@
 // SnailSight 12.0 (owner-approved concept C, 2026-10-18): ONE pull-up sheet over a clean AR view.
-//  - collapsed: search + the four quick actions (Spawn · Room scan · Live map · Record)
-//  - half: "Near you" (bodies, the robot / drones, cameras, other agents; nearest first, ONE primary action each) and
-//    Places (the house map's rooms → the Map, + saved AR places)
-//  - full: everything else, grouped — every tool that used to be in the 9.8–11.3 More menu (nothing removed, only moved)
+//  - collapsed: search + the four quick actions (Spawn · Live map · Record · Settings; 12.19: Room scan moved to
+//    Mapping ▸ Clean walls, it is an optional RoomPlan step, not an everyday mode)
+//  - half / full: a sticky chip row (12.19, owner 2026-10-30) picks ONE category: Near (bodies, robot / drones, cameras,
+//    agents, nearest first + Places) · View · Mapping · Sim · Device. Every tool of the 9.8–11.3 More menu lives in exactly
+//    one category (SnailSightCore.SheetCategory / SheetSection, partition tested); typing in search shows Near.
 // Drag the grabber / header between the detents (SnailSightCore.SheetDetent); typing in search opens it to half.
 import SwiftUI
 import SnailSightCore
@@ -65,6 +66,7 @@ struct MainSheet: View {
             .frame(height: 44)
             .background(Color.primary.opacity(0.07), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
             QuickActionsRow()
+            if model.sheetDetent != .collapsed || drag < -20 { CategoryChips() }
         }
         .padding(.horizontal, 16)
         .padding(.bottom, 8)
@@ -150,17 +152,16 @@ private struct QuickActionsRow: View {
     private func on(_ a: QuickAction) -> Bool {
         switch a {
         case .spawn: return model.spawnMode
-        case .roomScan: return model.roomScanOn
         case .liveMap: return model.liveOn
         case .record: return model.recording
+        case .settings: return model.sheetDetent != .collapsed && model.sheetCategory.isSettings && model.sheetQuery.isEmpty
         }
     }
 
     private func disabled(_ a: QuickAction) -> Bool {
         switch a {
         case .spawn: return model.recording
-        case .roomScan: return !RoomScanner.supported || model.recording
-        case .liveMap, .record: return false
+        case .liveMap, .record, .settings: return false
         }
     }
 
@@ -173,7 +174,8 @@ private struct QuickActionsRow: View {
                 model.startSpawnMode()
                 model.sheetDetent = .collapsed
             }
-        case .roomScan: model.roomScanner.toggle()
+        case .settings:
+            if on(a) { model.sheetDetent = .collapsed } else { model.sheetQuery = ""; model.openSettings(from: "quick") }
         case .liveMap:
             model.liveOn.toggle()
             if model.liveOn {                       // the point of Live map: watch the shared mesh grow from your walk
@@ -187,30 +189,96 @@ private struct QuickActionsRow: View {
 
 // MARK: half + full content
 
+/// 12.19 the sticky category chips (under the quick actions, never scrolled away) + the category's one-line subtitle.
+private struct CategoryChips: View {
+    @EnvironmentObject var model: AppModel
+    @State private var loggedFit = false
+
+    var body: some View {
+        let shown: SheetCategory = model.sheetQuery.isEmpty ? model.sheetCategory : .near
+        VStack(alignment: .leading, spacing: 4) {
+            GeometryReader { geo in
+                ScrollView(.horizontal, showsIndicators: false) {      // fits at 343 pt (tested); scrolls if Dynamic Type grows
+                    HStack(spacing: 6) {
+                        ForEach(SheetCategory.allCases) { c in
+                            Button { pick(c) } label: {
+                                Text(c.title).font(.footnote.weight(.semibold)).lineLimit(1)
+                                    .padding(.horizontal, 12).frame(minHeight: 34)
+                                    .foregroundStyle(shown == c ? Color.white : Color.primary)
+                                    .background(shown == c ? Color.accentColor : Color.primary.opacity(0.07), in: Capsule())
+                                    .contentShape(Rectangle().inset(by: -5))
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel("\(c.title): \(c.subtitle)")
+                            .accessibilityAddTraits(shown == c ? .isSelected : [])
+                        }
+                    }
+                    .background(GeometryReader { row in
+                        Color.clear.onAppear { logFit(row: Double(row.size.width), avail: Double(geo.size.width)) }
+                    })
+                }
+            }
+            .frame(height: 44)
+            Text(shown.subtitle).font(.caption).foregroundStyle(.secondary).lineLimit(1).minimumScaleFactor(0.85)
+                .padding(.leading, 4)
+        }
+    }
+
+    private func pick(_ c: SheetCategory) {
+        model.sheetQuery = ""
+        model.sheetCategory = c
+        if model.sheetDetent == .collapsed { model.sheetDetent = .half }
+        model.log.event("sheet_category", ["category": .string(c.rawValue), "from": .string("chip")])
+    }
+
+    /// once per launch: did the five chips fit the sheet width on this phone (portrait-only app)?
+    private func logFit(row: Double, avail: Double) {
+        guard !loggedFit, avail > 0 else { return }
+        loggedFit = true
+        model.log.event("sheet_chips", ["row_pt": .double(row.rounded()), "avail_pt": .double(avail.rounded()),
+                                        "fit": .bool(row <= avail + 0.5)])
+    }
+}
+
 private struct SheetContent: View {
     @EnvironmentObject var model: AppModel
     var searching: FocusState<Bool>.Binding
 
     var body: some View {
+        let category: SheetCategory = model.sheetQuery.isEmpty ? model.sheetCategory : .near
         TimelineView(.periodic(from: .now, by: 1)) { _ in
-            List {
-                nearSection
-                placesSection
-                if model.sheetDetent == .full && model.sheetQuery.isEmpty { FullSections() }
-                else if model.sheetQuery.isEmpty {
-                    Section {
-                        Button { model.sheetDetent = .full } label: {
-                            Label("All tools and settings", systemImage: "square.grid.2x2")
-                        }
-                        .frame(minHeight: 44)
+            ScrollViewReader { proxy in
+                List {
+                    ForEach(category.sections, id: \.self) { sec in section(sec) }
+                    if category == .near && model.sheetQuery.isEmpty {
+                        Section {
+                            Button { model.openSettings(from: "all_button") } label: {
+                                Label("Tools and settings", systemImage: "slider.horizontal.3")
+                            }
+                            .frame(minHeight: 44)
+                        } footer: { Text("Or tap View · Mapping · Sim · Device above") }
                     }
                 }
+                .listStyle(.insetGrouped)
+                .scrollContentBackground(.hidden)
+                .scrollDismissesKeyboard(.immediately)
+                .onAppear { model.planData.ensureCameras() }
+                .onChange(of: category) { _, c in
+                    if let first = c.sections.first { proxy.scrollTo(first, anchor: .top) }   // a new chip starts at its top
+                }
             }
-            .listStyle(.insetGrouped)
-            .scrollContentBackground(.hidden)
-            .scrollDismissesKeyboard(.immediately)
-            .onAppear { model.planData.ensureCameras() }
         }
+    }
+
+    @ViewBuilder private func section(_ sec: SheetSection) -> some View {
+        Group {
+            switch sec {
+            case .near: nearSection
+            case .places: placesSection
+            default: CategorySection(section: sec)
+            }
+        }
+        .id(sec)
     }
 
     private var items: [NearItem] {
@@ -219,7 +287,7 @@ private struct SheetContent: View {
 
     @ViewBuilder private var nearSection: some View {
         let list = Array(items.prefix(model.sheetDetent == .full ? 20 : 8))
-        Section("Near you") {
+        Section(SheetSection.near.title) {
             if list.isEmpty {
                 Text(model.sheetQuery.isEmpty ? "Nothing near yet: turn Sim on and Spawn, or wait for the house map to find you"
                                               : "No match for \"\(model.sheetQuery)\"")
@@ -234,7 +302,7 @@ private struct SheetContent: View {
             model.sheetQuery.isEmpty
                 || !NearList.filter([NearItem(id: r.id, kind: .room, title: r.title)], query: model.sheetQuery).isEmpty
         }
-        Section("Places") {
+        Section(SheetSection.places.title) {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 8) {
                     ForEach(rooms) { r in
@@ -307,124 +375,150 @@ private struct NearRow: View {
     }
 }
 
-// MARK: full detent: every former More-menu tool, grouped
+// MARK: the settings categories: every former More-menu tool, in exactly one section (SheetSection)
 
-private struct FullSections: View {
+private struct CategorySection: View {
     @EnvironmentObject var model: AppModel
+    let section: SheetSection
 
     var body: some View {
-        Section("Tap tool") {
-            Picker("Tap tool", selection: $model.tool) {
-                ForEach(ToolMode.allCases) { t in Label(t.rawValue, systemImage: ToolIcons.icon(t)).tag(t) }
-            }
-            .pickerStyle(.menu)
-            .onChange(of: model.tool) { _, t in model.flash(t.help) }
-        }
-        Section("View") {
-            Button { model.showLayers = true } label: { Label("Layers…", systemImage: "square.3.layers.3d") }
-            Button { model.openMap() } label: { Label("Map", systemImage: "map") }
-            Picker(selection: $model.meshStyle) {
-                ForEach(MeshStyle.allCases) { Text($0.rawValue).tag($0) }
-            } label: { Label("LiDAR mesh style", systemImage: "square.grid.3x3") }
-            Toggle(isOn: $model.occlusion) { Label("Occlusion", systemImage: "square.2.layers.3d") }
-            Toggle(isOn: $model.peopleOcclusion) { Label("People occlusion", systemImage: "person.fill") }
-        }
-        Section("Sim") {
-            Toggle(isOn: $model.simOn) { Label("Sim", systemImage: "pawprint") }
-                .disabled(model.recording && !model.simAllowWhileRecording)
-            if model.simOn {
-                Button { model.startSpawnMode(); model.sheetDetent = .collapsed } label: { Label("Spawn…", systemImage: "plus.circle") }
-                Toggle(isOn: Binding(get: { model.controller.sim.ui.scaleRef }, set: { model.controller.sim.ui.scaleRef = $0 })) {
-                    Label("1 m reference", systemImage: "ruler")
+        switch section {
+        case .near, .places: EmptyView()                                // drawn by SheetContent
+        case .tapTool:
+            Section(section.title) {
+                Picker("Tap tool", selection: $model.tool) {
+                    ForEach(ToolMode.allCases) { t in Label(t.rawValue, systemImage: ToolIcons.icon(t)).tag(t) }
                 }
-                Toggle(isOn: $model.simXRay) { Label("X-ray (see bodies through walls)", systemImage: "eye.circle") }
-                Button(role: .destructive) { model.controller.sim.clear() } label: { Label("Clear sim", systemImage: "xmark.circle") }
+                .pickerStyle(.menu)
+                .onChange(of: model.tool) { _, t in model.flash(t.help) }
             }
-            if model.serverFeatures.serverSim(forced: model.forceServerSim) {
-                Toggle(isOn: $model.sharedSim) { Label("Shared sim (server)", systemImage: "server.rack") }
-                if model.simOn && model.serverSim.isActive {
-                    Button { model.serverSim.spawn("sim-rover", arView: model.controller.arView); model.sheetDetent = .collapsed } label: {
-                        Label("Spawn sim rover at +", systemImage: "car.side")
+        case .view:
+            Section(section.title) {
+                Button { model.showLayers = true } label: { Label("Layers…", systemImage: "square.3.layers.3d") }
+                Button { model.openMap() } label: { Label("Map", systemImage: "map") }
+                Picker(selection: $model.meshStyle) {
+                    ForEach(MeshStyle.allCases) { Text($0.rawValue).tag($0) }
+                } label: { Label("LiDAR mesh style", systemImage: "square.grid.3x3") }
+                Toggle(isOn: $model.occlusion) { Label("Occlusion", systemImage: "square.2.layers.3d") }
+                Toggle(isOn: $model.peopleOcclusion) { Label("People occlusion", systemImage: "person.fill") }
+            }
+        case .house:
+            Section(section.title) {
+                Picker(selection: $model.houseStyle) {
+                    ForEach(HouseStyle.allCases) { Text($0.rawValue).tag($0) }
+                } label: { Label("House overlay", systemImage: "house") }
+                Toggle(isOn: $model.rawScan) { Label("Raw scan (instead of structure)", systemImage: "cube.transparent") }
+                Toggle(isOn: $model.cleanLook) { Label("Clean look (lit, visual only)", systemImage: "sparkles") }
+                Toggle(isOn: $model.arObjects) { Label("Objects", systemImage: "shippingbox") }
+                Toggle(isOn: $model.arDoors) { Label("Doors", systemImage: "door.left.hand.open") }
+                Toggle(isOn: $model.arTerrain) { Label("Robot terrain", systemImage: "square.grid.3x3.topleft.filled") }
+                Toggle(isOn: $model.arAgents) { Label("Other agents", systemImage: "person.2.wave.2") }
+            }
+        case .liveMap:
+            Section {
+                Toggle(isOn: $model.liveOn) { Label("Live map", systemImage: "dot.radiowaves.left.and.right") }
+                Picker(selection: $model.liveRateHz) {
+                    ForEach(LiveGate.allowedRates, id: \.self) { Text(LiveText.rate($0)).tag($0) }
+                } label: { Label("Live rate", systemImage: "metronome") }
+                Text(model.meshStore.summary(me: model.agentID)).font(.footnote).foregroundStyle(.secondary)
+            } header: { Text(section.title) } footer: { Text("Your walk keeps the shared map current: surfaces are added and removed as you see them.") }
+        case .mesh:
+            Section(section.title) {
+                Toggle(isOn: $model.meshLive) { Label("Mesh (live) — see the mesh as it is built", systemImage: "cube.transparent") }
+                Toggle(isOn: $model.meshMapOn) { Label("Map mesh (upload, no video)", systemImage: "cube.transparent") }
+                Toggle(isOn: $model.meshMapAuto) { Label("Auto when localized", systemImage: "location.viewfinder") }
+            }
+        case .roomScan:
+            Section {
+                Button { model.roomScanner.toggle() } label: {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Label(model.roomScanOn ? "Stop clean walls" : RoomScanRole.title, systemImage: "square.split.bottomrightquarter")
+                        Text(RoomScanRole.subtitle).font(.caption).foregroundStyle(.secondary)
                     }
-                    Button { model.serverSim.spawn("sim-drone", arView: model.controller.arView); model.sheetDetent = .collapsed } label: {
-                        Label("Spawn sim drone at +", systemImage: "airplane")
+                    .frame(minHeight: 44)
+                }
+                .disabled(!RoomScanner.supported || model.recording)
+                .accessibilityHint(RoomScanRole.subtitle)
+            } header: { Text(section.title) } footer: { Text(RoomScanRole.caution) }
+        case .cameras:
+            Section(section.title) { CameraMarkRows() }
+        case .place:
+            Section(section.title) {
+                Button { model.placeCtl.saveNow() } label: { Label("Save place", systemImage: "square.and.arrow.down") }
+                    .disabled(model.place.relocalizing)
+                Button { model.showPlaces = true } label: { Label("Places…", systemImage: "map") }
+            }
+        case .capture:
+            Section(section.title) {
+                Button { model.toggleRecording() } label: {
+                    Label(model.recording ? "Stop recording" : "Record room", systemImage: "record.circle")
+                }
+                if !model.recording {
+                    Button { model.objectScan.showChooser = true } label: { Label("Object scan (high-res)", systemImage: "cube.transparent") }
+                }
+                Button { model.openScans() } label: { Label("Scans", systemImage: "square.stack.3d.up") }
+                    .disabled(model.recording)
+            }
+        case .sim:
+            Section(section.title) {
+                Toggle(isOn: $model.simOn) { Label("Sim", systemImage: "pawprint") }
+                    .disabled(model.recording && !model.simAllowWhileRecording)
+                if model.simOn {
+                    Button { model.startSpawnMode(); model.sheetDetent = .collapsed } label: { Label("Spawn…", systemImage: "plus.circle") }
+                    Toggle(isOn: Binding(get: { model.controller.sim.ui.scaleRef }, set: { model.controller.sim.ui.scaleRef = $0 })) {
+                        Label("1 m reference", systemImage: "ruler")
                     }
-                    Button { model.serverSim.startDroneAssist(); model.sheetDetent = .collapsed } label: {
-                        Label("Drone-assist demo (selected rover)", systemImage: "airplane.departure")
+                    Toggle(isOn: $model.simXRay) { Label("X-ray (see bodies through walls)", systemImage: "eye.circle") }
+                    Button(role: .destructive) { model.controller.sim.clear() } label: { Label("Clear sim", systemImage: "xmark.circle") }
+                }
+                if model.serverFeatures.serverSim(forced: model.forceServerSim) {
+                    Toggle(isOn: $model.sharedSim) { Label("Shared sim (server)", systemImage: "server.rack") }
+                    if model.simOn && model.serverSim.isActive {
+                        Button { model.serverSim.spawn("sim-rover", arView: model.controller.arView); model.sheetDetent = .collapsed } label: {
+                            Label("Spawn sim rover at +", systemImage: "car.side")
+                        }
+                        Button { model.serverSim.spawn("sim-drone", arView: model.controller.arView); model.sheetDetent = .collapsed } label: {
+                            Label("Spawn sim drone at +", systemImage: "airplane")
+                        }
+                        Button { model.serverSim.startDroneAssist(); model.sheetDetent = .collapsed } label: {
+                            Label("Drone-assist demo (selected rover)", systemImage: "airplane.departure")
+                        }
                     }
                 }
+                Picker(selection: $model.simScale) {
+                    ForEach([0.25, 0.35, 0.5, 0.75, 1.0], id: \.self) { Text(SimScale.label($0)).tag($0) }
+                } label: { Label("Sim scale", systemImage: "arrow.down.right.and.arrow.up.left") }
+                Picker(selection: $model.simPerf) {
+                    ForEach(SimPerfMode.allCases) { Text($0.title).tag($0) }
+                } label: { Label("Sim quality", systemImage: "leaf") }
             }
-            Picker(selection: $model.simScale) {
-                ForEach([0.25, 0.35, 0.5, 0.75, 1.0], id: \.self) { Text(SimScale.label($0)).tag($0) }
-            } label: { Label("Sim scale", systemImage: "arrow.down.right.and.arrow.up.left") }
-            Picker(selection: $model.simPerf) {
-                ForEach(SimPerfMode.allCases) { Text($0.title).tag($0) }
-            } label: { Label("Sim quality", systemImage: "leaf") }
-        }
-        Section("House (AR 1:1)") {
-            Picker(selection: $model.houseStyle) {
-                ForEach(HouseStyle.allCases) { Text($0.rawValue).tag($0) }
-            } label: { Label("House overlay", systemImage: "house") }
-            Toggle(isOn: $model.rawScan) { Label("Raw scan (instead of structure)", systemImage: "cube.transparent") }
-            Toggle(isOn: $model.cleanLook) { Label("Clean look (lit, visual only)", systemImage: "sparkles") }
-            Toggle(isOn: $model.arObjects) { Label("Objects", systemImage: "shippingbox") }
-            Toggle(isOn: $model.arDoors) { Label("Doors", systemImage: "door.left.hand.open") }
-            Toggle(isOn: $model.arTerrain) { Label("Robot terrain", systemImage: "square.grid.3x3.topleft.filled") }
-            Toggle(isOn: $model.arAgents) { Label("Other agents", systemImage: "person.2.wave.2") }
-            Button { model.tool = .robotPath; model.sheetDetent = .collapsed } label: {
-                Label("Robot path tool", systemImage: "point.topleft.down.to.point.bottomright.curvepath")
+        case .robotTools:
+            Section(section.title) {
+                Button { model.tool = .robotPath; model.sheetDetent = .collapsed } label: {
+                    Label("Robot path tool", systemImage: "point.topleft.down.to.point.bottomright.curvepath")
+                }
+                Button { model.tool = .objects; model.sheetDetent = .collapsed } label: { Label("Fix objects tool", systemImage: "pencil") }
             }
-            Button { model.tool = .objects; model.sheetDetent = .collapsed } label: { Label("Fix objects tool", systemImage: "pencil") }
-            CameraMarkRows()
-        }
-        Section("Mapping") {
-            Toggle(isOn: $model.meshLive) { Label("Mesh (live) — see the mesh as it is built", systemImage: "cube.transparent") }
-            Toggle(isOn: $model.meshMapOn) { Label("Map mesh (upload, no video)", systemImage: "cube.transparent") }
-            Toggle(isOn: $model.meshMapAuto) { Label("Auto when localized", systemImage: "location.viewfinder") }
-            Button { model.roomScanner.toggle() } label: {
-                Label(model.roomScanOn ? "Stop room scan" : "Room scan", systemImage: "square.split.bottomrightquarter")
+        case .session:
+            Section(section.title) {
+                Button { model.showCubes = true } label: { Label("Cubes…", systemImage: "cube") }
+                Button { model.controller.clearCubes() } label: { Label("Clear cubes", systemImage: "trash") }
+                Button { model.controller.clearMeasures() } label: { Label("Clear measures", systemImage: "ruler") }
+                Button { model.controller.resetSession() } label: { Label("Reset AR", systemImage: "arrow.counterclockwise") }
+                Button { model.sendLog() } label: { Label(model.sendingLog ? "Sending log…" : "Send log", systemImage: "paperplane") }
+                    .disabled(model.sendingLog)
+                if let url = model.logURL {
+                    ShareLink(item: url) { Label("Share log file…", systemImage: "square.and.arrow.up") }
+                }
+                Button { model.showSettings = true } label: {
+                    Label("App settings (server, camera, logs)…", systemImage: "gearshape")
+                }
             }
-            .disabled(!RoomScanner.supported)
-            CameraMarkRows()
-        }
-        Section("Live map") {
-            Toggle(isOn: $model.liveOn) { Label("Live map", systemImage: "dot.radiowaves.left.and.right") }
-            Picker(selection: $model.liveRateHz) {
-                ForEach(LiveGate.allowedRates, id: \.self) { Text(LiveText.rate($0)).tag($0) }
-            } label: { Label("Live rate", systemImage: "metronome") }
-            Text(model.meshStore.summary(me: model.agentID)).font(.footnote).foregroundStyle(.secondary)
-        }
-        Section("Place") {
-            Button { model.placeCtl.saveNow() } label: { Label("Save place", systemImage: "square.and.arrow.down") }
-                .disabled(model.place.relocalizing)
-            Button { model.showPlaces = true } label: { Label("Places…", systemImage: "map") }
-        }
-        Section("Capture") {
-            Button { model.toggleRecording() } label: {
-                Label(model.recording ? "Stop recording" : "Record room", systemImage: "record.circle")
-            }
-            if !model.recording {
-                Button { model.objectScan.showChooser = true } label: { Label("Object scan (high-res)", systemImage: "cube.transparent") }
-            }
-            Button { model.openScans() } label: { Label("Scans", systemImage: "square.stack.3d.up") }
-                .disabled(model.recording)
-        }
-        Section("Session") {
-            Button { model.showCubes = true } label: { Label("Cubes…", systemImage: "cube") }
-            Button { model.controller.clearCubes() } label: { Label("Clear cubes", systemImage: "trash") }
-            Button { model.controller.clearMeasures() } label: { Label("Clear measures", systemImage: "ruler") }
-            Button { model.controller.resetSession() } label: { Label("Reset AR", systemImage: "arrow.counterclockwise") }
-            Button { model.sendLog() } label: { Label(model.sendingLog ? "Sending log…" : "Send log", systemImage: "paperplane") }
-                .disabled(model.sendingLog)
-            if let url = model.logURL {
-                ShareLink(item: url) { Label("Share log file…", systemImage: "square.and.arrow.up") }
-            }
-            Button { model.showSettings = true } label: { Label("Settings", systemImage: "gearshape") }
         }
     }
 }
 
-/// 12.2: Mark camera + Camera check (in Mapping and House).
+/// 12.2: Mark camera + Camera check (Mapping ▸ Cameras).
 private struct CameraMarkRows: View {
     @EnvironmentObject var model: AppModel
 
