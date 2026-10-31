@@ -149,7 +149,9 @@ final class TileFaceMask {
 
     /// Bytes this mask holds (centroids + original indices + flags), for the `mem` accounting.
     var estimatedBytes: Int {
-        centroids.count * 4 + targets.reduce(0) { $0 + $1.parts.reduce(0) { $0 + $1.indices.count * 4 } } + applied.count
+        var n = centroids.count * 4 + applied.count
+        for t in targets { for p in t.parts { n += p.indices.count * 4 } }
+        return n
     }
 
     /// Does the map-frame xy square [x0, y0, x1, y1] touch this tile's faces?

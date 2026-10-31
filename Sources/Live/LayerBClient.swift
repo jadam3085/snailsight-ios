@@ -74,7 +74,12 @@ final class LayerBClient {
     // MARK: 12.20 memory: Layer B tiles near you only
 
     var estimatedBytes: Int {
-        store.estimatedBytes + full.values.reduce(0) { $0 + ($1.mesh.positions.count + $1.mesh.indices.count) * 4 * 2 + ($1.rgb?.count ?? 0) }
+        var n = store.estimatedBytes
+        for f in full.values {
+            n += (f.mesh.positions.count + f.mesh.indices.count) * 8
+            n += f.rgb?.count ?? 0
+        }
+        return n
     }
 
     private func evictFar() {

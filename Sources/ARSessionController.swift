@@ -347,7 +347,8 @@ final class ARSessionController: NSObject, ARSessionDelegate {
         ev["mesh_anchors"] = .int(meshOverlay.count)
         // 12.20: true whenever mesh memory is being shed (recording freeze, ARKit mesh resets, overlay copies capped)
         let overlayCapped = meshOverlay.maxVertices < MemPlan.overlayVertexCap[0]
-        ev["mesh_shed"] = .bool(meshShed || meshResets > 0 && CACurrentMediaTime() - lastMeshReset < 120 || overlayCapped)
+        let recentReset = meshResets > 0 && CACurrentMediaTime() - lastMeshReset < 120
+        ev["mesh_shed"] = .bool(meshShed || recentReset || overlayCapped)
         ev["mesh_resets"] = .int(meshResets)
         ev["mesh_vertices"] = .int(meshOverlay.vertexCount)
         ev["overlay_vertices"] = .int(meshOverlay.builtVertices)

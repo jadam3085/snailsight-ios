@@ -370,8 +370,10 @@ final class LiveMapClient {
                 tileData[key] = (mesh, rgb)
                 liveMasks[key] = nil
                 if let sq = h.square {
-                    lru.put(key, x: (sq[0] + sq[2]) / 2, y: (sq[1] + sq[3]) / 2,
-                            bytes: (mesh.positions.count + mesh.indices.count) * 4 * 2 + (rgb?.count ?? 0) * 2, now: now)
+                    let geo: Int = (mesh.positions.count + mesh.indices.count) * 8
+                    let col: Int = (rgb?.count ?? 0) * 2
+                    let cx: Double = (sq[0] + sq[2]) / 2, cy: Double = (sq[1] + sq[3]) / 2
+                    lru.put(key, x: cx, y: cy, bytes: geo + col, now: now)
                 }
                 let fresh = freshLag.lag(key: key, hwWall: h.hwWall, now: now) != nil   // 12.20: a NEWER capture only
                 if fresh, let w = h.hwWall, h.agents.contains(model.agentID) { model.liveStages.tileArrived(hwWall: w, now: now) }
