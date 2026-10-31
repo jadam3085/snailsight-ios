@@ -49,6 +49,41 @@ public struct DeviceCoverageGrid {
 
     public func contains(x: Float, y: Float, z: Float) -> Bool { cells.contains(key(x: x, y: y, z: z)) }
 
+    /// Horizontal cell indices (world x, z: ARKit is y up) of a packed key.
+    @inline(__always)
+    public static func horizontal(_ key: Int64) -> (i: Int32, k: Int32) {
+        let m: Int64 = (1 << 21) - 1
+        return (Int32((key & m) - (1 << 20)), Int32(((key >> 42) & m) - (1 << 20)))
+    }
+
+    /// 12.20 spatial cap (12.19 walk: 9.6 k -> 201 k cells in 100 s; a 30 min walk would reach the 2.5 M hard cap and
+    /// stop hiding). Over `maxCells`, cells farther than `radius` (horizontal, world) from (x, z) go; the radius shrinks
+    /// ×0.75 until ≤ 80 % of the cap. Faces already hidden stay hidden (CoveredFaces is sticky), so what goes is only the
+    /// memory of far places. Returns the number of cells removed.
+    @discardableResult
+    public mutating func prune(x: Float, z: Float, radius: Float, maxCells: Int) -> Int {
+        guard cells.count > maxCells, maxCells >= 0 else { return 0 }
+        let before = cells.count
+        let ci = index(x), ck = index(z)
+        var r = max(1, Int32((radius / cellM).rounded(.up)))
+        let goal = Int(Double(maxCells) * 0.8)
+        while cells.count > goal {
+            let r2 = Int64(r) * Int64(r)
+            cells = cells.filter { key in
+                let h = Self.horizontal(key)
+                let di = Int64(h.i - ci), dk = Int64(h.k - ck)
+                return di * di + dk * dk <= r2
+            }
+            if r <= 1 { break }
+            r = max(1, Int32(Double(r) * 0.75))
+        }
+        saturated = false                                   // removing cells hides nothing new: generation stays
+        return before - cells.count
+    }
+
+    /// Estimated bytes (Swift Set<Int64>: ~8 B a key at ≤ 75 % load + metadata).
+    public var estimatedBytes: Int { cells.capacity * 9 + 64 }
+
     public mutating func clear() {
         cells.removeAll(keepingCapacity: false)
         recent.removeAll()

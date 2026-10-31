@@ -192,6 +192,23 @@ public enum SimBlobCache {
         return out
     }
 
+    /// 12.20: the keys ranked "changed" (fetched even over the budget): items the app EXPOSED before whose fingerprint
+    /// differs in the new document, plus the server's own `changed` hint. An item that is merely not cached (never
+    /// fetched, or evicted for the budget) is NOT changed. 12.19 passed every unexposed item as changed (the diff's
+    /// `added`), so with a catalog larger than the budget every sync re-fetched what the previous one had evicted:
+    /// ~340 MB downloaded and written per sync, 1.39 GB of disk writes in 130 s, and one sim_content_swap per blob.
+    public static func mustFetch(prior: [SimCatalogItem], doc: [SimCatalogItem], hint: Set<String>) -> Set<String> {
+        let d = SimContentDiff.diff(old: prior.filter { $0.blobs != nil }, new: doc)
+        let known = Set(doc.map(\.key))
+        return hint.intersection(known).union(d.changed)
+    }
+
+    /// Bytes on disk that the document references (what the budget is measured against: unreferenced blobs are
+    /// freed by the eviction that follows anyway).
+    public static func referencedBytes(items: [SimCatalogItem], have: Set<String>, size: (String) -> Int) -> Int {
+        SimContent.referenced(items: items).intersection(have).reduce(0) { $0 + size($1) }
+    }
+
     /// Missing blobs in fetch order — items of spawned bodies, then changed/new items, then recents, then the rest in
     /// catalog order — dropping what would not fit the budget next to what is already cached.
     public static func fetchPlan(items: [SimCatalogItem], have: Set<String>, haveBytes: Int, spawned: Set<String>,

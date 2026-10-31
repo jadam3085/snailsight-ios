@@ -26,6 +26,8 @@ final class DeviceSurface {
     private var sets: [String: CoveredFaces] = [:]
     private var applied: [String: Int] = [:]                    // hidden count the owner has drawn
     private var lastAlign: Align4?
+    private var lastDelivered: [String: Double] = [:]           // 12.20: per-mesh rebuild spacing (MemPlan)
+    private var pruned = 0
 
     // main-owned
     private var appliers: [String: Apply] = [:]
@@ -36,6 +38,9 @@ final class DeviceSurface {
     private var firstHideLogged = false
     private var stats = (frames: 0, observeMs: [Double](), rebuilds: 0, rebuildMs: 0.0, marked: 0)
     private var snapshot = (cells: 0, sets: 0, faces: 0, hidden: 0, saturated: false)
+    /// 12.20 `mem` accounting: coverage grid + per-mesh face sets (bytes, queue-computed).
+    private(set) var bytes = (grid: 0, faces: 0)
+    private(set) var prunedTotal = 0
     private(set) var depthWanted = false
 
     static let everyS = 0.4
@@ -83,7 +88,7 @@ final class DeviceSurface {
 
     func unregister(id: String) {
         appliers[id] = nil
-        q.async { [weak self] in self?.sets[id] = nil; self?.applied[id] = nil }
+        q.async { [weak self] in self?.sets[id] = nil; self?.applied[id] = nil; self?.lastDelivered[id] = nil }
     }
 
     /// Is any face of `id` currently hidden (owner-side bookkeeping is preferred; this is for logs).
@@ -112,7 +117,8 @@ final class DeviceSurface {
             model.log.event("device_surface_toggle", ["on": .bool(on), "setting": .bool(model.deviceTruth)])
             if !on { restoreAll() }
         }
-        guard on, !busy, let al = align, f.timestamp - lastObserve >= Self.everyS else { return }
+        let plan = model.memPlan                                   // 12.20: cadence / caps from the memory + heat plan
+        guard on, !busy, let al = align, f.timestamp - lastObserve >= max(Self.everyS, plan.deviceEveryS) else { return }
         guard case .normal = f.camera.trackingState, let sd = f.sceneDepth ?? f.smoothedSceneDepth else { return }
         lastObserve = f.timestamp
         let dm = sd.depthMap
@@ -134,28 +140,38 @@ final class DeviceSurface {
             guard let self else { return }
             let t0 = CACurrentMediaTime()
             let st = self.grid.observe(depth: depth, width: w, height: h, confidence: conf, K: K, camToWorld: M)
+            // 12.20 spatial cap: far cells go (faces already hidden stay hidden)
+            let cut = self.grid.prune(x: M[12], z: M[14], radius: Float(plan.deviceKeepRadiusM), maxCells: plan.deviceCellsMax)
+            self.pruned += cut
             self.lastAlign = al
+            let tNow = CACurrentMediaTime()
             var due: [(String, [Bool], Int)] = []
-            var faces = 0, hidden = 0
+            var faces = 0, hidden = 0, faceBytes = 0
             for id in Array(self.sets.keys) {
                 guard var cf = self.sets[id] else { continue }
                 cf.update(grid: self.grid, align: al)
                 self.sets[id] = cf
                 faces += cf.faceCount
                 hidden += cf.hiddenCount
+                faceBytes += cf.centroids.count * 4 + cf.faceCount
                 let ap = self.applied[id] ?? 0
-                if due.count < Self.maxApplyPerCycle,
+                if due.count < min(Self.maxApplyPerCycle, plan.maskRebuildsPerCycle),
+                   tNow - (self.lastDelivered[id] ?? -1e9) >= plan.maskRebuildMinS,
                    CoverageRebuild.due(hidden: cf.hiddenCount, applied: ap, faces: cf.faceCount) {
                     self.applied[id] = cf.hiddenCount
+                    self.lastDelivered[id] = tNow
                     due.append((id, cf.hidden, cf.hiddenCount))
                 }
             }
+            let gridBytes = self.grid.estimatedBytes, prunedNow = self.pruned
             let ms = (CACurrentMediaTime() - t0) * 1000
             let snap = (self.grid.count, self.sets.count, faces, hidden, self.grid.saturated)
             DispatchQueue.main.async {
                 self.busy = false
                 guard self.active else { return }                   // switched off meanwhile: restoreAll ran
                 self.snapshot = snap
+                self.bytes = (gridBytes, faceBytes)
+                self.prunedTotal = prunedNow
                 self.stats.frames += 1
                 self.stats.marked += st.marked
                 self.stats.observeMs.append(ms)
@@ -203,7 +219,8 @@ final class DeviceSurface {
             "hidden": .int(snapshot.hidden), "frames": .int(stats.frames), "marked": .int(stats.marked),
             "observe_ms_p50": .double((p50 * 10).rounded() / 10), "observe_ms_max": .double((mx * 10).rounded() / 10),
             "rebuilds": .int(stats.rebuilds), "rebuild_ms": .double((stats.rebuildMs * 10).rounded() / 10),
-            "saturated": .bool(snapshot.saturated),
+            "saturated": .bool(snapshot.saturated), "pruned": .int(prunedTotal),
+            "grid_mb": .double((Double(bytes.grid) / 1_048_576 * 10).rounded() / 10),
         ])
         stats = (0, [], 0, 0, 0)
     }

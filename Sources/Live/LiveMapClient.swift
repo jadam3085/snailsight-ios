@@ -45,6 +45,12 @@ final class LiveMapClient {
     private var fullMeshes: [String: MeshResource] = [:]
     private var fullPhoto: [String: TextureResource] = [:]
     private var changeEntities: [String: Entity] = [:]
+    /// 12.20: live mesh tiles near you only (MemPlan.liveRadiusM / liveMaxTiles); 12.18-12.19 kept every tile ever
+    /// received for the whole session.
+    private var lru = SpatialLRU<String>()
+    private var lastEvict: TimeInterval = 0
+    private(set) var evicted = 0
+    private var freshLag = FreshLag()
     private var stats = (msgs: 0, tiles: 0, drawn: 0, changes: 0, docs: 0)
     private var lastStats: TimeInterval = 0
     private var downlinkAgentsAt: TimeInterval = 0
@@ -154,11 +160,13 @@ final class LiveMapClient {
             close("not wanted")
         }
         if changes.expire(now: t) || !changes.markers.isEmpty { renderChanges(now: t) }
+        if t - lastEvict >= 2 { lastEvict = t; evictFar() }
         if t - lastStats >= 30, connected {
             lastStats = t
             model.log.event("live_down_stats", ["msgs": .int(stats.msgs), "tiles": .int(stats.tiles), "drawn": .int(stats.drawn),
                                                 "changes": .int(stats.changes), "docs": .int(stats.docs),
-                                                "held": .int(tiles.have.count),
+                                                "held": .int(tiles.have.count), "drawn_tiles": .int(tileData.count), "evicted": .int(evicted),
+                                                "mem_mb": .double((Double(lru.totalBytes) / 1_048_576 * 10).rounded() / 10),
                                                 "mesh_tiles": .int(model.meshStore.feed.liveCount),
                                                 "mesh_mine": .int(model.meshStore.feed.mineCount),
                                                 "mesh_agents": .string(model.meshStore.feed.otherAgents.joined(separator: ",")),
@@ -361,9 +369,14 @@ final class LiveMapClient {
                 let applied = model.meshStore.applyLive(h, mesh: mesh, rgb: rgb, floorZ: floorZ[h.levelIndex], me: model.agentID)
                 tileData[key] = (mesh, rgb)
                 liveMasks[key] = nil
-                if let w = h.hwWall, h.agents.contains(model.agentID) { model.liveStages.tileArrived(hwWall: w, now: now) }
+                if let sq = h.square {
+                    lru.put(key, x: (sq[0] + sq[2]) / 2, y: (sq[1] + sq[3]) / 2,
+                            bytes: (mesh.positions.count + mesh.indices.count) * 4 * 2 + (rgb?.count ?? 0) * 2, now: now)
+                }
+                let fresh = freshLag.lag(key: key, hwWall: h.hwWall, now: now) != nil   // 12.20: a NEWER capture only
+                if fresh, let w = h.hwWall, h.agents.contains(model.agentID) { model.liveStages.tileArrived(hwWall: w, now: now) }
                 drawTile(key: key, mesh: mesh, rgb: rgb)
-                if let w = h.hwWall, h.agents.contains(model.agentID) {        // 12.18 M0: our keyframe is on screen
+                if fresh, let w = h.hwWall, h.agents.contains(model.agentID) {        // 12.18 M0: our keyframe is on screen
                     model.liveStages.tileDrawn(hwWall: w, now: now)
                     model.liveStagesChanged()
                 }
@@ -397,6 +410,35 @@ final class LiveMapClient {
             if t == "estimated", let m = EstimatedLiveMessage.parse(d) { model.planData.estimatedLive(m) }
             if t == "door" { model.doorStore.live(d) }
         }
+    }
+
+    // MARK: 12.20 memory
+
+    /// Bytes of the live tiles held (CPU mesh + GPU copy, colour).
+    var estimatedBytes: Int { lru.totalBytes }
+    var heldTiles: Int { tileData.count }
+
+    /// Far tiles go (beyond the subscribe box with margin, then the farthest over the count cap).
+    private func evictFar() {
+        guard let c = layer.cameraMap, lru.count > 0 else { return }
+        let p = model.memPlan
+        let radius = max(p.liveRadiusM, bboxHalf * 1.42 + 4)        // never inside the subscribed box: no resend churn
+        for k in lru.evictions(x: c[0], y: c[1], radius: radius, maxCount: p.liveMaxTiles) { dropTile(k) }
+    }
+
+    private func dropTile(_ key: String) {
+        lru.remove(key)
+        tileEntities.removeValue(forKey: key)?.removeFromParent()
+        tileData[key] = nil
+        tilePhoto[key] = nil
+        fullMeshes[key] = nil
+        fullPhoto[key] = nil
+        liveMasks[key] = nil
+        tileStep[key] = nil
+        layer.surface.unregister(id: "live|" + key)
+        tiles.forget(layer: "mesh", key: key)
+        freshLag.forget(key)
+        evicted += 1
     }
 
     /// 12.0: a base tile the M4 sync swapped in place: a fading outline of its box (same three steps as live tiles).

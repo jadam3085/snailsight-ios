@@ -169,11 +169,11 @@ final class SimContentStore: ObservableObject {
             var fetched = 0, bytes = 0, evicted = 0
             let target: SimContentDoc? = newDoc ?? self.currentDoc()
             if let doc = target {
-                // new / changed first: diff against what is exposed now
-                let d = SimContentDiff.diff(old: prior.filter { $0.blobs != nil }, new: doc.items)
-                let changedKeys = hint.union(d.added).union(d.changed)
+                // 12.20: only items exposed before whose content changed (or the server's hint) may exceed the budget;
+                // an item that is merely not cached waits its turn under the budget (12.19 re-fetched ~340 MB per sync)
+                let changedKeys = SimBlobCache.mustFetch(prior: prior, doc: doc.items, hint: hint)
                 let have = self.onDisk()
-                let haveBytes = self.diskBytes(have)
+                let haveBytes = SimBlobCache.referencedBytes(items: doc.items, have: have) { self.diskBytes([$0]) }
                 let plan = SimBlobCache.fetchPlan(items: doc.items, have: have, haveBytes: haveBytes, spawned: spawned,
                                                   changed: changedKeys, recents: recents, budget: SimBlobCache.defaultBudget)
                 if !plan.isEmpty { await MainActor.run { self.updating = (0, plan.count) } }
@@ -200,11 +200,13 @@ final class SimContentStore: ObservableObject {
                     }
                     done += 1
                     let progress = done
-                    let haveNow = self.onDisk()
-                    // an item whose last file just arrived goes live at once (swap in place), not at the end
+                    // a spawned body's item whose last file just arrived goes live at once (swap in place); everything
+                    // else is applied once at the end (12.19: one catalog change + body re-check per blob, 162 swaps)
+                    let lastOfSpawned = spawned.contains(m.key) && !plan.dropFirst(done).contains { $0.key == m.key }
+                    let haveNow: Set<String>? = lastOfSpawned ? self.onDisk() : nil
                     await MainActor.run {
                         self.updating = (progress, plan.count)
-                        self.apply(doc, have: haveNow, newRev: false)
+                        if let h = haveNow { self.apply(doc, have: h, newRev: false) }
                     }
                 }
                 if newDoc != nil {

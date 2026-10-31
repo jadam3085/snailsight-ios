@@ -1,8 +1,13 @@
-// SnailSight 12.18: hide individual faces of a loaded base tile (USDZ entity tree) without touching the shared mesh
-// resources: each ModelComponent gets a NEW MeshResource built from its original contents minus the hidden triangles
-// (the original is kept to restore). Used by the AR tiles (TileStreamer: device surface + Layer B cubes) and Map ▸ 3D
-// (Map3DTileLoader: Layer B cubes). Face order = entities depth-first, models, parts, triangles (first instance of a
-// model only; tile USDZ hold one instance per model).
+// SnailSight 12.18: hide individual faces of a loaded base tile (USDZ entity tree). Used by the AR tiles (TileStreamer:
+// device surface + Layer B cubes) and Map ▸ 3D (Map3DTileLoader: Layer B cubes). Face order = entities depth-first,
+// models, parts, triangles (first instance of a model only; tile USDZ hold one instance per model).
+// 12.20 memory (12.19 walk killed by jetsam): 12.18 kept a full CPU copy of every tile's MeshResource.Contents AND drew a
+// second, generated MeshResource next to the kept original, so a masked tile cost ~3x its geometry (+900 MB when 36 raw
+// tiles loaded). Now only the original triangle indices are kept, and:
+//  - `inPlace` (AR: TileStreamer loads each tile itself and owns its resources): the tile's own MeshResource is
+//    rewritten with `replace(with:)` (same positions / uvs, fewer indices); restore = the full indices again. One copy.
+//  - otherwise (Map ▸ 3D, whose tiles may be clones that share the AR's resources): a new resource is generated from the
+//    original's contents read at apply time (not held), and the original is restored by reference.
 import RealityKit
 import simd
 import SnailSightCore
@@ -18,9 +23,12 @@ final class TileFaceMask {
     private struct Target {
         let entity: Entity
         let original: MeshResource
-        let contents: MeshResource.Contents
         let parts: [Part]
     }
+
+    /// Rewrite the tile's own resources (AR) instead of drawing generated copies.
+    let inPlace: Bool
+    private var replaceFailed = false
 
     private var targets: [Target] = []
     /// x, y, z per face in the MAP frame (z up).
@@ -35,7 +43,8 @@ final class TileFaceMask {
 
     /// `frame` = the entity whose space is converted to the map frame by `toMap` (identity for an entity already in
     /// map coordinates).
-    init(holder: Entity, frame: Entity, toMap: (SIMD3<Float>) -> SIMD3<Float> = { $0 }) {
+    init(holder: Entity, frame: Entity, inPlace: Bool = false, toMap: (SIMD3<Float>) -> SIMD3<Float> = { $0 }) {
+        self.inPlace = inPlace
         func walk(_ e: Entity) {
             if let mc = e.components[ModelComponent.self] {
                 let contents = mc.mesh.contents
@@ -59,7 +68,7 @@ final class TileFaceMask {
                         centroids += CoveredFaces.centroids(positions: flat, indices: idx)
                     }
                 }
-                if !parts.isEmpty { targets.append(Target(entity: e, original: mc.mesh, contents: contents, parts: parts)) }
+                if !parts.isEmpty { targets.append(Target(entity: e, original: mc.mesh, parts: parts)) }
             }
             for c in e.children { walk(c) }
         }
@@ -85,9 +94,8 @@ final class TileFaceMask {
         let n = m.reduce(0) { $0 + ($1 ? 1 : 0) }
         for t in targets {
             guard var mc = t.entity.components[ModelComponent.self] else { continue }
-            if n == 0 {
-                mc.mesh = t.original
-                t.entity.components.set(mc)
+            if n == 0 && (!inPlace || replaceFailed) {
+                if mc.mesh !== t.original { mc.mesh = t.original; t.entity.components.set(mc) }
                 continue
             }
             var kept: [String: [Int: [UInt32]]] = [:]
@@ -102,12 +110,15 @@ final class TileFaceMask {
                 if out.count != p.indices.count { touched = true }
                 kept[p.model, default: [:]][p.part] = out.isEmpty ? [0, 0, 0] : out   // degenerate: draws nothing
             }
-            guard touched else {
-                if mc.mesh !== t.original { mc.mesh = t.original; t.entity.components.set(mc) }
+            let wasMasked = inPlace ? appliedCount > 0 : mc.mesh !== t.original
+            guard touched || (inPlace && wasMasked) else {
+                if !inPlace, mc.mesh !== t.original { mc.mesh = t.original; t.entity.components.set(mc) }
                 continue
             }
+            // contents read now (a transient copy), never held: positions / uvs are the original's in both modes
+            var c = t.original.contents
             var models: [MeshResource.Model] = []
-            for md in t.contents.models {
+            for md in c.models {
                 var parts: [MeshResource.Part] = []
                 for (pi, part) in md.parts.enumerated() {
                     var np = part
@@ -116,8 +127,17 @@ final class TileFaceMask {
                 }
                 models.append(MeshResource.Model(id: md.id, parts: parts))
             }
-            var c = t.contents
             c.models = MeshModelCollection(models)
+            if inPlace && !replaceFailed {
+                do {
+                    try t.original.replace(with: c)
+                    if mc.mesh !== t.original { mc.mesh = t.original; t.entity.components.set(mc) }
+                    continue
+                } catch {
+                    replaceFailed = true                                  // fall back to generated copies
+                }
+            }
+            if n == 0 { mc.mesh = t.original; t.entity.components.set(mc); continue }
             guard let res = try? MeshResource.generate(from: c) else { continue }
             mc.mesh = res
             t.entity.components.set(mc)
@@ -125,6 +145,11 @@ final class TileFaceMask {
         applied = m
         appliedCount = n
         return true
+    }
+
+    /// Bytes this mask holds (centroids + original indices + flags), for the `mem` accounting.
+    var estimatedBytes: Int {
+        centroids.count * 4 + targets.reduce(0) { $0 + $1.parts.reduce(0) { $0 + $1.indices.count * 4 } } + applied.count
     }
 
     /// Does the map-frame xy square [x0, y0, x1, y1] touch this tile's faces?

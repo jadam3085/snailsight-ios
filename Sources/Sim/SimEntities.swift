@@ -94,6 +94,19 @@ final class SimModelLibrary {
         for (f, cbs) in u { for cb in cbs { request(f, cb) } }
     }
 
+    /// Templates in memory now (12.20 `mem` accounting).
+    var count: Int { templates.count }
+
+    /// 12.20 memory plan: keep only the templates whose catalog file is in `files` (bodies keep their own clones; a
+    /// later spawn loads the file from disk again). Returns how many went.
+    @discardableResult
+    func keepOnly(files: Set<String>) -> Int {
+        let keep = Set(files.compactMap { SimContentStore.shared.resolve($0)?.key })
+        let before = templates.count
+        for k in templates.keys where !keep.contains(k) { templates[k] = nil; fileOfKey[k] = nil }
+        return before - templates.count
+    }
+
     /// Drop the templates (memory) of models no catalog item references any more; bodies keep their own clones.
     func retain(_ keys: Set<String>) {
         for k in templates.keys where !keys.contains(k) { templates[k] = nil; fileOfKey[k] = nil }

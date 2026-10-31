@@ -23,6 +23,13 @@ final class MeshOverlay {
     private let frozenMaterial: UnlitMaterial
     private let lift: Float = 0.005
     private var vertices: [UUID: Int] = [:]        // per anchor (ARKit geometry), for the mesh memory cap
+    /// 12.20: vertices of OUR wire copies per anchor (what this overlay holds), capped by MemPlan.overlayMaxVertices.
+    private var built: [UUID: Int] = [:]
+    private var centers: [UUID: SIMD3<Float>] = [:]
+    private(set) var trimmed = 0
+    /// MemPlan: our copies' vertex cap (0 = no copies at all) and the radius kept when over it.
+    var maxVertices = 400_000
+    var keepRadius: Float = 10
     private(set) var frozen = false
     private var ghost: [ModelEntity] = []          // the frozen copy kept while the live mesh rebuilds after Stop
     private var ghostUntil: TimeInterval = 0
@@ -31,6 +38,9 @@ final class MeshOverlay {
     var idleEvery = 1.0
     /// Vertices in the live scene mesh (sum over ARMeshAnchors seen), for AdaptiveCapture.meshVertexCap.
     var vertexCount: Int { vertices.values.reduce(0, +) }
+    /// Vertices in our wire copies (≈ 16 B position + 4 B index share each, plus RealityKit's GPU copy).
+    var builtVertices: Int { built.values.reduce(0, +) }
+    var estimatedBytes: Int { builtVertices * 40 }
 
     var isEnabled = true {
         didSet {
@@ -73,7 +83,7 @@ final class MeshOverlay {
         guard frozen else { return }
         frozen = false
         ghost = Array(entities.values)
-        entities.removeAll(); lastBuilt.removeAll(); vertices.removeAll(); seen.removeAll()
+        entities.removeAll(); lastBuilt.removeAll(); vertices.removeAll(); seen.removeAll(); built.removeAll()
         ghostUntil = now + 30
     }
 
@@ -85,13 +95,14 @@ final class MeshOverlay {
     func update(_ a: ARMeshAnchor) {
         if frozen { return }
         vertices[a.identifier] = a.geometry.vertices.count
-        if isEnabled { pending[a.identifier] = a } else { seen.insert(a.identifier) }
+        centers[a.identifier] = SIMD3(a.transform.columns.3.x, a.transform.columns.3.y, a.transform.columns.3.z)
+        if isEnabled && maxVertices > 0 { pending[a.identifier] = a } else { seen.insert(a.identifier) }
         entities[a.identifier]?.transform = Transform(matrix: a.transform)
     }
 
     func remove(_ id: UUID) {
         if frozen { return }                       // the reset that froze the mesh removes every anchor: keep ours
-        vertices[id] = nil
+        vertices[id] = nil; built[id] = nil; centers[id] = nil
         pending[id] = nil; lastBuilt[id] = nil; seen.remove(id)
         entities.removeValue(forKey: id)?.removeFromParent()
     }
@@ -99,20 +110,50 @@ final class MeshOverlay {
     func removeAll() {
         for e in entities.values { e.removeFromParent() }
         entities.removeAll(); pending.removeAll(); lastBuilt.removeAll(); seen.removeAll(); vertices.removeAll()
+        built.removeAll(); centers.removeAll()
         dropGhost()
         frozen = false
     }
 
-    func tick(now: TimeInterval) {
+    /// 12.20 memory cap: over `maxVertices` our copies of anchors farther than `keepRadius` from the camera go (ARKit
+    /// keeps the real mesh; the wire returns when ARKit updates an anchor near you again). 0 = no copies.
+    private func enforceCap(cam: SIMD3<Float>?) {
+        if maxVertices <= 0 {
+            guard !entities.isEmpty || !pending.isEmpty, !frozen else { return }
+            for (id, e) in entities { e.removeFromParent(); built[id] = nil; trimmed += 1 }
+            entities.removeAll(); pending.removeAll(); lastBuilt.removeAll()
+            return
+        }
+        guard !frozen, builtVertices > maxVertices else { return }
+        let c = cam ?? .zero
+        func d2(_ id: UUID) -> Float { let p = centers[id] ?? c; let d = p - c; return d.x * d.x + d.z * d.z }
+        var total = builtVertices
+        for id in entities.keys.sorted(by: { d2($0) > d2($1) }) where total > Int(Double(maxVertices) * 0.85) {
+            entities.removeValue(forKey: id)?.removeFromParent()
+            total -= built.removeValue(forKey: id) ?? 0
+            lastBuilt[id] = nil
+            trimmed += 1
+        }
+    }
+
+    func tick(now: TimeInterval, cam: SIMD3<Float>? = nil) {
         if !ghost.isEmpty, now > ghostUntil || entities.count >= max(8, ghost.count / 2) { dropGhost() }
-        guard isEnabled, !frozen, !pending.isEmpty else { return }
-        var built = 0
+        enforceCap(cam: cam)
+        guard isEnabled, !frozen, !pending.isEmpty, maxVertices > 0 else { return }
+        var builtNow = 0
         let perFrame = recording || idleEvery > 1.5 ? 1 : 2, every = recording ? rebuildEvery : idleEvery
-        for (id, a) in pending where built < perFrame && now - (lastBuilt[id] ?? -10) >= every {
+        let over = builtVertices > Int(Double(maxVertices) * 0.85)
+        let r2 = keepRadius * keepRadius
+        for (id, a) in pending where builtNow < perFrame && now - (lastBuilt[id] ?? -10) >= every {
             pending[id] = nil
+            if over, let c = cam, entities[id] == nil {           // over the cap: only near anchors get a new copy
+                let p = centers[id] ?? c, d = p - c
+                if d.x * d.x + d.z * d.z > r2 { continue }
+            }
             lastBuilt[id] = now
-            built += 1
+            builtNow += 1
             guard let mesh = Self.meshResource(from: a.geometry, lift: lift) else { continue }
+            built[id] = a.geometry.vertices.count
             if let e = entities[id] {
                 e.model?.mesh = mesh
                 e.transform = Transform(matrix: a.transform)

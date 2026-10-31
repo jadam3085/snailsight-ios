@@ -175,6 +175,34 @@ public struct LayerBStore {
         return .applied(changed: changed, full: f.since == nil)
     }
 
+    /// 12.20 spatial LRU: drop a far tile (its cubes stop hiding base faces; a resubscribe gets it back in full because
+    /// it is no longer in `held`). Returns the blocks that changed.
+    @discardableResult
+    public mutating func forget(_ key: String) -> Set<BlockKey> {
+        guard let t = tiles.removeValue(forKey: key) else { return [] }
+        for k in t.blocks.keys { superseded.remove(k.packed) }
+        return Set(t.blocks.keys)
+    }
+
+    /// Centre (map x, y) of a tile (4 m squares).
+    public func centre(_ key: String) -> (x: Double, y: Double)? {
+        guard let t = tiles[key] else { return nil }
+        return ((Double(t.tx) + 0.5) * 4, (Double(t.ty) + 0.5) * 4)
+    }
+
+    /// Estimated bytes of the blocks' meshes and colour.
+    public var estimatedBytes: Int {
+        var n = superseded.count * 9
+        for t in tiles.values {
+            for b in t.blocks.values {
+                n += 64
+                if let m = b.mesh { n += (m.positions.count + m.indices.count) * 4 }
+                if let c = b.rgb { n += c.count }
+            }
+        }
+        return n
+    }
+
     /// `since.tiles.surface` for a (re)subscribe: {key: ver}.
     public var held: [String: TileVer] { tiles.mapValues(\.ver) }
 

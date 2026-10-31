@@ -242,6 +242,23 @@ final class SimController: NSObject, UIGestureRecognizerDelegate {
         }
     }
 
+    // MARK: 12.20 memory plan
+
+    /// Model templates kept in memory: all (normal), those of kinds in the world (trim / shed), none (critical).
+    @discardableResult
+    func trimTemplates(_ mode: MemPlan.SimTemplates) -> Int {
+        switch mode {
+        case .all: return 0
+        case .none: return library.keepOnly(files: [])
+        case .inUse:
+            let spawned = SimContentStore.shared.inUse?().spawned ?? []
+            let files = catalog.items.filter { spawned.contains($0.key) }.flatMap { ($0.files ?? [:]).values }
+            return library.keepOnly(files: Set(files))
+        }
+    }
+
+    var templateCount: Int { library.count }
+
     // MARK: scale + budget
 
     private var globalScale: Double { SimScale.clampGlobal(model.simScale) }

@@ -61,6 +61,10 @@ final class TileStreamer {
     private var blockDirty = Set<String>()
     /// Tiles drawn with some faces hidden (the Map 3D viewer must not clone their masked meshes).
     private var masked = Set<String>()
+    /// 12.20: unwanted tiles kept loaded (hidden) for MemPlan.tileLingerS: 12.19 reloaded tiles at band edges up to 5
+    /// times in 130 s (98 cache loads, 85 evictions), each a USDZ load + mask build on the main thread.
+    private var unwantedSince: [String: TimeInterval] = [:]
+    private var lingerKept = 0
 
     // disk cache
     private var disk = TileDiskLRU()
@@ -79,6 +83,7 @@ final class TileStreamer {
     private var noTilesLogged = false
 
     static let maxConcurrent = 3
+    private var plan: MemPlan { model.memPlan }
     static let statusEveryS = 10.0
     static let retryS = 15.0
 
@@ -139,6 +144,7 @@ final class TileStreamer {
         motion.add(t: t, x: cam[0], y: cam[1])
         let heading = forward.flatMap { TileMotion.heading(forward: $0) }
         want = TileSelect.select(roots, cam: cam, heading: heading, speed: motion.speed,
+                                 nearBudget: plan.tileNearMB << 20, midBudget: plan.tileMidMB << 20,   // 12.20 MemPlan
                                  camLevel: TileSelect.cameraLevel(z: cam[2], levels: levels))
         refresh()
         remaskDirty()
@@ -155,9 +161,22 @@ final class TileStreamer {
         var d = TileSelect.drawn(want: want, loaded: current, parents: parents, prevDrawn: drawnKeys)
         // a tile whose content changed in a new rev keeps its old entity on screen until the new one is loaded
         for k in ledger.items.keys where want[k] != nil && !current.contains(k) { d.insert(k) }
-        for k in TileSelect.evictable(loaded: Set(ledger.items.keys), want: want, drawn: d) {
+        let t = now
+        var lingerMem = 0
+        lingerKept = 0
+        let ev = TileSelect.evictable(loaded: Set(ledger.items.keys), want: want, drawn: d)
+        for k in ev.sorted(by: { (unwantedSince[$0] ?? t) > (unwantedSince[$1] ?? t) }) {   // newest unwanted first
+            let since = unwantedSince[k] ?? t
+            unwantedSince[k] = since
+            let mem = ledger.items[k]?.mem ?? 0
+            if t - since < plan.tileLingerS, lingerMem + mem <= plan.tileLingerMB << 20 {
+                lingerMem += mem                                    // kept hidden: coming back costs nothing
+                lingerKept += 1
+                continue
+            }
             release(k, reason: "unwanted")
         }
+        for k in unwantedSince.keys where !ev.contains(k) { unwantedSince[k] = nil }
         for (k, e) in entities {
             let on = d.contains(k)
             if e.isEnabled != on { e.isEnabled = on }
@@ -295,10 +314,11 @@ final class TileStreamer {
     // MARK: downloads + loading
 
     private func schedule(_ t: TimeInterval) {
-        guard inFlight.count < Self.maxConcurrent, let base = tilesetPath else { return }
+        let cap = min(Self.maxConcurrent, max(1, plan.tileConcurrent))     // 12.20: 1 at thermal SERIOUS
+        guard inFlight.count < cap, let base = tilesetPath else { return }
         let current = ledger.current(hashes: hashes)
         for w in TileSelect.fetchOrder(want, loaded: current) {
-            if inFlight.count >= Self.maxConcurrent { break }
+            if inFlight.count >= cap { break }
             let k = w.node.key
             let ov = syncOverride[k]
             guard inFlight[k] == nil, (failedUntil[k] ?? 0) <= t, let hash = ov?.hash ?? w.node.hash,
@@ -431,6 +451,7 @@ final class TileStreamer {
         originals[key] = nil
         if masks.removeValue(forKey: key) != nil { layer.surface.unregister(id: "base|\(key)|\(it.hash)") }
         masked.remove(key)
+        unwantedSince[key] = nil
         deviceHidden[key] = nil
         blockDirty.remove(key)
         drawnKeys.remove(key)
@@ -491,7 +512,7 @@ final class TileStreamer {
 
     /// Face centroids of a freshly attached tile (map frame), registered with the device surface.
     private func registerSurface(key: String, hash: String, holder: Entity) {
-        let fm = TileFaceMask(holder: holder, frame: node)
+        let fm = TileFaceMask(holder: holder, frame: node, inPlace: true)    // 12.20: one copy of the geometry
         guard !fm.isEmpty else { return }
         masks[key] = fm
         deviceHidden[key] = nil
@@ -512,6 +533,7 @@ final class TileStreamer {
     func remaskAll() { blockDirty.formUnion(masks.keys) }
 
     private func remaskDirty() {
+        guard !model.showMap3D else { return }                     // Map ▸ 3D may clone these resources: wait
         var n = 0
         while n < 3, let k = blockDirty.popFirst() {
             remask(k)
@@ -522,6 +544,7 @@ final class TileStreamer {
     /// Device-seen OR inside a Layer B cube (surface / empty) → hidden.
     private func remask(_ key: String) {
         guard let fm = masks[key] else { return }
+        if model.showMap3D { blockDirty.insert(key); return }     // 12.20 in-place masks: never while Map ▸ 3D clones
         var mask = deviceHidden[key] ?? []
         if model.blocks.store.blockCount > 0, model.meshLive {
             let b = model.blocks.store.hiddenFaces(centroids: fm.centroids)
@@ -532,6 +555,19 @@ final class TileStreamer {
         if fm.apply(mask) {
             if fm.appliedCount > 0 { masked.insert(key) } else { masked.remove(key) }
         }
+    }
+
+    // MARK: 12.20 memory
+
+    /// Bytes of the masks' bookkeeping (centroids + original indices).
+    var maskBytes: Int { masks.values.reduce(0) { $0 + $1.estimatedBytes } }
+    var lingering: Int { lingerKept }
+
+    /// Memory level critical: drop every loaded tile that is not drawn now (lingering, superseded parents).
+    func trimUndrawn() -> Int {
+        let drop = ledger.items.keys.filter { !drawnKeys.contains($0) }
+        for k in drop { release(k, reason: "memory") }
+        return drop.count
     }
 
     // MARK: 12.3 Map ▸ 3D shares the blob cache and the tiles loaded here

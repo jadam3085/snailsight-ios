@@ -14,6 +14,12 @@ import SnailSightCore
 ///  - every HUD tick while recording: AdaptiveCapture.decide(thermal, os_proc_available_memory) → recorder rate/quality,
 ///    mesh shed, on-screen warning, clean auto-stop (thermal critical / memory nearly exhausted).
 ///  - ev "mem" every 10 s and on every thermal change / memory warning (footprint, available, limit).
+/// 12.20 (2026-10-30 jetsam kill after 130 s of walking with Live map, 12.19.305: 502 -> 3184 MB, 38 warnings, nothing
+/// shed because shedding existed only while recording): a MemoryGovernor (SnailSightCore MemoryBudget.swift) samples the
+/// footprint every second and on every memory warning; its level (normal / trim / shed / critical) + thermal state
+/// become model.memPlan, which every subsystem reads (tile budgets, live / Layer B radius, device-surface cap and
+/// cadence, overlay copies, ARKit mesh cap, environment probes, sim templates). `mem` logs the level, what is shed and
+/// per-subsystem MB (mb_*); `mem_level` every change; `ar_mesh_reset` when ARKit's own mesh is reset for memory.
 final class ARSessionController: NSObject, ARSessionDelegate {
     let arView: ARView
     unowned let model: AppModel
@@ -41,7 +47,9 @@ final class ARSessionController: NSObject, ARSessionDelegate {
     private(set) var heatBudget = SimBudgets.budget(mode: .auto, thermal: .nominal)
     private var thermalHistory: ThermalHistory?
     /// S1 simulated agents (Sources/Sim). Created on first use.
+    private var simMade = false
     private(set) lazy var sim: SimController = {
+        self.simMade = true
         let s = SimController(model: self.model, arView: self.arView)
         s.cubeSource = { [weak self] in self?.renderer.supportBodies() ?? [] }     // 9.5: cubes re-check support
         s.onEntitiesChanged = { [weak self] in self?.model.placeCtl.entitiesChanged() }   // P2a auto-save
@@ -59,6 +67,15 @@ final class ARSessionController: NSObject, ARSessionDelegate {
     private(set) lazy var objectBox = ObjectBoxController(model: model, arView: arView)
     /// 10.1 AR 1:1: the house map's content in the map frame (Sources/AR/MapARLayer). Created on the first frame.
     private(set) lazy var mapLayer = MapARLayer(model: model, arView: arView)
+
+    // 12.20 memory governor
+    private var governor = MemoryGovernor()
+    private var memTrend = MemTrend()
+    private var lastGovTick: TimeInterval = 0
+    private var lastMeshReset: TimeInterval = -1e9
+    private var meshResets = 0
+    private var templatesDropped = 0
+    private var tilesDropped = 0
 
     init(model: AppModel) {
         self.model = model
@@ -108,7 +125,8 @@ final class ARSessionController: NSObject, ARSessionDelegate {
             || mapLayer.surface.depthWanted                                                              // 12.18 device surface
         if model.peopleOcclusion && Self.supportsPeople && !wantDepth { c.frameSemantics.insert(.personSegmentationWithDepth) }
         if wantDepth && Self.supportsDepth { c.frameSemantics.insert(.sceneDepth) }
-        c.environmentTexturing = depthCapture ? .none : .automatic
+        // 12.20: environment probes grow with the area walked: off while Live map streams or memory is tight
+        c.environmentTexturing = depthCapture || !model.memPlan.environmentProbes ? .none : .automatic
         return c
     }
 
@@ -200,11 +218,97 @@ final class ARSessionController: NSObject, ARSessionDelegate {
 
     private func memoryWarning() {
         model.memoryWarnings += 1
+        governor.warning(now: CACurrentMediaTime())            // 12.20: a warning ALWAYS sheds (at least level shed)
+        refreshMemPlan(reason: "warning")
         var ev = MemoryProbe.fields()
         ev["recording"] = .bool(model.recording)
         ev["warnings"] = .int(model.memoryWarnings)
+        ev["level"] = .string(governor.level.label)
+        ev["shed"] = .string(model.memPlan.actions.joined(separator: ","))
         model.log.event("mem_warning", ev)
         if model.recording { evaluateCapturePolicy() }
+    }
+
+    // MARK: 12.20 memory governor
+
+    /// Once a second (HUD tick): footprint -> level -> plan; ARKit's own mesh over the plan's cap is reset.
+    private func memoryTick(_ t: TimeInterval) {
+        guard t - lastGovTick >= 1 else { return }
+        lastGovTick = t
+        let f = MemoryProbe.footprintMB(), a = MemoryProbe.availableMB()
+        governor.update(footprintMB: f, limitMB: f.flatMap { fv in a.map { fv + $0 } }, now: CACurrentMediaTime())
+        refreshMemPlan(reason: "footprint")
+        let p = model.memPlan
+        if Self.supportsMesh, !depthCapture, !meshShed, meshOverlay.vertexCount > p.arMeshVertexCap {
+            resetARMesh(reason: p.arMeshVertexCap == 0 ? governor.level.label : "cap")
+        }
+    }
+
+    /// Level / thermal / walking changed the plan: apply what is pushed (overlay caps, templates, probes, tiles).
+    func refreshMemPlan(reason: String) {
+        let p = MemPlan.plan(level: governor.level, thermal: ThermalLevel(label: model.thermal), walking: model.liveOn)
+        let old = model.memPlan
+        guard p != old else { return }
+        model.memPlan = p
+        meshOverlay.maxVertices = p.overlayMaxVertices
+        meshOverlay.keepRadius = Float(p.overlayRadiusM)
+        var dropped = 0
+        if simMade, p.simTemplates != .all, p.simTemplates != old.simTemplates || p.level > old.level {
+            dropped = sim.trimTemplates(p.simTemplates)
+            templatesDropped += dropped
+        }
+        var tiles = 0
+        if p.level == .critical, old.level < .critical {
+            tiles = mapLayer.tiles.trimUndrawn()
+            tilesDropped += tiles
+        }
+        if p.environmentProbes != old.environmentProbes, !depthCapture, started, !model.arSuspended { rerunConfiguration() }
+        guard p.level != old.level || p.thermal != old.thermal else { return }
+        var ev = MemoryProbe.fields()
+        ev["from"] = .string(old.level.label)
+        ev["level"] = .string(p.level.label)
+        ev["thermal"] = .string(model.thermal)
+        ev["reason"] = .string(reason)
+        ev["shed"] = .string(p.actions.joined(separator: ","))
+        ev["templates_dropped"] = .int(dropped)
+        ev["tiles_dropped"] = .int(tiles)
+        ev["warnings"] = .int(governor.warningCount)
+        model.log.event("mem_level", ev)
+    }
+
+    /// Free ARKit's scene reconstruction (its mesh + volume grow with the area walked); it rebuilds around you within
+    /// seconds. Our wire copies go with it. At most every 30 s, never while recording (that path freezes instead).
+    private func resetARMesh(reason: String) {
+        let now = CACurrentMediaTime()
+        guard started, !model.arSuspended, now - lastMeshReset >= 30 else { return }
+        lastMeshReset = now
+        meshResets += 1
+        var ev = MemoryProbe.fields()
+        ev["reason"] = .string(reason)
+        ev["mesh_vertices"] = .int(meshOverlay.vertexCount)
+        ev["mesh_anchors"] = .int(meshOverlay.count)
+        ev["cap"] = .int(model.memPlan.arMeshVertexCap)
+        ev["level"] = .string(governor.level.label)
+        ev["resets"] = .int(meshResets)
+        meshOverlay.removeAll()
+        applyRenderSettings()
+        arView.session.run(makeConfiguration(), options: [.resetSceneReconstruction])
+        model.log.event("ar_mesh_reset", ev)
+    }
+
+    /// Per-subsystem estimates for the `mem` log.
+    private func memAccount() -> MemAccount {
+        var a = MemAccount()
+        let tiles = mapLayer.tiles
+        a.set("tiles", Int(tiles.memMB * 1_048_576))
+        a.set("tile_masks", tiles.maskBytes)
+        let b = mapLayer.surface.bytes
+        a.set("device_surface", b.grid + b.faces)
+        a.set("live_tiles", model.liveMap.estimatedBytes)
+        a.set("layerb", model.blocks.estimatedBytes)
+        a.set("mesh_overlay", meshOverlay.estimatedBytes)
+        a.set("ar_mesh_est", meshOverlay.vertexCount * 48)      // ARKit's own mesh (estimate; its volume is extra)
+        return a
     }
 
     /// Adaptive recording policy (HUD tick + memory warnings). Main thread.
@@ -241,8 +345,31 @@ final class ARSessionController: NSObject, ARSessionDelegate {
         ev["thermal"] = .string(model.thermal)
         ev["recording"] = .bool(model.recording)
         ev["mesh_anchors"] = .int(meshOverlay.count)
-        ev["mesh_shed"] = .bool(meshShed)
+        // 12.20: true whenever mesh memory is being shed (recording freeze, ARKit mesh resets, overlay copies capped)
+        let overlayCapped = meshOverlay.maxVertices < MemPlan.overlayVertexCap[0]
+        ev["mesh_shed"] = .bool(meshShed || meshResets > 0 && CACurrentMediaTime() - lastMeshReset < 120 || overlayCapped)
+        ev["mesh_resets"] = .int(meshResets)
         ev["mesh_vertices"] = .int(meshOverlay.vertexCount)
+        ev["overlay_vertices"] = .int(meshOverlay.builtVertices)
+        ev["overlay_trimmed"] = .int(meshOverlay.trimmed)
+        ev["level"] = .string(governor.level.label)
+        ev["peak_level"] = .string(governor.peakLevel.label)
+        ev["shed"] = .string(model.memPlan.actions.joined(separator: ","))
+        ev["mem_warnings"] = .int(governor.warningCount)
+        ev["templates_dropped"] = .int(templatesDropped)
+        ev["tiles_dropped"] = .int(tilesDropped)
+        ev["tiles_lingering"] = .int(mapLayer.tiles.lingering)
+        ev["live_evicted"] = .int(model.liveMap.evicted)
+        ev["layerb_evicted"] = .int(model.blocks.evicted)
+        ev["device_pruned"] = .int(mapLayer.surface.prunedTotal)
+        if simMade { ev["sim_templates"] = .int(sim.templateCount) }
+        let acc = memAccount()
+        for (k, v) in acc.fields { ev[k] = v }
+        if let f = MemoryProbe.footprintMB() {
+            ev["mb_residual"] = .double(((f - acc.totalMB) * 10).rounded() / 10)
+            memTrend.add(t: CACurrentMediaTime(), mb: f)
+            if let sl = memTrend.slopeMBPerMin { ev["mb_per_min"] = .double((sl * 10).rounded() / 10) }
+        }
         if model.recording {
             let st = model.recStats
             ev["frames"] = .int(st.frames)
@@ -570,7 +697,7 @@ final class ARSessionController: NSObject, ARSessionDelegate {
         if !probes.points.isEmpty || probeText != nil { updateProbes(now: CACurrentMediaTime()) }   // 12.5 measure points
         model.cameraCheck.frame(frame)                   // 12.2 Camera check: localized pose → 2 Hz walk buffer
         renderer.updateBillboards(camera: Geo.position(frame.camera.transform))
-        meshOverlay.tick(now: t)
+        meshOverlay.tick(now: t, cam: Geo.position(frame.camera.transform))
         if lastMapping != frame.worldMappingStatus {
             lastMapping = frame.worldMappingStatus
             model.log.event("mapping", ["status": .string(Self.name(frame.worldMappingStatus))])
@@ -588,6 +715,7 @@ final class ARSessionController: NSObject, ARSessionDelegate {
         model.cameraCheck.tick()                         // 12.2 Camera check: pose batches + who sees me
         model.meshAnchors = meshOverlay.count
         evaluateCapturePolicy()
+        memoryTick(t)                                    // 12.20 memory governor (1 Hz)
         CameraTuner.shared.apply(reason: "tick")         // re-asserts the shutter cap after any session re-run
         if model.recording {                             // evidence: device exposure / ISO 1 s in, then every 30 s
             if !camLoggedThisRecording && model.recStats.elapsed >= 1 || t - lastCamLog >= 30 {
@@ -691,6 +819,7 @@ final class ARSessionController: NSObject, ARSessionDelegate {
             evaluateCapturePolicy()
         }
         refreshHeatBudget(reason: "thermal")
+        refreshMemPlan(reason: "thermal")                // 12.20: SERIOUS steps the expensive work down
     }
 
     static func thermalName(_ t: ThermalLevel) -> String {

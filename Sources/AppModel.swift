@@ -396,6 +396,8 @@ final class AppModel: ObservableObject {
         didSet { if oldValue && !showScans { scansClosed() } }
     }
     var memoryWarnings = 0                             // memory warnings during the current recording
+    /// 12.20: what may be held / done at the current memory level + thermal state (ARSessionController's governor).
+    var memPlan = MemPlan.plan(level: .normal, thermal: .nominal)
     @Published var uploads: [UploadItem] = [] { didSet { uploadsChanged(from: oldValue) } }
     @Published var uploadRate: Double?
     @Published var hiddenUploadPanel: String?          // capture id whose finished panel the user dismissed

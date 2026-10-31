@@ -33,6 +33,10 @@ final class LayerBClient {
     private var firstLogged = false
     private var drawnColour: MeshColour?
     private var shownLive: Bool?
+    /// 12.20: lag counts only frames that carry a NEWER capture for the tile (12.19 p50 39 s = a repeated old hw_wall).
+    private var freshLag = FreshLag()
+    private var lastEvict: TimeInterval = 0
+    private(set) var evicted = 0
 
     init(model: AppModel) { self.model = model }
 
@@ -63,7 +67,38 @@ final class LayerBClient {
             drawnColour = model.meshColour
             for k in full.keys { draw(k) }
         }
+        if now - lastEvict >= 2 { lastEvict = now; evictFar() }
         maybeLog()
+    }
+
+    // MARK: 12.20 memory: Layer B tiles near you only
+
+    var estimatedBytes: Int {
+        store.estimatedBytes + full.values.reduce(0) { $0 + ($1.mesh.positions.count + $1.mesh.indices.count) * 4 * 2 + ($1.rgb?.count ?? 0) }
+    }
+
+    private func evictFar() {
+        guard let c = layer.cameraMap, !store.tiles.isEmpty else { return }
+        let p = model.memPlan
+        let radius = max(p.layerBRadiusM, model.liveMap.bboxHalf * 1.42 + 4)
+        var lru = SpatialLRU<String>()
+        for k in store.tiles.keys { if let ce = store.centre(k) { lru.put(k, x: ce.x, y: ce.y, bytes: 0, now: 0) } }
+        let drop = lru.evictions(x: c[0], y: c[1], radius: radius, maxCount: p.layerBMaxTiles)
+        guard !drop.isEmpty else { return }
+        var changed = Set<BlockKey>()
+        for k in drop {
+            changed.formUnion(store.forget(k))
+            entities.removeValue(forKey: k)?.removeFromParent()
+            full[k] = nil
+            deviceMasks[k] = nil
+            freshLag.forget(k)
+            layer.surface.unregister(id: "blk|" + k)
+            evicted += 1
+        }
+        let sq = squares(of: changed, blockM: store.blockM)
+        layer.tiles.blocksChanged(squares: sq)
+        model.map3DBlocksChanged(squares: sq)
+        rev &+= 1
     }
 
     // MARK: frames
@@ -112,9 +147,9 @@ final class LayerBClient {
                 model.meshStore.applyLive(h, mesh: m.mesh, rgb: m.rgb, floorZ: nil, me: model.agentID)
             }
             if let w = f.hwWall {
-                let lag = (t - w) * 1000
-                if lag > -2000 && lag < 600_000 { stats.lagMs.append(max(0, lag)) }
-                if f.agents.contains(model.agentID) {                  // M0: our own keyframe reached the screen
+                let fresh = freshLag.lag(key: f.key, hwWall: w, now: t)
+                if let lag = fresh { stats.lagMs.append(lag) }
+                if fresh != nil, f.agents.contains(model.agentID) {                  // M0: our own keyframe reached the screen
                     model.liveStages.tileArrived(hwWall: w, now: t)
                     model.liveStages.tileDrawn(hwWall: w, now: now)
                     model.liveStagesChanged()
@@ -274,7 +309,8 @@ final class LayerBClient {
             "surface_blocks": .int(store.surfaceBlocks), "cubes": .int(store.blockCount),
             "build_ms": .double((stats.buildMs * 10).rounded() / 10),
             "lag_ms_p50": .double(l.isEmpty ? -1 : l[l.count / 2].rounded()),
-            "lag_ms_max": .double(l.last?.rounded() ?? -1),
+            "lag_ms_max": .double(l.last?.rounded() ?? -1), "lag_n": .int(l.count),
+            "evicted": .int(evicted), "mem_mb": .double((Double(estimatedBytes) / 1_048_576 * 10).rounded() / 10),
         ])
         stats = (0, 0, 0, 0, 0, 0, [])
     }

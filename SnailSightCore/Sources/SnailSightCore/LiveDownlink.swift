@@ -137,6 +137,9 @@ public struct LiveTileStore: Equatable {
         have = have.filter { $0.value.base >= v }
     }
 
+    /// 12.20: a tile released for memory: no longer held, so the server sends it again when it is back in the bbox.
+    public mutating func forget(layer: String, key: String) { have[layer + "|" + key] = nil }
+
     public func since(layer: String) -> [String: TileVer] {
         var out: [String: TileVer] = [:]
         for (k, v) in have where k.hasPrefix(layer + "|") { out[String(k.dropFirst(layer.count + 1))] = v }
