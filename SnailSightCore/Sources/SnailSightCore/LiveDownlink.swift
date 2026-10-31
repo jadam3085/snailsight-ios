@@ -212,8 +212,12 @@ public enum LiveMeshTile {
     public static let stripMaxWidth = 4096
 
     public static func faceTextured(_ m: FlatMesh, rgb: [UInt8]) -> FaceTextured? {
+        faceTextured(m, faceRGB: faceColours(m, rgb: rgb))
+    }
+
+    /// 12.21: the same strip from colours given per FACE (3 bytes each), e.g. LiveViewLook's shaded colours.
+    public static func faceTextured(_ m: FlatMesh, faceRGB fc: [UInt8]) -> FaceTextured? {
         let nt = m.triangleCount
-        let fc = faceColours(m, rgb: rgb)
         guard nt > 0, fc.count == nt * 3 else { return nil }
         let w = min(nt, stripMaxWidth), rows = (nt + w - 1) / w
         var pos = [Float](repeating: 0, count: nt * 9)

@@ -300,7 +300,12 @@ final class MemoryBudgetTests: XCTestCase {
 
     /// Footprint model per subsystem (MB). ARKit's own mesh cost is calibrated PESSIMISTICALLY from the 12.19 log:
     /// all residual growth between 41 s and 121 s (+594 MB) charged to its +347 k vertices = 1.7 KB a vertex.
-    func testSoakLongWalkPlateausUnderTarget() {
+    func testSoakLongWalkPlateausUnderTarget() { soak(overlay: false) }
+
+    /// 12.21: the same walk with Live map view on: live + Layer B tiles drawn solid (unwelded strip meshes, ~2x bytes).
+    func testSoakWithLiveMapViewOverlayPlateaus() { soak(overlay: true) }
+
+    func soak(overlay: Bool) {
         var gov = MemoryGovernor()
         var plan = MemPlan.plan(level: .normal, thermal: .nominal, walking: true)
         var live = SpatialLRU<String>(), layerB = LayerBStore()
@@ -326,7 +331,7 @@ final class MemoryBudgetTests: XCTestCase {
             let (x, y) = pos(t)
             // live downlink: ~1 tile / s inside ±12 m (12.19: 122 tiles in 120 s), ~100 KB each held
             let tx = Int(((x + Double((step * 7) % 25) - 12) / 4).rounded(.down)), ty = Int(((y + Double((step * 11) % 25) - 12) / 4).rounded(.down))
-            live.put("0/\(tx)/\(ty)", x: (Double(tx) + 0.5) * 4, y: (Double(ty) + 0.5) * 4, bytes: 100_000, now: t)
+            live.put("0/\(tx)/\(ty)", x: (Double(tx) + 0.5) * 4, y: (Double(ty) + 0.5) * 4, bytes: overlay ? 200_000 : 100_000, now: t)
             if step % 2 == 0 {
                 for k in live.evictions(x: x, y: y, radius: max(plan.liveRadiusM, 12 * 1.42 + 4), maxCount: plan.liveMaxTiles) { live.remove(k) }
             }
@@ -364,16 +369,17 @@ final class MemoryBudgetTests: XCTestCase {
             // live + Layer B + grid, our overlay copies (40 B a vertex), ARKit's mesh, sim templates
             let tilesMB = min(360.0, Double(plan.tileNearMB + plan.tileMidMB)) + 12
             let simMB: Double = plan.simTemplates == .all ? 150 : (plan.simTemplates == .inUse ? 60 : 0)
-            let overlay = Double(min(arVerts, plan.overlayMaxVertices)) * 40 / 1_048_576
-            let f = 500 + tilesMB + Double(live.totalBytes + layerB.estimatedBytes + grid.estimatedBytes) / 1_048_576
-                + overlay + Double(arVerts) * 1700 / 1_048_576 + simMB
+            let wireMB = Double(min(arVerts, plan.overlayMaxVertices)) * 40 / 1_048_576
+            let layerBDrawn = overlay ? layerB.estimatedBytes * 3 : layerB.estimatedBytes      // + solid strip meshes
+            let f = 500 + tilesMB + Double(live.totalBytes + layerBDrawn + grid.estimatedBytes) / 1_048_576
+                + wireMB + Double(arVerts) * 1700 / 1_048_576 + simMB
             foot.append(f)
             gov.update(footprintMB: f, limitMB: limit, now: t)
             plan = MemPlan.plan(level: gov.level, thermal: step > 600 ? .serious : .fair, walking: true)
         }
         let peak = foot.max()!
         let lastTen = foot.suffix(600), midTen = foot[600..<1200]
-        print(String(format: "soak: peak %.0f MB, min 10-20 max %.0f, min 20-30 max %.0f mean %.0f, peak level %@, resets %d, live %d, layerB %d, cells %d, sim re-download %d B",
+        print(String(format: "soak(overlay \(overlay)): peak %.0f MB, min 10-20 max %.0f, min 20-30 max %.0f mean %.0f, peak level %@, resets %d, live %d, layerB %d, cells %d, sim re-download %d B",
                      peak, midTen.max()!, lastTen.max()!, lastTen.reduce(0, +) / 600, gov.peakLevel.label, resets, live.count,
                      layerB.tiles.count, grid.count, syncBytesAfterFirst))
         XCTAssertLessThan(peak, gov.thresholds(limitMB: limit).critical, "peak \(Int(peak)) MB")

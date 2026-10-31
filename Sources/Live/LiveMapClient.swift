@@ -51,6 +51,8 @@ final class LiveMapClient {
     private var lastEvict: TimeInterval = 0
     private(set) var evicted = 0
     private var freshLag = FreshLag()
+    /// 12.21 Live map view: drawn solid + shaded (LiveViewLook), device masks ignored (the live surface is the point).
+    private var drawnLive: Bool?
     private var stats = (msgs: 0, tiles: 0, drawn: 0, changes: 0, docs: 0)
     private var lastStats: TimeInterval = 0
     private var downlinkAgentsAt: TimeInterval = 0
@@ -83,7 +85,7 @@ final class LiveMapClient {
     /// Downlink wanted: advertised (or forced) and some live layer is on.
     var downlinkWanted: Bool {
         model.serverFeatures.liveDownlink(forced: model.forceLiveDownlink) && model.serverBase != nil
-            && model.downlinkLayersOn && !model.showScans
+            && (model.downlinkLayersOn || model.liveMapView) && !model.showScans
     }
 
     /// 12.0: what the downlink subscribes to: the live layers, + the estimated world's tree events when the server has it.
@@ -132,9 +134,10 @@ final class LiveMapClient {
     func tick() {
         let t = now
         layer.agentNode.isEnabled = model.arAgents
-        layer.liveNode.isEnabled = model.drawMeshLive                   // 12.0 layers ▸ Mesh (live)
-        if drawnColour != model.meshColour {                       // 12.1 Layers ▸ Mesh colour switched: redraw
+        layer.liveNode.isEnabled = model.drawMeshLive || model.liveMapView      // 12.0 layers ▸ Mesh (live); 12.21 live view
+        if drawnColour != model.meshColour || drawnLive != model.liveMapView {   // 12.1 Mesh colour / 12.21 look: redraw
             drawnColour = model.meshColour
+            drawnLive = model.liveMapView
             for (k, d) in tileData { drawTile(key: k, mesh: d.mesh, rgb: d.rgb) }
         }
         restyleFresh()
@@ -370,7 +373,9 @@ final class LiveMapClient {
                 tileData[key] = (mesh, rgb)
                 liveMasks[key] = nil
                 if let sq = h.square {
-                    let geo: Int = (mesh.positions.count + mesh.indices.count) * 8
+                    let cpu: Int = (mesh.positions.count + mesh.indices.count) * 4
+                    let gpu: Int = model.liveMapView || model.meshColour == .photo ? mesh.triangleCount * 64 : cpu   // unwelded strip
+                    let geo: Int = cpu + gpu
                     let col: Int = (rgb?.count ?? 0) * 2
                     let cx: Double = (sq[0] + sq[2]) / 2, cy: Double = (sq[1] + sq[3]) / 2
                     lru.put(key, x: cx, y: cy, bytes: geo + col, now: now)
@@ -493,7 +498,7 @@ final class LiveMapClient {
     /// 12.12: a live tile is hidden where a textured house tile is drawn (unless something changed there), so the
     /// coarse live mesh no longer covers the better base texture (LiveOverBase).
     private func hideUnderBase() {
-        let covered = LiveOverBase.coveredLeaves(layer.tiles.drawnModelKeys)
+        let covered: Set<String> = model.liveMapView ? [] : LiveOverBase.coveredLeaves(layer.tiles.drawnModelKeys)   // 12.21: live wins
         let centres = changes.markers.map(\.center)
         let layerB = model.blocks.surfaceKeys                           // 12.18: Layer B supersedes the old live mesh
         var hidden = 0
@@ -510,6 +515,7 @@ final class LiveMapClient {
 
     /// The look of one tile: its photo strip in Photo mode (fresh = green tint), else the amber / fresh wire.
     private func material(key: String, step: Int) -> any RealityKit.Material {
+        if model.liveMapView, let tex = tilePhoto[key] { return Self.solidMaterial(tex) }      // 12.21 live view
         guard model.meshColour == .photo, let tex = tilePhoto[key] else { return Self.material(step: step) }
         return Self.photoMaterial(tex, step: step)
     }
@@ -523,6 +529,13 @@ final class LiveMapClient {
         d.tAddressMode = .clampToEdge
         return MaterialParameters.Texture.Sampler(d)
     }()
+
+    /// 12.21 Live map view: opaque, the shading is baked in the strip (LiveViewLook).
+    static func solidMaterial(_ tex: TextureResource) -> UnlitMaterial {
+        var m = UnlitMaterial()
+        m.color = .init(tint: .white, texture: .init(tex, sampler: nearest))
+        return m
+    }
 
     private static func photoMaterial(_ tex: TextureResource, step: Int) -> UnlitMaterial {
         var m = UnlitMaterial()
@@ -543,7 +556,7 @@ final class LiveMapClient {
 
     private func drawTile(key: String, mesh full: FlatMesh, rgb: [UInt8]?) {
         var m = full
-        if let mask = liveMasks[key], mask.count == full.triangleCount {      // 12.18: seen faces leave (device truth)
+        if !model.liveMapView, let mask = liveMasks[key], mask.count == full.triangleCount {   // 12.18: seen faces leave (device truth)
             var idx = [UInt32]()
             idx.reserveCapacity(full.indices.count)
             for f in 0..<mask.count where !mask[f] {
@@ -574,7 +587,10 @@ final class LiveMapClient {
     private func buildMesh(_ m: FlatMesh, rgb: [UInt8]?) -> (MeshResource, TextureResource?)? {
         var d = MeshDescriptor(name: "live")
         var tex: TextureResource?
-        if model.meshColour == .photo, let rgb, let ft = LiveMeshTile.faceTextured(m, rgb: rgb),
+        let live = model.liveMapView
+        let strip: LiveMeshTile.FaceTextured? = live ? LiveMeshTile.faceTextured(m, faceRGB: LiveViewLook.faceColours(m, rgb: rgb))
+            : (model.meshColour == .photo ? rgb.flatMap { LiveMeshTile.faceTextured(m, rgb: $0) } : nil)
+        if let ft = strip,
            let img = Self.stripImage(ft.rgba, w: ft.width, h: ft.rows),
            let t = try? TextureResource.generate(from: img, options: .init(semantic: .color, mipmapsMode: .none)) {
             var pos = [SIMD3<Float>](), uv = [SIMD2<Float>]()

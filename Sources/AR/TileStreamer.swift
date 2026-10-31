@@ -118,7 +118,20 @@ final class TileStreamer {
     var memMB: Double { Double(ledger.totalMem) / 1_048_576 }
     var drawnCount: Int { drawnKeys.count }
     /// 12.12: keys of the textured house tiles on screen (Model style only; Wire / Ghost let the live mesh show).
-    var drawnModelKeys: Set<String> { model.drawHouse == .model && node.isEnabled ? drawnKeys : [] }
+    var drawnModelKeys: Set<String> { effectiveStyle == .model && node.isEnabled ? drawnKeys : [] }
+
+    /// 12.21 Live map view: stored tiles are dimmed (the live map is the visible overlay); otherwise the chosen style.
+    private var effectiveStyle: HouseStyle {
+        let st = model.drawHouse
+        return model.liveMapView && (st == .model || st == .wire) ? .ghost : st
+    }
+
+    /// The AR look changed: restyle every tile now.
+    func restyle() {
+        styleApplied = nil
+        applyStyle()
+        remaskAll()
+    }
 
     // MARK: tick (main, every 0.5 s while the map is aligned)
 
@@ -438,7 +451,7 @@ final class TileStreamer {
         ledger.add(key, .init(hash: hash, mem: n.mem, near: n.size == TileSelect.LEAF_M))
         heldGen += 1
         disk.touch(hash, now: now)
-        style(key, model.drawHouse)
+        style(key, effectiveStyle)
         registerSurface(key: key, hash: hash, holder: holder)
         refresh()
         if loadMs > 1500 { model.log.event("tile_slow_load", ["key": .string(key), "ms": .int(Int(loadMs))]) }
@@ -491,7 +504,7 @@ final class TileStreamer {
     }
 
     private func applyStyle() {
-        let st = model.drawHouse
+        let st = effectiveStyle
         guard styleApplied != st else { return }
         styleApplied = st
         for k in entities.keys { style(k, st) }
@@ -500,7 +513,8 @@ final class TileStreamer {
     private func style(_ key: String, _ st: HouseStyle) {
         guard let list = originals[key] else { return }
         var over: RealityKit.Material?
-        if st == .wire { over = layer.wireMaterial } else if st == .ghost { over = layer.ghostMaterial }
+        if st == .wire { over = layer.wireMaterial }
+        else if st == .ghost { over = model.liveMapView ? layer.dimMaterial : layer.ghostMaterial }   // 12.21
         for (e, mats) in list {
             guard var mc = e.components[ModelComponent.self] else { continue }
             mc.materials = over.map { m in mats.map { _ in m } } ?? mats
@@ -546,7 +560,7 @@ final class TileStreamer {
         guard let fm = masks[key] else { return }
         if model.showMap3D { blockDirty.insert(key); return }     // 12.20 in-place masks: never while Map ▸ 3D clones
         var mask = deviceHidden[key] ?? []
-        if model.blocks.store.blockCount > 0, model.meshLive {
+        if model.blocks.store.blockCount > 0, model.meshLive || model.liveMapView {
             let b = model.blocks.store.hiddenFaces(centroids: fm.centroids)
             if b.count > 0 {
                 if mask.count != b.mask.count { mask = b.mask } else { for i in 0..<mask.count where b.mask[i] { mask[i] = true } }

@@ -353,6 +353,7 @@ final class ARSessionController: NSObject, ARSessionDelegate {
         ev["mesh_vertices"] = .int(meshOverlay.vertexCount)
         ev["overlay_vertices"] = .int(meshOverlay.builtVertices)
         ev["overlay_trimmed"] = .int(meshOverlay.trimmed)
+        ev["ar_look"] = .string(model.arLook.rawValue)                    // 12.21
         ev["level"] = .string(governor.level.label)
         ev["peak_level"] = .string(governor.peakLevel.label)
         ev["shed"] = .string(model.memPlan.actions.joined(separator: ","))

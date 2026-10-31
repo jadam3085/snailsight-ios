@@ -396,6 +396,9 @@ private struct CategorySection: View {
             Section(section.title) {
                 Button { model.showLayers = true } label: { Label("Layers…", systemImage: "square.3.layers.3d") }
                 Button { model.openMap() } label: { Label("Map", systemImage: "map") }
+                Picker(selection: $model.arLook) {                        // 12.21 (also one tap on the right rail)
+                    ForEach(ARLook.allCases) { Text($0.short).tag($0) }
+                } label: { Label("AR view", systemImage: model.arLook.symbol) }
                 Picker(selection: $model.meshStyle) {
                     ForEach(MeshStyle.allCases) { Text($0.rawValue).tag($0) }
                 } label: { Label("LiDAR mesh style", systemImage: "square.grid.3x3") }

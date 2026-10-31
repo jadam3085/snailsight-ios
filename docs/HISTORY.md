@@ -523,3 +523,18 @@ footprint from 502 to 3184 MB of a 3376 MB limit; 38 memory warnings shed nothin
 - Layer B / live tile lag counts only frames with a newer `hw_wall` (12.19's 39 s p50 was a repeated stamp).
 - Tests: `MemoryBudgetTests` (governor, plan monotone, SpatialLRU, grid prune, sim thrash old vs new, the real session's
   footprint replay: shed at 31 s, 55 s before iOS's first warning; a 30 min walk soak that plateaus at ~1.5 GB).
+
+**12.21 (warm on open + Live map view, owner requests 2026-10-31)**:
+- **Warm on open**: the server's background keep-warm is off (battlestation memory), so the app calls
+  `POST /v1/localizer/warm` (API §5.6e) fire-and-forget on launch, on foreground and when Live map turns on, at most
+  once per 60 s (core `WarmDebounce`; a failed send may retry on the next trigger). The engines page in (~2-5 s) before
+  the first localize of a walk. Log `loc_warm` {reason, status, the answer's fields, ms}.
+- **Live map view** (owner: "Is it possible for me to see the overlay of that live map in the app instead of the current
+  visual?"): one tap on the right rail (also View ▸ AR view), remembered, switches between the 12.18 look (camera +
+  device surface) and the server's live world as the visible overlay: Layer B surface + live downlink mesh drawn SOLID
+  and SHADED (core `LiveViewLook`: teal floors, amber walls, violet ceilings, two-sided Lambert with ambient 0.42, 35 %
+  of the photo colour as a texture cue; tested for chroma and distance from the portal's pale blue), opaque unlit
+  strips (no custom shader). Device-surface masks no longer hide live / Layer B faces in this view (base faces still
+  hidden where seen and inside Layer B cubes); stored base tiles are a dim 16 % grey veil; live tiles are not hidden
+  under base tiles. The downlink runs while the view is on even with Mesh (live) off. Logs `ar_look` {look, from};
+  `mem` carries `ar_look`. Budgets unchanged (12.20 SpatialLRU); the 30 min soak with the overlay on plateaus the same.

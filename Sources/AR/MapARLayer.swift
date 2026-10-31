@@ -124,6 +124,18 @@ final class MapARLayer {
         return m
     }()
 
+    /// 12.21 Live map view: stored tiles as a dim neutral veil under the solid live surface.
+    lazy var dimMaterial: UnlitMaterial = {
+        var m = UnlitMaterial(color: UIColor(white: 0.55, alpha: 1))
+        m.blending = .transparent(opacity: 0.16)
+        return m
+    }()
+
+    /// 12.21: Camera + device surface <-> Live map view.
+    func lookChanged() {
+        tiles.restyle()
+    }
+
     init(model: AppModel, arView: ARView) {
         self.model = model
         self.arView = arView

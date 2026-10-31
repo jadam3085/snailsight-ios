@@ -272,6 +272,17 @@ private struct RightRail: View {
                         .accessibilityHidden(true)
                 }
             }
+            // 12.21 one tap: Camera + device surface <-> Live map view (the server's live world drawn solid)
+            railButton(model.arLook.toggled.symbol, model.arLook == .live ? "Camera view" : "Live map view",
+                       "Switch between the camera with your device surface and the server's live map drawn solid") {
+                model.arLook = model.arLook.toggled
+                model.flash(model.arLook == .live ? "Live map view: the server's live world, solid" : "Camera view: the room as your phone sees it")
+            }
+            .overlay(alignment: .topTrailing) {
+                if model.arLook == .live {
+                    Circle().fill(Color.orange).frame(width: 9, height: 9).offset(x: -3, y: 3).accessibilityHidden(true)
+                }
+            }
             Menu {
                 Picker("Tap tool", selection: $model.tool) {
                     ForEach(ToolMode.allCases) { t in Label(t.rawValue, systemImage: ToolIcons.icon(t)).tag(t) }

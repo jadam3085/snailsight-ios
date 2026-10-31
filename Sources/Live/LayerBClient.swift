@@ -35,6 +35,7 @@ final class LayerBClient {
     private var shownLive: Bool?
     /// 12.20: lag counts only frames that carry a NEWER capture for the tile (12.19 p50 39 s = a repeated old hw_wall).
     private var freshLag = FreshLag()
+    private var drawnLive: Bool?
     private var lastEvict: TimeInterval = 0
     private(set) var evicted = 0
 
@@ -58,13 +59,15 @@ final class LayerBClient {
 
     /// The AR tick (2 Hz): Mesh colour / Mesh (live) switches.
     func tick() {
-        layer.blockNode.isEnabled = model.drawMeshLive
-        if shownLive != model.meshLive {
-            shownLive = model.meshLive
+        layer.blockNode.isEnabled = model.drawMeshLive || model.liveMapView        // 12.21 live view shows it
+        let on = model.meshLive || model.liveMapView
+        if shownLive != on {
+            shownLive = on
             layer.tiles.remaskAll()                                    // Layer B off = base everywhere again
         }
-        if drawnColour != model.meshColour {
+        if drawnColour != model.meshColour || drawnLive != model.liveMapView {
             drawnColour = model.meshColour
+            drawnLive = model.liveMapView
             for k in full.keys { draw(k) }
         }
         if now - lastEvict >= 2 { lastEvict = now; evictFar() }
@@ -223,13 +226,14 @@ final class LayerBClient {
     private func draw(_ key: String) {
         guard let f = full[key] else { return }
         var m = f.mesh
-        if let mask = deviceMasks[key], mask.count == m.triangleCount {
+        if !model.liveMapView, let mask = deviceMasks[key], mask.count == m.triangleCount {   // 12.21: live view shows all
             var idx = [UInt32]()
             idx.reserveCapacity(m.indices.count)
             for i in 0..<mask.count where !mask[i] { idx.append(m.indices[i * 3]); idx.append(m.indices[i * 3 + 1]); idx.append(m.indices[i * 3 + 2]) }
             m = FlatMesh(positions: m.positions, indices: idx)
         }
-        guard m.triangleCount > 0, let ent = Self.entity(m, rgb: f.rgb, photo: model.meshColour == .photo) else {
+        guard m.triangleCount > 0,
+              let ent = Self.entity(m, rgb: f.rgb, photo: model.meshColour == .photo, live: model.liveMapView) else {
             entities.removeValue(forKey: key)?.removeFromParent()
             return
         }
@@ -240,10 +244,13 @@ final class LayerBClient {
     }
 
     /// One tile's surface as an entity: flat photo colour per triangle (one texel each) or the wire look.
-    static func entity(_ m: FlatMesh, rgb: [UInt8]?, photo: Bool) -> ModelEntity? {
+    static func entity(_ m: FlatMesh, rgb: [UInt8]?, photo: Bool, live: Bool = false) -> ModelEntity? {
         var d = MeshDescriptor(name: "layerb")
         var mat: any RealityKit.Material = wire
-        if photo, let rgb, let ft = LiveMeshTile.faceTextured(m, rgb: rgb), let img = stripImage(ft.rgba, w: ft.width, h: ft.rows),
+        // 12.21 Live map view: solid + shaded high-contrast faces (LiveViewLook); else photo strip or the blue wire
+        let strip: LiveMeshTile.FaceTextured? = live ? LiveMeshTile.faceTextured(m, faceRGB: LiveViewLook.faceColours(m, rgb: rgb))
+            : (photo ? rgb.flatMap { LiveMeshTile.faceTextured(m, rgb: $0) } : nil)
+        if let ft = strip, let img = stripImage(ft.rgba, w: ft.width, h: ft.rows),
            let tex = try? TextureResource.generate(from: img, options: .init(semantic: .color, mipmapsMode: .none)) {
             var pos = [SIMD3<Float>](), uv = [SIMD2<Float>]()
             var i = 0
@@ -289,8 +296,8 @@ final class LayerBClient {
     func map3DSources() -> [Entity] {
         full.compactMap { k, f in
             guard f.mesh.triangleCount > 0 else { return nil }
-            if deviceMasks[k] == nil, let e = entities[k] { return e.clone(recursive: true) }
-            return Self.entity(f.mesh, rgb: f.rgb, photo: model.meshColour == .photo)
+            if deviceMasks[k] == nil || model.liveMapView, let e = entities[k] { return e.clone(recursive: true) }
+            return Self.entity(f.mesh, rgb: f.rgb, photo: model.meshColour == .photo, live: model.liveMapView)
         }
     }
 

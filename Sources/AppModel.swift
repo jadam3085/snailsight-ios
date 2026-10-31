@@ -158,7 +158,12 @@ final class AppModel: ObservableObject {
     @Published var meshMapLive = false
     @Published var showSettings = false
     /// 10.0 Live map (Sources/Live/LiveStreamer, API §6b): stream keyframes to the map server while on. Off at launch.
-    @Published var liveOn = false { didSet { if liveOn != oldValue { liveStreamer.setEnabled(liveOn) } } }
+    @Published var liveOn = false {
+        didSet {
+            if liveOn != oldValue { liveStreamer.setEnabled(liveOn) }
+            if liveOn && !oldValue { warmLocalizer(reason: "live_on") }        // 12.21
+        }
+    }
     @Published var liveRateHz: Double = LiveGate.clampRate(UserDefaults.standard.object(forKey: "live.rateHz") as? Double ?? 2) {
         didSet {
             UserDefaults.standard.set(liveRateHz, forKey: "live.rateHz")
@@ -398,6 +403,56 @@ final class AppModel: ObservableObject {
     var memoryWarnings = 0                             // memory warnings during the current recording
     /// 12.20: what may be held / done at the current memory level + thermal state (ARSessionController's governor).
     var memPlan = MemPlan.plan(level: .normal, thermal: .nominal)
+    /// 12.21 AR look: Camera + device surface (12.18) or Live map view (the server's live world drawn solid). One tap on
+    /// the right rail, remembered.
+    @Published var arLook: ARLook = ARLook(rawValue: UserDefaults.standard.string(forKey: "view.arLook") ?? "") ?? .device {
+        didSet {
+            guard arLook != oldValue else { return }
+            UserDefaults.standard.set(arLook.rawValue, forKey: "view.arLook")
+            log.event("ar_look", ["look": .string(arLook.rawValue), "from": .string(oldValue.rawValue)])
+            controller.mapLayer.lookChanged()
+        }
+    }
+    /// The live map is the visible overlay now (and the 3D world is shown).
+    var liveMapView: Bool { arLook == .live && worldOn }
+    private var warmGate = WarmDebounce(minS: 60)
+
+    /// 12.21 warm on open (API §5.6e): the server pages its localizer engines in, in the background, so the first
+    /// localize of a walk is fast. Fire-and-forget, ≤ once per 60 s; log loc_warm with the answer.
+    func warmLocalizer(reason: String) {
+        guard let link else { return }
+        let now = Date().timeIntervalSince1970
+        guard warmGate.shouldFire(now: now) else { return }
+        let t0 = Date()
+        Task { [weak self] in
+            var ev: [String: LogValue] = ["reason": .string(reason)]
+            do {
+                let (d, st) = try await link.request("POST", "/v1/localizer/warm", body: Data("{}".utf8), timeout: 10)
+                ev["status"] = .int(st)
+                if let o = try? JSONSerialization.jsonObject(with: d) as? [String: Any] {
+                    for (k, v) in o.prefix(12) {
+                        if let n = v as? NSNumber {
+                            let isBool = CFGetTypeID(n) == CFBooleanGetTypeID()
+                            let lv: LogValue = isBool ? LogValue.bool(n.boolValue) : LogValue.double(n.doubleValue)
+                            ev[k] = lv
+                        }
+                        else if let s = v as? String { ev[k] = .string(String(s.prefix(120))) }
+                    }
+                } else {
+                    ev["body"] = .string(String(decoding: d.prefix(200), as: UTF8.self))
+                }
+            } catch {
+                ev["error"] = .string(error.localizedDescription)
+            }
+            ev["ms"] = .int(Int(Date().timeIntervalSince(t0) * 1000))
+            let failed = ev["error"] != nil
+            await MainActor.run {
+                guard let self else { return }
+                if failed { self.warmGate.failed() }
+                self.log.event("loc_warm", ev)
+            }
+        }
+    }
     @Published var uploads: [UploadItem] = [] { didSet { uploadsChanged(from: oldValue) } }
     @Published var uploadRate: Double?
     @Published var hiddenUploadPanel: String?          // capture id whose finished panel the user dismissed
@@ -567,6 +622,7 @@ final class AppModel: ObservableObject {
             let items = await q.current()
             await MainActor.run { self.uploads = items }
             await self.link.probe(force: true)
+            await MainActor.run { self.warmLocalizer(reason: "launch") }       // 12.21 warm on open
             await q.kick(reason: "launch")
         }
         timer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in self?.periodicSync() }
@@ -588,6 +644,7 @@ final class AppModel: ObservableObject {
             Task {
                 await self.link.probe(force: true)
                 await MainActor.run {                       // the server answered again (or still not): resume again
+                    self.warmLocalizer(reason: "foreground")                 // 12.21
                     if self.serverBase != nil { self.mapLocalizer.resume(why: "network") }
                 }
                 await q.kick(reason: "foreground")
