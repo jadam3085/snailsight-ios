@@ -500,3 +500,26 @@ already done under live map?)" and "settings is a long scroll down from Near you
   cannot run silently inside Live map: `RoomCaptureSession(arSession:)` shares our ARSession but re-runs it with its own
   configuration (12.18 log: the LiDAR mesh fell from 88 to 11 anchors after a 1.3 s scan), so it stays an explicit,
   optional step. Tap the HUD "Room scan" line to stop. Logs `roomscan_start` + live/mesh_anchors, `roomscan_mesh_after`.
+
+**12.20 (memory governor, owner report on 12.19.305: "I was walking but then it looked like it crashed")**: an iOS
+memory kill (jetsam), not a code crash: 130 s of walking with Live map, the sim, Mesh and the device surface on took the
+footprint from 502 to 3184 MB of a 3376 MB limit; 38 memory warnings shed nothing (shedding existed only while recording).
+- **MemoryGovernor + MemPlan** (core `MemoryBudget.swift`, `ARSessionController`): footprint / limit every second and every
+  memory warning → level normal · trim (≥ 85 % of the 1.8 GB target) · shed (≥ 1.8 GB or any warning) · critical
+  (≥ 2.4 GB / 75 % of the limit, or 3 warnings a minute), raised at once, lowered one step after 20 s clearly under. The
+  plan (also stepped down at thermal SERIOUS) sets every budget: base tiles 300/120 → 90/0 MB, live mesh and Layer B
+  tiles near you only (SpatialLRU, 24 → 10 m, 64 → 16 tiles; forgotten tiles are resent on return), device-surface
+  cells 800 k → 100 k with a spatial prune (hidden faces stay hidden), our wire copies 400 k → 0 vertices (far anchors
+  first), ARKit's own reconstruction reset over 600 k → 250 k vertices (it rebuilds around you), environment probes off
+  while walking, sim templates all → in use → none. `mem` logs `level`, `shed`, `mb_*` per subsystem, `mb_residual`,
+  `mb_per_min`, `mesh_shed` (now true while mesh memory is shed); `mem_level` on every change; `ar_mesh_reset`.
+- **Sim blob cache thrash** (the 1.39 GB of disk writes): items that were merely not cached were ranked "changed" and
+  fetched over the 600 MB budget, so every catalog sync re-downloaded what the previous one evicted (~340 MB a sync,
+  one `sim_content_swap` per blob). Only real changes of exposed items (`SimBlobCache.mustFetch`) may exceed the budget,
+  and items go live once at the end (spawned kinds at once).
+- **Tile face masks in place**: `TileFaceMask` no longer keeps a CPU copy of each tile's mesh nor draws a second generated
+  mesh; AR tiles rewrite their own MeshResource (`replace(with:)`). Per-tile mask rebuild spacing (1 s, 4 s at SERIOUS).
+- Unwanted base tiles linger 20 s (≤ 60 MB) instead of reloading at band edges (12.19: 98 reloads in 130 s).
+- Layer B / live tile lag counts only frames with a newer `hw_wall` (12.19's 39 s p50 was a repeated stamp).
+- Tests: `MemoryBudgetTests` (governor, plan monotone, SpatialLRU, grid prune, sim thrash old vs new, the real session's
+  footprint replay: shed at 31 s, 55 s before iOS's first warning; a 30 min walk soak that plateaus at ~1.5 GB).
