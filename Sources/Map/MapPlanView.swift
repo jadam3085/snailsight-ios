@@ -187,6 +187,7 @@ struct MapPlanView: View {
         drawRooms(&g, level: shownLevel)
         if model.drawDoors { drawDoors(&g, level: shownLevel) }
         if model.showCameras { drawCameras(&g, level: shownLevel) }
+        drawIslands(&g, size: size)                                     // 12.22 islands at their lat/lon
         if model.arAgents { drawAgents(&g) }
         drawBodies(&g)
         drawMe(&g)
@@ -262,6 +263,57 @@ struct MapPlanView: View {
             g.fill(Path(roundedRect: CGRect(x: p.x - 9, y: p.y - 7, width: 18, height: 14), cornerRadius: 3),
                    with: .color(Color(white: 0.25)))
             g.draw(Image(systemName: c.kind == "camera" ? "video.fill" : "sensor.fill"), in: CGRect(x: p.x - 6, y: p.y - 5, width: 12, height: 10))
+        }
+    }
+
+    /// 12.22 islands: outlines (house frame, placed at their lat/lon when approximate) dashed when approximate, solid
+    /// when joined by geometry; the walked path inside; one off screen gets an edge chevron with its distance.
+    private func drawIslands(_ g: inout GraphicsContext, size: CGSize) {
+        let blue = Color(red: 0.45, green: 0.62, blue: 1)
+        let box = CGRect(origin: .zero, size: size)
+        let me = layer.cameraMap
+        for o in model.islands.outlines where o.points.count >= 3 {
+            var poly = Path()
+            for (i, q) in o.points.enumerated() {
+                if i == 0 { poly.move(to: pt(q[0], q[1])) } else { poly.addLine(to: pt(q[0], q[1])) }
+            }
+            poly.closeSubpath()
+            let c = o.centre
+            let cp = pt(c[0], c[1])
+            if poly.boundingRect.intersects(box) {
+                g.fill(poly, with: .color(blue.opacity(o.mine ? 0.16 : 0.08)))
+                g.stroke(poly, with: .color(blue.opacity(0.9)),
+                         style: StrokeStyle(lineWidth: o.mine ? 2.5 : 1.5, dash: o.dashed ? [6, 4] : []))
+                if o.path.count >= 2 {
+                    var path = Path()
+                    for (i, q) in o.path.enumerated() {
+                        if i == 0 { path.move(to: pt(q[0], q[1])) } else { path.addLine(to: pt(q[0], q[1])) }
+                    }
+                    g.stroke(path, with: .color(blue.opacity(0.55)), lineWidth: 1)
+                }
+                g.draw(Text(o.label).font(.caption2).foregroundColor(blue), at: CGPoint(x: cp.x, y: poly.boundingRect.minY - 8))
+            } else {
+                // edge chevron towards it, with the distance from you (or the plan centre)
+                let mid = CGPoint(x: size.width / 2, y: size.height / 2)
+                let dx = Double(cp.x - mid.x), dy = Double(cp.y - mid.y)
+                let len = max(1e-6, hypot(dx, dy))
+                let ux = dx / len, uy = dy / len
+                let inset = 28.0
+                let sx = ux != 0 ? (Double(size.width) / 2 - inset) / abs(ux) : .infinity
+                let sy = uy != 0 ? (Double(size.height) / 2 - inset) / abs(uy) : .infinity
+                let k = min(sx, sy)
+                let e = CGPoint(x: mid.x + CGFloat(ux * k), y: mid.y + CGFloat(uy * k))
+                var tri = Path()
+                tri.move(to: CGPoint(x: e.x + CGFloat(ux * 10), y: e.y + CGFloat(uy * 10)))
+                tri.addLine(to: CGPoint(x: e.x - CGFloat(uy * 7), y: e.y + CGFloat(ux * 7)))
+                tri.addLine(to: CGPoint(x: e.x + CGFloat(uy * 7), y: e.y - CGFloat(ux * 7)))
+                tri.closeSubpath()
+                g.fill(tri, with: .color(blue.opacity(0.9)))
+                let from = me ?? [Double(t.center.x), Double(t.center.y)]
+                let d = hypot(c[0] - from[0], c[1] - from[1])
+                g.draw(Text(o.label + " · " + IslandPillNote.metres(d)).font(.caption2).foregroundColor(blue),
+                       at: CGPoint(x: e.x - CGFloat(ux * 22), y: e.y - CGFloat(uy * 22)))
+            }
         }
     }
 

@@ -160,7 +160,11 @@ final class AppModel: ObservableObject {
     /// 10.0 Live map (Sources/Live/LiveStreamer, API §6b): stream keyframes to the map server while on. Off at launch.
     @Published var liveOn = false {
         didSet {
-            if liveOn != oldValue { liveStreamer.setEnabled(liveOn) }
+            if liveOn != oldValue {
+                geo.setEnabled(liveOn)                                          // 12.22 GPS / compass / baro priors
+                islands.liveChanged(liveOn)
+                liveStreamer.setEnabled(liveOn)
+            }
             if liveOn && !oldValue { warmLocalizer(reason: "live_on") }        // 12.21
         }
     }
@@ -474,6 +478,10 @@ final class AppModel: ObservableObject {
     private(set) lazy var navStore = NavLayerClient(model: self)
     /// 12.18 Layer B: live block-mesh deltas (server Layer B wire, API §6b).
     private(set) lazy var blocks = LayerBClient(model: self)
+    /// 12.22 GPS / compass / barometer as weak priors in every live keyframe (API §6b.13 `geo`).
+    private(set) lazy var geo = GeoSensor(model: self)
+    /// 12.22 islands: new areas mapped in their own frames, joined later (API §6b.13).
+    private(set) lazy var islands = IslandsClient(model: self)
     /// 12.18 Map ▸ 3D tile loader while the viewer is open (Layer B cube changes re-mask its base tiles).
     weak var map3DTiles: Map3DTileLoader?
     /// 12.18 M0: server stage timestamps (uplink acks) + this phone's receive / draw of its own keyframes.

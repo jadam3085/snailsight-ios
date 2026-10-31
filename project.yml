@@ -33,6 +33,9 @@ targets:
         NSCameraUsageDescription: "SnailSight uses the camera and LiDAR for world-locked AR and scanning."
         NSLocalNetworkUsageDescription: "SnailSight uploads logs and room captures to your map server on the home network."
         NSMotionUsageDescription: "SnailSight records the motion sensors with a room capture so the map server can build an accurate map."
+        NSLocationWhenInUseUsageDescription: "While Live map runs, SnailSight adds your approximate location and compass heading to what it sends your own map server, so walks in new areas can be placed roughly and joined to the house map later. It is never used while Live map is off."
+        NSLocationTemporaryUsageDescriptionDictionary:
+          LiveMap: "Precise location places a newly mapped area within a few metres instead of a few hundred."
         NSAppTransportSecurity:
           NSAllowsArbitraryLoads: true
         UILaunchScreen: {}

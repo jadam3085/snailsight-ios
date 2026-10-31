@@ -134,6 +134,10 @@ public struct MemPlan: Equatable {
     public var liveMaxTiles: Int
     public var layerBRadiusM: Double
     public var layerBMaxTiles: Int
+    // 12.22 islands: live feeds of other frames (the island you are in first), and their mesh tiles in total
+    public var islandMaxMaps: Int
+    public var islandMaxTiles: Int
+    public var islandRadiusM: Double
     // device surface
     public var deviceCellsMax: Int
     public var deviceKeepRadiusM: Double
@@ -166,6 +170,8 @@ public struct MemPlan: Equatable {
                         tileConcurrent: [3, 3, 2, 1][i],
                         liveRadiusM: [24, 18, 14, 10][i], liveMaxTiles: [64, 40, 28, 16][i],
                         layerBRadiusM: [24, 18, 14, 10][i], layerBMaxTiles: [64, 40, 28, 16][i],
+                        islandMaxMaps: [3, 2, 1, 1][i], islandMaxTiles: [48, 32, 16, 8][i],
+                        islandRadiusM: [40, 30, 20, 12][i],
                         deviceCellsMax: [800_000, 400_000, 200_000, 100_000][i],
                         deviceKeepRadiusM: [15, 10, 8, 6][i],
                         deviceEveryS: [0.4, 0.4, 0.8, 1.6][i],
@@ -193,6 +199,7 @@ public struct MemPlan: Equatable {
         if tileLingerS == 0 && n.tileLingerS > 0 { a.append("tile_linger_off") }
         if simTemplates != .all { a.append(simTemplates == .none ? "sim_templates_all" : "sim_templates_unused") }
         if liveMaxTiles < n.liveMaxTiles { a.append("live_tiles_\(liveMaxTiles)") }
+        if islandMaxTiles < n.islandMaxTiles { a.append("island_tiles_\(islandMaxMaps)x\(islandMaxTiles)") }
         if tileNearMB < n.tileNearMB { a.append("tiles_\(tileNearMB)_\(tileMidMB)mb") }
         if deviceCellsMax < n.deviceCellsMax { a.append("device_cells_\(deviceCellsMax / 1000)k") }
         if overlayMaxVertices < n.overlayMaxVertices { a.append(overlayMaxVertices == 0 ? "overlay_off" : "overlay_\(overlayMaxVertices / 1000)k") }

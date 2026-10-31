@@ -743,6 +743,10 @@ final class Map3DOverlays {
     /// 12.18 Layer A (robot obstacles) and Layer B (live block mesh): clones of the AR entities.
     private let navClones = mapFrameHolder("map3d.nav")
     private let blockClones = mapFrameHolder("map3d.blocks")
+    /// 12.22 islands: every placed island's live tiles through T_house_frame (approximate ones faint).
+    private let islandClones = mapFrameHolder("map3d.islands")
+    private var islandRev = -1
+    private var lastIslandClone: TimeInterval = 0
     private var navRev = -1
     private var blockRev = -1
     private let cameraNode = Entity()
@@ -770,7 +774,7 @@ final class Map3DOverlays {
         self.model = model
         self.data = data
         root.name = "map3d.overlays"
-        for n in [live, terrain, doorNode, cameraNode, treeNode, bodyNode, routeNode, navClones, blockClones] { root.addChild(n) }
+        for n in [live, terrain, doorNode, cameraNode, treeNode, bodyNode, routeNode, navClones, blockClones, islandClones] { root.addChild(n) }
         let sun = DirectionalLight()
         sun.light.intensity = 2500
         sun.shadow = DirectionalLightComponent.Shadow(maximumDistance: 40, depthBias: 2)   // 12.16 clean look: shadows
@@ -786,7 +790,8 @@ final class Map3DOverlays {
     var bodyCount: Int { bodies.count }
 
     func clear() {
-        for n in [live, terrain, doorNode, cameraNode, treeNode, bodyNode, routeNode, navClones, blockClones] { n.children.removeAll() }
+        for n in [live, terrain, doorNode, cameraNode, treeNode, bodyNode, routeNode, navClones, blockClones, islandClones] { n.children.removeAll() }
+        islandRev = -1
         navRev = -1
         blockRev = -1
         doorRev = -1
@@ -840,6 +845,14 @@ final class Map3DOverlays {
             blockRev = model.blocks.rev
             blockClones.children.removeAll()
             for c in model.blocks.map3DSources() { blockClones.addChild(c) }
+        }
+        // 12.22 islands: the AR session is paused while Map 3D is open, so the island feeds tick from here
+        model.islands.tick()
+        if model.islands.rev != islandRev, t - lastIslandClone >= 2 {
+            lastIslandClone = t
+            islandRev = model.islands.rev
+            islandClones.children.removeAll()
+            for c in model.islands.map3DSources() { islandClones.addChild(c) }
         }
         doorNode.isEnabled = model.drawDoors
         if model.drawDoors {

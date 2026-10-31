@@ -538,3 +538,41 @@ footprint from 502 to 3184 MB of a 3376 MB limit; 38 memory warnings shed nothin
   hidden where seen and inside Layer B cubes); stored base tiles are a dim 16 % grey veil; live tiles are not hidden
   under base tiles. The downlink runs while the view is on even with Mesh (live) off. Logs `ar_look` {look, from};
   `mem` carries `ar_look`. Budgets unchanged (12.20 SpatialLRU); the 30 min soak with the overlay on plateaus the same.
+
+**12.22 (islands + GPS weak priors, server live 0.10, API §6b.13, owner question 2026-10-31: "exploring in totally
+different areas ... eventually joined by a separate walk?")**:
+- **`geo` per live keyframe** (`GeoSensor`, core `GeoPrior.swift`): CoreLocation lat / lon / altitude with their
+  accuracies (fixes > 100 m, invalid or > 10 s old are not sent), the TRUE heading of the camera's optical axis with its
+  accuracy, the barometer's relative altitude (`baro_rel_m`), `t` = the fix time, `source: "phone"`.
+  - Heading: CoreMotion's `xTrueNorthZVertical` attitude gives the back-camera axis vs true north; ARKit gives the
+    same axis' yaw; core `GeoHeading` keeps the offset (circular mean over 60 s, samples only while turning slowly and
+    with a calibrated magnetometer) and a keyframe's heading = its ARKit yaw + offset. Accuracy = max(5 deg floor,
+    magnetometer calibration, the offsets' circular spread). The attitude matrix direction is chosen by gravity
+    (logged `geo_heading_conv`).
+  - Permission: when-in-use, asked when Live map first starts (purpose string), temporary precise location asked once
+    when only approximate was granted. Battery: best accuracy only while Live map is on; the attitude is pulled at
+    10 Hz; everything stops at Live map off.
+  - **ARKit geo tracking**: `checkAvailability(at:)` at the current fix (once per km), logged `geo_tracking_available`
+    {supported, available, use, why}. Decision: NOT used during Live map: it is a separate configuration, so it means
+    re-running the shared ARSession (a new ARKit world, the LiDAR mesh reset, no scene reconstruction), and Apple's
+    imagery is street-level only. Revisit as an explicit outdoor calibrate step if the logs show availability where the
+    owner walks.
+- **Islands** (`IslandsClient`, core `Islands.swift`):
+  - World from `GET /v1/live/islands` (Live map / Map open, every 30 s, at once when an ack or message names a newer
+    revision) and `{"type": "islands"}` revisions on the base downlink and every island feed (stale revisions ignored).
+  - Pill: `ack.islands` -> "NEW AREA · island ‹ab12cd› · approx ±6 m" / "· joined to the house" / "· location
+    unknown", "NEW AREA · joining island ‹…›" while the stream is not placed yet, and before any island exists
+    "NEW AREA · ~1.6 km from the house · mapping" when GPS puts the phone > 80 m (+ 3 sigma) from the house datum.
+    The house lock always wins. Logs `island_state`, `island_pill`, `islands_world`.
+  - Tiles: up to `MemPlan.islandMaxMaps` island feeds (3/2/1/1 by memory level: the island you are in first, then exact
+    islands near you with the house lock, then placed ones while a Map is open), WebSocket corrections + mesh, tiles
+    ≤ `islandMaxTiles` (48/32/16/8) in total with the island you are in keeping half near you.
+    AR: the island you are in draws in its own frame (its feed's correction of this stream, `island_frame`); islands of
+    the same component chain through it; with the house lock exact islands go through `T_house_frame`; approximate
+    islands never in AR. Map 3D: every placed island through `T_house_frame`, approximate ones faint. Island tiles are a
+    cool blue wire (photo / Live map view looks as the house's live tiles). `mem` carries `mb_islands`.
+  - 2D Map: outlines (box + walked path) at their lat/lon (island datum -> WGS84 -> house datum) when approximate,
+    through `T_house_frame` when exact; dashed when approximate; off-screen islands get an edge chevron + distance.
+- Tests: `GeoPriorTests` (header encoding, fix gate, heading filter, attitude conventions, datum), `IslandsTests`
+  (revisions, ack, pill, relative / AR placement own-frame / chained / house, outlines lat/lon vs transform, feed plan),
+  `MemoryBudgetTests` (island budgets monotone; the 30 min soak with island tiles plateaus at ~1.5 GB).

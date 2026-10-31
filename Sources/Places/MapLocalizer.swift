@@ -760,7 +760,8 @@ final class MapLocalizer {
             errCm: errorEstimate, searchSeconds: searchSeconds, attempts: attempts, matches: matches,
             lastFixAge: lastFixAt.map { now - $0 }, trackingCode: model.tracking.code,
             notInMap: isNotInMap, savedPlace: model.placeCtl.note, hint: hint,
-            retry: alignment == nil ? retryState.note : nil, paused: alignment == nil ? pausedReason : nil)
+            retry: alignment == nil ? retryState.note : nil, paused: alignment == nil ? pausedReason : nil,
+            island: alignment == nil ? model.islands.pillNote : nil)       // 12.22: a new area, not a failure
         let p = LocPill.make(input)
         if model.locPill != p { model.locPill = p }
     }

@@ -84,6 +84,9 @@ final class MemoryBudgetTests: XCTestCase {
                     XCTAssertLessThanOrEqual(b.liveRadiusM, a.liveRadiusM)
                     XCTAssertLessThanOrEqual(b.liveMaxTiles, a.liveMaxTiles)
                     XCTAssertLessThanOrEqual(b.layerBMaxTiles, a.layerBMaxTiles)
+                    XCTAssertLessThanOrEqual(b.islandMaxMaps, a.islandMaxMaps)
+                    XCTAssertLessThanOrEqual(b.islandMaxTiles, a.islandMaxTiles)
+                    XCTAssertLessThanOrEqual(b.islandRadiusM, a.islandRadiusM)
                     XCTAssertLessThanOrEqual(b.deviceCellsMax, a.deviceCellsMax)
                     XCTAssertLessThanOrEqual(b.deviceKeepRadiusM, a.deviceKeepRadiusM)
                     XCTAssertGreaterThanOrEqual(b.deviceEveryS, a.deviceEveryS)
@@ -305,7 +308,12 @@ final class MemoryBudgetTests: XCTestCase {
     /// 12.21: the same walk with Live map view on: live + Layer B tiles drawn solid (unwelded strip meshes, ~2x bytes).
     func testSoakWithLiveMapViewOverlayPlateaus() { soak(overlay: true) }
 
-    func soak(overlay: Bool) {
+    /// 12.22: the same walk where the phone also feeds an island (the island's live tiles, ~1 / s) and two other
+    /// placed islands are held for Map 3D: their tiles stay inside MemPlan.islandMaxTiles / islandRadiusM.
+    func testSoakWithIslandsPlateaus() { soak(overlay: false, islands: true) }
+
+    func soak(overlay: Bool, islands: Bool = false) {
+        var isl = SpatialLRU<String>()
         var gov = MemoryGovernor()
         var plan = MemPlan.plan(level: .normal, thermal: .nominal, walking: true)
         var live = SpatialLRU<String>(), layerB = LayerBStore()
@@ -354,6 +362,17 @@ final class MemoryBudgetTests: XCTestCase {
                     lbSeq[k] = nil
                 }
             }
+            // 12.22 islands: the island you are in streams a tile a second around you (its own frame = an offset copy
+            // of the walk); two other islands' tiles arrive for Map 3D far away; one budget for all of them
+            if islands {
+                let ix = x + 3000, iy = y - 2000
+                let kx = Int(((ix + Double((step * 5) % 21) - 10) / 4).rounded(.down)), ky = Int(((iy + Double((step * 3) % 21) - 10) / 4).rounded(.down))
+                isl.put("in/\(kx)/\(ky)", x: (Double(kx) + 0.5) * 4, y: (Double(ky) + 0.5) * 4, bytes: 100_000, now: t)
+                if step % 3 == 0 { isl.put("far/\(step % 97)", x: -5000, y: Double(step % 97), bytes: 100_000, now: t) }
+                if step % 2 == 0 {
+                    for k in isl.evictions(x: ix, y: iy, radius: .infinity, maxCount: plan.islandMaxTiles) { isl.remove(k) }
+                }
+            }
             // device surface: one depth frame a second (ARKit world x = map x, z = -map y), then the spatial cap
             Self.frame(&grid, x: Float(x), z: Float(-y))
             grid.prune(x: Float(x), z: Float(-y), radius: Float(plan.deviceKeepRadiusM), maxCells: plan.deviceCellsMax)
@@ -371,7 +390,7 @@ final class MemoryBudgetTests: XCTestCase {
             let simMB: Double = plan.simTemplates == .all ? 150 : (plan.simTemplates == .inUse ? 60 : 0)
             let wireMB = Double(min(arVerts, plan.overlayMaxVertices)) * 40 / 1_048_576
             let layerBDrawn = overlay ? layerB.estimatedBytes * 3 : layerB.estimatedBytes      // + solid strip meshes
-            let f = 500 + tilesMB + Double(live.totalBytes + layerBDrawn + grid.estimatedBytes) / 1_048_576
+            let f = 500 + tilesMB + Double(live.totalBytes + layerBDrawn + grid.estimatedBytes + isl.totalBytes) / 1_048_576
                 + wireMB + Double(arVerts) * 1700 / 1_048_576 + simMB
             foot.append(f)
             gov.update(footprintMB: f, limitMB: limit, now: t)
@@ -379,7 +398,8 @@ final class MemoryBudgetTests: XCTestCase {
         }
         let peak = foot.max()!
         let lastTen = foot.suffix(600), midTen = foot[600..<1200]
-        print(String(format: "soak(overlay \(overlay)): peak %.0f MB, min 10-20 max %.0f, min 20-30 max %.0f mean %.0f, peak level %@, resets %d, live %d, layerB %d, cells %d, sim re-download %d B",
+        if islands { XCTAssertLessThanOrEqual(isl.count, MemPlan.plan(level: .normal, thermal: .nominal).islandMaxTiles) }
+        print(String(format: "soak(overlay \(overlay), islands \(islands)): peak %.0f MB, min 10-20 max %.0f, min 20-30 max %.0f mean %.0f, peak level %@, resets %d, live %d, layerB %d, cells %d, sim re-download %d B",
                      peak, midTen.max()!, lastTen.max()!, lastTen.reduce(0, +) / 600, gov.peakLevel.label, resets, live.count,
                      layerB.tiles.count, grid.count, syncBytesAfterFirst))
         XCTAssertLessThan(peak, gov.thresholds(limitMB: limit).critical, "peak \(Int(peak)) MB")

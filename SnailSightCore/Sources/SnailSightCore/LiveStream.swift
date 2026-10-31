@@ -38,13 +38,15 @@ public struct LiveKeyframeHeader: Equatable {
     /// 12.17, optional (omitted when nil): the phone's map lock while it is server-locked, so the server can seed its
     /// per-keyframe mesh ICP before the live graph has placed the stream (it still gates the result itself).
     public var mapLock: LiveMapLock?
+    /// 12.22, optional (omitted when nil): GPS / compass / barometer as weak priors (API §6b.13 `geo`).
+    public var geo: LiveGeo?
 
     public init(seq: Int, streamID: String, t: Double, wall: Double, T: [Double], K: [Double], imageSize: [Int],
                 tracking: String = "normal", blurPx: Double? = nil, exposureS: Double? = nil,
-                mapLock: LiveMapLock? = nil) {
+                mapLock: LiveMapLock? = nil, geo: LiveGeo? = nil) {
         self.seq = seq; self.streamID = streamID; self.t = t; self.wall = wall
         self.T = T; self.K = K; self.imageSize = imageSize; self.tracking = tracking
-        self.blurPx = blurPx; self.exposureS = exposureS; self.mapLock = mapLock
+        self.blurPx = blurPx; self.exposureS = exposureS; self.mapLock = mapLock; self.geo = geo
     }
 }
 
@@ -93,6 +95,7 @@ public enum LiveKeyframe {
             if let a = l.ageS, a.isFinite { lock["age_s"] = a }
             o["lock"] = lock
         }
+        if let g = h.geo { o["geo"] = g.json }
         return o
     }
 

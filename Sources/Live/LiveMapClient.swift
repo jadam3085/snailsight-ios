@@ -416,6 +416,7 @@ final class LiveMapClient {
         case .other(let t):
             if t == "estimated", let m = EstimatedLiveMessage.parse(d) { model.planData.estimatedLive(m) }
             if t == "door" { model.doorStore.live(d) }
+            if t == "islands" { model.islands.worldMessage(JSON.object(d)) }   // 12.22 world revision
         }
     }
 

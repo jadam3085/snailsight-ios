@@ -88,6 +88,7 @@ final class LiveStreamer {
         }
         uplink.onAck = { [weak self] o in                               // 12.18 M0 latency line
             guard let self else { return }
+            self.model.islands.ack(o)                                   // 12.22 ack.islands (pill, island feeds)
             if self.model.liveStages.ack(o) {
                 self.model.liveStagesChanged()
                 if let st = o["stages"] as? [String: Any], let seq = (st["seq"] as? NSNumber)?.intValue, seq >= self.lastStagesLogged + 10 || seq < self.lastStagesLogged {
@@ -140,6 +141,8 @@ final class LiveStreamer {
     func worldFrameChanged(_ reason: String) {
         let old = streamID, oldLast = nextSeq - 1
         newStream()
+        model.geo.worldFrameChanged()                       // 12.22: the compass offset belongs to the old ARKit world
+        model.islands.worldFrameChanged()
         uplink.endStream(old)
         guard model.liveOn else { return }
         model.log.event("live_stream", ["from": .string(old), "to": .string(streamID), "reason": .string(reason),
@@ -166,6 +169,7 @@ final class LiveStreamer {
     func frame(_ f: ARFrame) {
         guard model.liveOn else { return }
         pushBase()
+        model.geo.frame(f)                                  // 12.22: compass vs ARKit yaw (10 Hz, cheap)
         var paused: String?
         if model.recording { paused = "recording" }
         else if model.showScans { paused = "Scans" }
@@ -239,7 +243,7 @@ final class LiveStreamer {
                 }
                 let h = LiveKeyframeHeader(seq: seq, streamID: stream, t: stamp, wall: wall, T: T, K: Kv,
                                            imageSize: size, tracking: "normal", blurPx: kfBlur, exposureS: exposure,
-                                           mapLock: lock)
+                                           mapLock: lock, geo: self.model.geo.geo(T: T))   // 12.22 weak geo prior
                 var blobs: [(name: String, data: Data)] = [(name: "depth_png", data: dp), (name: "rgb_jpg", data: rgb)]
                 if let cp { blobs.append((name: "conf_png", data: cp)) }
                 if let mp {
@@ -843,7 +847,7 @@ final class LiveUplink {
         for s in (spool[t] ?? []) where s <= contiguous { deleteFile(t, s) }
         acked += 1
         if (o["dup"] as? Bool) == true { dups += 1 }
-        if o["stages"] != nil || o["gate"] != nil {                    // 12.18 M0 stage timestamps + stream gate
+        if o["stages"] != nil || o["gate"] != nil || o["islands"] != nil {   // 12.18 M0 stages + gate; 12.22 islands
             let oc = o
             DispatchQueue.main.async { [weak self] in self?.onAck?(oc) }
         }

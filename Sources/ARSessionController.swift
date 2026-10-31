@@ -306,6 +306,7 @@ final class ARSessionController: NSObject, ARSessionDelegate {
         a.set("device_surface", b.grid + b.faces)
         a.set("live_tiles", model.liveMap.estimatedBytes)
         a.set("layerb", model.blocks.estimatedBytes)
+        a.set("islands", model.islands.estimatedBytes)          // 12.22
         a.set("mesh_overlay", meshOverlay.estimatedBytes)
         a.set("ar_mesh_est", meshOverlay.vertexCount * 48)      // ARKit's own mesh (estimate; its volume is extra)
         return a
@@ -712,6 +713,7 @@ final class ARSessionController: NSObject, ARSessionDelegate {
         model.mapLocalizer.tick()                        // 10.2: the localization pill (elapsed s, fix age)
         model.meshMapper.tick()                          // 10.2: mesh anchors, upload pump, mapping line
         model.liveMap.tick()                             // 10.1 L3: other agents, downlink
+        model.islands.tick()                             // 12.22 islands: world, feeds, AR placement
         model.serverSim.tick()                           // 10.1 S2: shared sim connection + authority
         model.cameraMark.tick()                          // 12.2 Mark camera: ring faces you, lock quality
         model.cameraCheck.tick()                         // 12.2 Camera check: pose batches + who sees me

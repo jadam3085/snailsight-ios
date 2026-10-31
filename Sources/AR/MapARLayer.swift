@@ -72,6 +72,8 @@ final class MapARLayer {
     let navNode = Entity()
     /// 12.18 Layer B: live block-mesh surface (LayerBClient).
     let blockNode = Entity()
+    /// 12.22 islands: their own anchor (an island you are in draws in its own frame, without the house lock).
+    let islandRoot = AnchorEntity(world: matrix_identity_float4x4)
     private var doorRev = -1
     private var doorLabels: [Entity] = []
 
@@ -145,6 +147,9 @@ final class MapARLayer {
         mapFrame.addChild(tiles.node)
         root.isEnabled = false
         arView.scene.addAnchor(root)
+        islandRoot.name = "islands.root"
+        islandRoot.isEnabled = false
+        arView.scene.addAnchor(islandRoot)
     }
 
     // MARK: frames

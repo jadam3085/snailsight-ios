@@ -35,15 +35,18 @@ public struct LocPillInput: Equatable {
     public var hint: String?            // 10.4: the server's search hint ("Turn to see a corner of the room")
     public var retry: String?           // 10.6.x: "retrying (server slow)" after an error / timeout (LocRetry.note)
     public var paused: String?          // 10.6.x: why no attempt can run now ("Scans open", "AR paused", …)
+    public var island: IslandPillNote?  // 12.22: mapping a new area (island) instead of "finding you" / "not in map"
 
     public init(online: Bool, phase: LocPhase, mapID: String = "site", version: Int? = nil, method: String? = nil,
                 source: String = "", errCm: Double? = nil, searchSeconds: Double = 0, attempts: Int = 0,
                 matches: Int = 0, lastFixAge: Double? = nil, trackingCode: String = "normal", notInMap: Bool = false,
-                savedPlace: SavedPlaceNote? = nil, hint: String? = nil, retry: String? = nil, paused: String? = nil) {
+                savedPlace: SavedPlaceNote? = nil, hint: String? = nil, retry: String? = nil, paused: String? = nil,
+                island: IslandPillNote? = nil) {
         self.online = online; self.phase = phase; self.mapID = mapID; self.version = version; self.method = method
         self.source = source; self.errCm = errCm; self.searchSeconds = searchSeconds; self.attempts = attempts
         self.matches = matches; self.lastFixAge = lastFixAge; self.trackingCode = trackingCode; self.notInMap = notInMap
         self.savedPlace = savedPlace; self.hint = hint; self.retry = retry; self.paused = paused
+        self.island = island
     }
 
     public var trackingOK: Bool { trackingCode == "normal" }
@@ -150,6 +153,12 @@ public enum LocPill {
             if !i.online { rows.append("Server offline: holding the last lock (ARKit keeps tracking)") }
             return LocPillState(tone: .good, text: t, rows: rows + placeRow)
         case .searching:
+            if let n = i.island {                       // 12.22: a new area is being mapped, not a failure to localize
+                var rows = n.rows
+                rows.append(MapLocText.searching(mapID: i.mapID, seconds: i.searchSeconds, attempts: i.attempts,
+                                                 matches: i.matches))
+                return LocPillState(tone: n.kind == .mapping ? .good : .working, text: n.text, rows: rows + placeRow)
+            }
             if i.notInMap {
                 return LocPillState(tone: .idle, text: "NOT IN MAP",
                                     rows: ["No match in the \(map) map after \(Int(i.searchSeconds)) s / \(i.attempts) tries",
