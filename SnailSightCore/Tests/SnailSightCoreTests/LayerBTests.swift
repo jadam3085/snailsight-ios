@@ -99,6 +99,48 @@ final class LayerBTests: XCTestCase {
         s.tileArrived(hwWall: 100, now: 5000)                           // 81 min: a clock problem, ignored
         XCTAssertEqual(s.phoneMs ?? 0, 2100, accuracy: 0.01)
     }
+
+    /// 12.24: the server's `hm` voxel mask (live 0.12): voxels 0, 123 and 999 set (python layerb.hm_encode).
+    static let hm0_123_999 = "AQAAAAAAAAAAAAAAAAAACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIA="
+
+    func testHideMaskOnlyHidesSetVoxels() throws {
+        let m = try XCTUnwrap(HideMask.decode(Self.hm0_123_999))
+        XCTAssertTrue(HideMask.bit(m, 0, 0, 0))
+        XCTAssertTrue(HideMask.bit(m, 1, 2, 3))
+        XCTAssertTrue(HideMask.bit(m, 9, 9, 9))
+        XCTAssertFalse(HideMask.bit(m, 3, 2, 1))
+        XCTAssertNil(HideMask.decode("AAAA"))                      // malformed: the whole cube (old rule)
+        // block [1, 2, -1] masked (an empty block on a real floor), block [2, 2, 3] whole
+        let json = #"{"type":"tile","layer":"surface","key":"0/0/0","level":0,"tx":0,"ty":0,"ver":{"base_version":14,"live_seq":5},"since":null,"hmask":"vox1","block_m":0.4,"blocks":[{"b":[1,2,-1],"s":"empty","rev":5,"nv":0,"nt":0,"hm":"\#(Self.hm0_123_999)"},{"b":[2,2,3],"s":"empty","rev":5,"nv":0,"nt":0}],"removed":[]}"#
+        let f = try XCTUnwrap(SurfaceFrame.parse(Data(json.utf8)))
+        XCTAssertNotNil(f.blocks[0].hideMask)
+        XCTAssertNil(f.blocks[1].hideMask)
+        var st = LayerBStore()
+        _ = st.apply(f, now: 1)
+        XCTAssertEqual(st.maskedBlocks, 1)
+        // block [1, 2, -1] spans x 0.4..0.8, y 0.8..1.2, z -0.4..0; voxel (1, 2, 3) = x 0.44..0.48, y 0.88..0.92, z -0.28..-0.24
+        XCTAssertTrue(st.supersedes(x: 0.46, y: 0.90, z: -0.26))
+        XCTAssertTrue(st.supersedes(x: 0.41, y: 0.81, z: -0.39))     // voxel 0
+        XCTAssertFalse(st.supersedes(x: 0.60, y: 1.00, z: -0.20))    // the rest of the block: base stays drawn
+        XCTAssertTrue(st.supersedes(x: 0.9, y: 0.9, z: 1.3))         // mask-less block: the whole cube
+        let (mask, n) = st.hiddenFaces(centroids: [0.46, 0.90, -0.26, 0.60, 1.00, -0.20])
+        XCTAssertEqual(mask, [true, false])
+        XCTAssertEqual(n, 1)
+        // the block turns mask-less (whole cube), then is removed: no stale mask
+        let d = #"{"type":"tile","layer":"surface","key":"0/0/0","level":0,"tx":0,"ty":0,"ver":{"base_version":14,"live_seq":6},"since":5,"block_m":0.4,"blocks":[{"b":[1,2,-1],"s":"empty","rev":6}],"removed":[]}"#
+        _ = st.apply(try XCTUnwrap(SurfaceFrame.parse(Data(d.utf8))), now: 2)
+        XCTAssertEqual(st.maskedBlocks, 0)
+        XCTAssertTrue(st.supersedes(x: 0.60, y: 1.00, z: -0.20))
+        let r = #"{"type":"tile","layer":"surface","key":"0/0/0","level":0,"tx":0,"ty":0,"ver":{"base_version":14,"live_seq":7},"since":6,"block_m":0.4,"blocks":[],"removed":[[1,2,-1]]}"#
+        _ = st.apply(try XCTUnwrap(SurfaceFrame.parse(Data(r.utf8))), now: 3)
+        XCTAssertFalse(st.supersedes(x: 0.46, y: 0.90, z: -0.26))
+    }
+
+    func testSubscribeAsksForMasks() throws {
+        let d = LiveSubscribe.message(agentID: "p", mapID: "site", baseVersion: 1, tiles: [:])
+        let o = try XCTUnwrap(JSONSerialization.jsonObject(with: d) as? [String: Any])
+        XCTAssertEqual(o["hmask"] as? Int, 1)
+    }
 }
 
 /// Replay of the server's own Layer B frames (services/snailsight/layerb.py integrating a REAL recorded phone stream,

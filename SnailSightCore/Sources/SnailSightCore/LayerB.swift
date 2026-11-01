@@ -10,6 +10,10 @@ import Foundation
 // Rules (§6b.7 "Versions and deltas"): since == held (or older) → apply; since newer than held → gap: ignore, fetch the
 // tile in full; since null → drop the tile's blocks, then apply. `surface` blocks draw their mesh; `surface` AND `empty`
 // cubes hide the base faces inside them; `removed` blocks are dropped (base shows again). Epoch change = start over.
+// 12.24 (live 0.12, API §6b.7 `hm`): a block may carry a per-voxel supersede mask, base64 of 125 bytes = 1000 bits,
+// bit i = local voxel ix*100 + iy*10 + iz (4 cm voxels of the 0.4 m block), byte i >> 3, LSB first. Such a block hides
+// ONLY the base inside its set voxels (the rest of its base stays drawn); no mask = the whole cube, as before. The
+// subscribe says `"hmask": 1` so the server sends masked blocks at all (older apps never get them).
 // Pure, Linux-tested (LayerBTests).
 
 /// Block index [bx, by, bz] packed (21 bits each, offset 2^20).
@@ -28,6 +32,31 @@ public struct SurfaceBlock: Equatable {
     public var settled: Bool
     public var mesh: FlatMesh?
     public var rgb: [UInt8]?
+    /// 12.24: per-voxel supersede mask (125 bytes); nil = the whole cube hides the base.
+    public var hideMask: [UInt8]? = nil
+}
+
+/// 12.24: the `hm` voxel mask of a Layer B block (API §6b.7, live 0.12).
+public enum HideMask {
+    public static let voxels = 10
+    public static let bytes = 125
+    /// base64 → 125 bytes (nil when malformed: the block then hides its whole cube, the safe old rule).
+    public static func decode(_ s: String?) -> [UInt8]? {
+        guard let s, let d = Data(base64Encoded: s), d.count >= bytes else { return nil }
+        return [UInt8](d.prefix(bytes))
+    }
+    /// Is local voxel (ix, iy, iz) set?
+    @inline(__always)
+    public static func bit(_ m: [UInt8], _ ix: Int, _ iy: Int, _ iz: Int) -> Bool {
+        let i = ix * 100 + iy * 10 + iz
+        return (m[i >> 3] >> UInt8(i & 7)) & 1 == 1
+    }
+    /// Local voxel of a map coordinate inside block index b (clamped to 0...9).
+    @inline(__always)
+    public static func local(_ v: Float, block b: Int32, blockM: Float) -> Int {
+        let q = Int(((v / blockM - Float(b)) * Float(voxels)).rounded(.down))
+        return min(max(q, 0), voxels - 1)
+    }
 }
 
 /// One decoded `surface` tile frame.
@@ -53,6 +82,7 @@ public struct SurfaceFrame: Equatable {
         var src: String?
         var data: String?
         var rgb: String?
+        var hm: String?
     }
 
     struct Raw: Decodable {
@@ -90,7 +120,8 @@ public struct SurfaceFrame: Equatable {
             var rgb: [UInt8]?
             if let c = b.rgb, let d = Data(base64Encoded: c), let m = mesh, d.count == m.vertexCount * 3 { rgb = [UInt8](d) }
             blocks.append(SurfaceBlock(key: BlockKey(b.b[0], b.b[1], b.b[2]), surface: surf, rev: b.rev ?? 0,
-                                       tracked: b.tracked ?? 0, settled: b.src == "settled", mesh: mesh, rgb: rgb))
+                                       tracked: b.tracked ?? 0, settled: b.src == "settled", mesh: mesh, rgb: rgb,
+                                       hideMask: HideMask.decode(b.hm)))
         }
         let agents = Array(Set((r.hw ?? [:]).keys.map { k in k.split(separator: "/").first.map(String.init) ?? k })).sorted()
         return SurfaceFrame(key: r.key, level: r.level ?? (p.first ?? 0), tx: r.tx ?? (p.count == 3 ? p[1] : 0),
@@ -127,6 +158,8 @@ public struct LayerBStore {
     public private(set) var epoch: String?
     /// Packed keys of every block present (surface or empty) = cubes where the base is hidden.
     public private(set) var superseded = Set<Int64>()
+    /// 12.24: packed key → voxel mask, for the present blocks that hide only part of their cube.
+    public private(set) var masks: [Int64: [UInt8]] = [:]
     public private(set) var frames = 0
     public private(set) var gaps = 0
     public init() {}
@@ -140,6 +173,7 @@ public struct LayerBStore {
     public mutating func reset() {
         tiles.removeAll()
         superseded.removeAll()
+        masks.removeAll()
     }
 
     public mutating func apply(_ f: SurfaceFrame, now: Double) -> Applied {
@@ -155,16 +189,18 @@ public struct LayerBStore {
         var t = tiles[f.key] ?? Tile(key: f.key, level: f.level, tx: f.tx, ty: f.ty, ver: f.ver)
         var changed = Set<BlockKey>()
         if f.since == nil {
-            for k in t.blocks.keys { changed.insert(k); superseded.remove(k.packed) }
+            for k in t.blocks.keys { changed.insert(k); superseded.remove(k.packed); masks.removeValue(forKey: k.packed) }
             t.blocks.removeAll()
         }
         for k in f.removed where t.blocks.removeValue(forKey: k) != nil {
             changed.insert(k)
             superseded.remove(k.packed)
+            masks.removeValue(forKey: k.packed)
         }
         for b in f.blocks {
             t.blocks[b.key] = b
             superseded.insert(b.key.packed)
+            if let m = b.hideMask { masks[b.key.packed] = m } else { masks.removeValue(forKey: b.key.packed) }
             changed.insert(b.key)
         }
         t.ver = f.ver
@@ -180,7 +216,7 @@ public struct LayerBStore {
     @discardableResult
     public mutating func forget(_ key: String) -> Set<BlockKey> {
         guard let t = tiles.removeValue(forKey: key) else { return [] }
-        for k in t.blocks.keys { superseded.remove(k.packed) }
+        for k in t.blocks.keys { superseded.remove(k.packed); masks.removeValue(forKey: k.packed) }
         return Set(t.blocks.keys)
     }
 
@@ -192,7 +228,7 @@ public struct LayerBStore {
 
     /// Estimated bytes of the blocks' meshes and colour.
     public var estimatedBytes: Int {
-        var n = superseded.count * 9
+        var n = superseded.count * 9 + masks.count * (HideMask.bytes + 16)
         for t in tiles.values {
             for b in t.blocks.values {
                 n += 64
@@ -206,13 +242,21 @@ public struct LayerBStore {
     /// `since.tiles.surface` for a (re)subscribe: {key: ver}.
     public var held: [String: TileVer] { tiles.mapValues(\.ver) }
 
-    /// Is the map point inside a block Layer B holds (surface or empty)?
+    /// Does Layer B hide the base at this map point? Inside a held block (surface or empty): yes, unless the block has
+    /// a voxel mask (12.24) and the point's voxel is not set.
     public func supersedes(x: Float, y: Float, z: Float) -> Bool {
         guard !superseded.isEmpty else { return false }
         let m = Float(blockM)
-        return superseded.contains(DeviceCoverageGrid.key(Int32((x / m).rounded(.down)), Int32((y / m).rounded(.down)),
-                                                          Int32((z / m).rounded(.down))))
+        let bx = Int32((x / m).rounded(.down)), by = Int32((y / m).rounded(.down)), bz = Int32((z / m).rounded(.down))
+        let k = DeviceCoverageGrid.key(bx, by, bz)
+        guard superseded.contains(k) else { return false }
+        guard let hm = masks[k] else { return true }
+        return HideMask.bit(hm, HideMask.local(x, block: bx, blockM: m), HideMask.local(y, block: by, blockM: m),
+                            HideMask.local(z, block: bz, blockM: m))
     }
+
+    /// 12.24: held blocks that hide only part of their cube.
+    public var maskedBlocks: Int { masks.count }
 
     /// The tile's surface blocks as one mesh (map frame) + per-vertex colour (grey 150 where a block has none).
     public func tileMesh(_ key: String) -> (mesh: FlatMesh, rgb: [UInt8]?)? {

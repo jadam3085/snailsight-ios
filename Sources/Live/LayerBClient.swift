@@ -193,7 +193,8 @@ final class LayerBClient {
             var status = 0
             if let r = try? await link.request("GET", "/v1/live/surface/\(level)/\(tx)/\(ty)",
                                                query: [URLQueryItem(name: "map_id", value: map),
-                                                       URLQueryItem(name: "transport", value: "json")], timeout: 20) {
+                                                       URLQueryItem(name: "transport", value: "json"),
+                                                       URLQueryItem(name: "hmask", value: "1")], timeout: 20) {
                 status = r.1
                 if r.1 == 200 { frame = SurfaceFrame.parse(r.0) }
             }
@@ -319,6 +320,7 @@ final class LayerBClient {
             "frames": .int(stats.frames), "blocks": .int(stats.blocks), "removed": .int(stats.removed),
             "gaps": .int(stats.gaps), "refetches": .int(stats.refetches), "tiles": .int(store.tiles.count),
             "surface_blocks": .int(store.surfaceBlocks), "cubes": .int(store.blockCount),
+            "masked": .int(store.maskedBlocks),                     // 12.24: blocks that hide only some voxels
             "build_ms": .double((stats.buildMs * 10).rounded() / 10),
             "lag_ms_p50": .double(l.isEmpty ? -1 : l[l.count / 2].rounded()),
             "lag_ms_max": .double(l.last?.rounded() ?? -1), "lag_n": .int(l.count),

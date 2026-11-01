@@ -592,3 +592,18 @@ within seconds"; "It should have been live the whole time"; snailCOP docs/SNAILS
   Live-off tap within 4 s of Record start / stop asks again (core `LiveTapGuard`, log `live_tap_guard`).
 - **Tile hysteresis**: `TileSelect.select(keep:keepBonusM: 4)`: walk sim evictions 95 -> 33 (10-31 log: 484).
 - Tests: SurfaceConfirmTests (8), WalkSimTests (env SNAILSIGHT_WALKSIM); core 522 tests (5 env-gated skipped).
+
+**12.24 (Layer B per-voxel supersede masks; server live 0.12, API §6b.7 `hm`; snailCOP
+docs/SNAILSIGHT-WALK-SIM-2026-10-31.md §9)**:
+- Layer B blocks may carry `hm`, a 1000-bit mask of 4 cm voxels (base64 of 125 bytes, bit `ix*100 + iy*10 + iz`, LSB
+  first). A masked block hides the base ONLY inside its set voxels; the rest of its cube draws the base. No mask = the
+  whole cube, as before. Core `HideMask`, `SurfaceBlock.hideMask`, `LayerBStore.masks` / `maskedBlocks`;
+  `supersedes(x:y:z:)` and `hiddenFaces` (AR tiles and Map 3D) read the mask.
+- The subscribe (`LiveSubscribe.message`) and the tile refetch ask for masks (`hmask: 1`); the server never sends
+  masked blocks to older apps.
+- Why (walk sim, other viewers after one walk): a removed wall's blocks shared with the real floor / ceiling could not
+  be hidden (58 % hidden), and whole cubes hid correct base on block edges (16 % of correct base faces hidden with no
+  live surface within 5 cm). With masks: removed wall 87 %, over-hidden correct base 1.6 %, armchair's old place 100 %.
+- Log: `layerb_stats` gains `masked`.
+- Tests: LayerBTests (mask bit order against the server's encoding, masked vs whole cubes, mask dropped on change /
+  removal, subscribe asks); core 524 tests (4 env-gated skipped), WalkSimTests pass, soak plateaus at 1538 MB.

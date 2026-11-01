@@ -110,7 +110,8 @@ public enum LiveSubscribe {
         if let e = epoch { since["epoch"] = e }
         if let q = seq { since["seq"] = q }
         var o: [String: Any] = ["type": "subscribe", "agent_id": agentID, "map_id": mapID, "layers": layers,
-                                "since": since, "transport": "json", "accept": ["mesh": ["f32"]]]
+                                "since": since, "transport": "json", "accept": ["mesh": ["f32"]],
+                                "hmask": 1]                     // 12.24: Layer B per-voxel supersede masks (API §6b.7)
         if let b = bbox, b.count == 4 { o["bbox"] = b }
         return (try? JSONSerialization.data(withJSONObject: o, options: [.sortedKeys])) ?? Data()
     }
