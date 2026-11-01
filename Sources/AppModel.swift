@@ -161,6 +161,11 @@ final class AppModel: ObservableObject {
     @Published var liveOn = false {
         didSet {
             if liveOn != oldValue {
+                // 12.23: every change of the Live map state is logged with its cause (setLive sets it; anything else
+                // shows up as "unattributed", which is a bug to find)
+                log.event("live_state", ["on": .bool(liveOn), "cause": .string(liveCause ?? "unattributed"),
+                                         "recording": .bool(recording)])
+                liveCause = nil
                 geo.setEnabled(liveOn)                                          // 12.22 GPS / compass / baro priors
                 islands.liveChanged(liveOn)
                 liveStreamer.setEnabled(liveOn)
@@ -395,7 +400,21 @@ final class AppModel: ObservableObject {
     @Published var serverLabel = "offline"
     @Published var sendingLog = false
     @Published var lastLogResult: String?
-    @Published var recording = false
+    @Published var recording = false {
+        didSet { if recording != oldValue { lastRecordToggleAt = Date().timeIntervalSince1970 } }
+    }
+    /// 12.23 Live map tap guard (SnailSightCore LiveTapGuard): when Record last started / stopped, and a pending
+    /// "tap again to stop Live map".
+    var lastRecordToggleAt: Double?
+    var liveOffConfirmAt: Double?
+    private var liveCause: String?
+
+    /// The ONLY way to change Live map (12.23): `cause` is logged with the change ("owner_tap", ...).
+    func setLive(_ on: Bool, cause: String) {
+        guard on != liveOn else { return }
+        liveCause = cause
+        liveOn = on
+    }
     @Published var recStats = RecordStats()
     @Published var recWarning: String?                 // adaptive-recording notice (hot / low memory), 9.1.61
     @Published var recNote: String?                    // 9.6 neutral notice (mesh memory cap reached)

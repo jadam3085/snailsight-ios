@@ -576,3 +576,19 @@ different areas ... eventually joined by a separate walk?")**:
 - Tests: `GeoPriorTests` (header encoding, fix gate, heading filter, attitude conventions, datum), `IslandsTests`
   (revisions, ack, pill, relative / AR placement own-frame / chained / house, outlines lat/lon vs transform, feed plan),
   `MemoryBudgetTests` (island budgets monotone; the 30 min soak with island tiles plateaus at ~1.5 GB).
+
+**12.23 (walk sim, owner 2026-10-31: "a constant barrage of random wall data ... the grid seems to make it dissapear
+within seconds"; "It should have been live the whole time"; snailCOP docs/SNAILSIGHT-WALK-SIM-2026-10-31.md)**:
+- **Show on confirm** (core `SurfaceConfirm.swift`): stored BASE faces are drawn only where this phone's LiDAR agrees
+  (a return within 4 cm of the face's plane, same facing, not crossed since; 5 cm voxels with mean return + normal).
+  Fail closed: a (re)loaded tile starts hidden, the next room through a wall, duplicates, removed walls, moved objects
+  and floaters are never drawn. Walk sim: ghost exposure 6.1 % -> 0.67 % (p95 22 % -> 2.3 %), every labelled ghost's
+  visible time -> 0, correct overlay 13.8 % -> 16.6 %. Live tiles / Layer B keep the 12.18 rule. `DeviceSurface` now
+  wraps core `DeviceSurfaceEngine` (the sim runs the same code). Logs: `device_surface` gains voxels / hits / passes /
+  shown / policy.
+- **Live map + Record together**: Record no longer pauses Live map (10-31: 13 keyframes in 184 s), the map is drawn and
+  tiles stream while recording (12.22 drew nothing for 175 s, then 312 k faces at once). Log `live_with_record`.
+- **Only an owner tap changes Live map**: `AppModel.setLive(_:cause:)`, log `live_state {on, cause, recording}`; a
+  Live-off tap within 4 s of Record start / stop asks again (core `LiveTapGuard`, log `live_tap_guard`).
+- **Tile hysteresis**: `TileSelect.select(keep:keepBonusM: 4)`: walk sim evictions 95 -> 33 (10-31 log: 484).
+- Tests: SurfaceConfirmTests (8), WalkSimTests (env SNAILSIGHT_WALKSIM); core 522 tests (5 env-gated skipped).

@@ -33,6 +33,8 @@ final class TileFaceMask {
     private var targets: [Target] = []
     /// x, y, z per face in the MAP frame (z up).
     private(set) var centroids: [Float] = []
+    /// 12.23: unit face normals ×127 (map frame), 3 per face, for the show-on-confirm test.
+    private(set) var normals: [Int8] = []
     /// [x0, y0, z0, x1, y1, z1] of the centroids (map frame).
     private(set) var box: [Float] = [0, 0, 0, 0, 0, 0]
     private(set) var applied: [Bool] = []
@@ -66,6 +68,7 @@ final class TileFaceMask {
                         }
                         parts.append(Part(model: m.id, part: pi, start: centroids.count / 3, indices: idx))
                         centroids += CoveredFaces.centroids(positions: flat, indices: idx)
+                        normals += ConfirmedFaces.normals(positions: flat, indices: idx)
                     }
                 }
                 if !parts.isEmpty { targets.append(Target(entity: e, original: mc.mesh, parts: parts)) }
@@ -149,7 +152,7 @@ final class TileFaceMask {
 
     /// Bytes this mask holds (centroids + original indices + flags), for the `mem` accounting.
     var estimatedBytes: Int {
-        var n = centroids.count * 4 + applied.count
+        var n = centroids.count * 4 + normals.count + applied.count
         for t in targets { for p in t.parts { n += p.indices.count * 4 } }
         return n
     }

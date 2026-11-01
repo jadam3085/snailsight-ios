@@ -197,7 +197,7 @@ final class MapARLayer {
             surface.tick()
         }
         surface.frame(f, align: shown)
-        let show = shown != nil && status.opacity > 0 && t >= hiddenUntil && !model.recording && !model.arSuspended
+        let show = shown != nil && status.opacity > 0 && t >= hiddenUntil && !model.arSuspended   // 12.23: also while recording (capturedImage never holds AR content; 12.22 drew nothing for 175 s, then every tile at once)
         if root.isEnabled != show { root.isEnabled = show }
         guard show else { return }
         for e in labelEntities.values.filter({ $0.isEnabled }) + model.liveMap.tagEntities + model.serverSim.tagEntities + doorLabels {

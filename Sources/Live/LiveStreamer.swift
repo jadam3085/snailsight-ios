@@ -54,6 +54,7 @@ final class LiveStreamer {
     private var lastBase: String?
     private var snapshot = LiveSnapshot()
     private var pausedReason: String?
+    private var recordedNoted = false
     private var skippedStill = 0
     private var skippedBlurry = 0
     private var maskedFrames = 0
@@ -151,6 +152,7 @@ final class LiveStreamer {
     }
 
     private func newStream() {
+        recordedNoted = false
         streamID = LiveStreamID.make()
         nextSeq = 0
         gate.reset()
@@ -170,14 +172,18 @@ final class LiveStreamer {
         guard model.liveOn else { return }
         pushBase()
         model.geo.frame(f)                                  // 12.22: compass vs ARKit yaw (10 Hz, cheap)
-        var paused: String?
-        if model.recording { paused = "recording" }
-        else if model.showScans { paused = "Scans" }
-        else if model.showMap3D { paused = "3D map" }
-        else if model.thermal == "CRITICAL" { paused = "too hot" }
-        else if case .normal = f.camera.trackingState {} else { paused = "tracking" }
+        // 12.23 (SnailSightCore LivePause): Record no longer pauses Live map (10-31: 13 keyframes in 184 s because
+        // Record was on); the stream's bye still says `recorded` so the server knows a capture covers it.
+        var tn = false
+        if case .normal = f.camera.trackingState { tn = true }
+        let paused = LivePause.reason(recording: model.recording, scansOpen: model.showScans, map3DOpen: model.showMap3D,
+                                      thermalCritical: model.thermal == "CRITICAL", trackingNormal: tn)
+        if model.recording && !recordedNoted {
+            recordedNoted = true
+            uplink.noteRecorded(streamID)                                   // 12.14: this stream's bye says recorded
+            model.log.event("live_with_record", ["stream_id": .string(streamID), "seq": .int(nextSeq)])
+        }
         if paused != pausedReason {
-            if paused == "recording" { uplink.noteRecorded(streamID) }  // 12.14: this stream's bye says recorded
             pausedReason = paused
             model.log.event("live_pause", ["reason": .string(paused ?? "resumed")])
             publish()

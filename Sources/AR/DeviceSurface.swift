@@ -9,6 +9,9 @@
 //  - What you see there instead: the camera picture (the real room), RealityKit's occlusion from the ARKit scene mesh
 //    (depth-only) and, with Layers ▸ Mesh (live), the faint wire of this phone's own scene mesh.
 //  - Off (Layers ▸ Device surface near you) = every stored face back; ARKit world frame change = coverage cleared.
+//  - 12.23 show on confirm (SnailSightCore SurfaceConfirm.swift): BASE tiles are drawn only where this phone's depth
+//    agrees with them (a return within 4 cm of the face's plane, facing the same way, not crossed since); a (re)loaded
+//    tile starts hidden. Live surfaces (server live tiles, Layer B) keep the 12.18 hide-after-seen rule.
 // Logs: device_surface (every 10 s), device_surface_first_hide, device_surface_toggle, device_surface_reset.
 import ARKit
 import Foundation
@@ -21,13 +24,8 @@ final class DeviceSurface {
     private unowned let model: AppModel
     private let q = DispatchQueue(label: "snailsight.devicesurface", qos: .userInitiated)
 
-    // queue-owned
-    private var grid = DeviceCoverageGrid()
-    private var sets: [String: CoveredFaces] = [:]
-    private var applied: [String: Int] = [:]                    // hidden count the owner has drawn
-    private var lastAlign: Align4?
-    private var lastDelivered: [String: Double] = [:]           // 12.20: per-mesh rebuild spacing (MemPlan)
-    private var pruned = 0
+    // queue-owned: 12.23 the whole cycle is SnailSightCore.DeviceSurfaceEngine (the walk sim runs the same code)
+    private var engine = DeviceSurfaceEngine()
 
     // main-owned
     private var appliers: [String: Apply] = [:]
@@ -36,20 +34,24 @@ final class DeviceSurface {
     private var wasOn = false
     private var lastLog: TimeInterval = 0
     private var firstHideLogged = false
-    private var stats = (frames: 0, observeMs: [Double](), rebuilds: 0, rebuildMs: 0.0, marked: 0)
-    private var snapshot = (cells: 0, sets: 0, faces: 0, hidden: 0, saturated: false)
-    /// 12.20 `mem` accounting: coverage grid + per-mesh face sets (bytes, queue-computed).
+    private var stats = (frames: 0, observeMs: [Double](), rebuilds: 0, rebuildMs: 0.0, marked: 0, hits: 0, passes: 0)
+    private var snapshot = (cells: 0, sets: 0, faces: 0, hidden: 0, saturated: false, voxels: 0)
+    /// 12.20 `mem` accounting: coverage grid + surface voxels + per-mesh face sets (bytes, queue-computed).
     private(set) var bytes = (grid: 0, faces: 0)
     private(set) var prunedTotal = 0
     private(set) var depthWanted = false
 
     static let everyS = 0.4
-    static let maxApplyPerCycle = 3
+    /// 12.23: base tiles are drawn only where this phone's depth confirms them (walk sim: ghost exposure 8.5 % -> 0.9 %).
+    static let basePolicy: StoredFacePolicy = .confirm
 
     init(model: AppModel) { self.model = model }
 
-    /// The rule is on (setting + 3D world shown in AR).
-    var active: Bool { model.deviceTruth && model.worldOn && !model.arSuspended }
+    /// The rule is on (setting + 3D world shown in AR + a LiDAR phone).
+    var active: Bool { model.deviceTruth && model.worldOn && !model.arSuspended && ARSessionController.supportsDepth }
+
+    /// Confirm meshes start hidden while the rule is on (owners mask before the first delivery).
+    var failClosed: Bool { active }
 
     /// LiDAR depth frames are needed while the house is drawn after a lock (ARSessionController.makeConfiguration).
     var wantsDepth: Bool {
@@ -60,50 +62,48 @@ final class DeviceSurface {
     var summary: String {
         guard model.deviceTruth else { return "Off: the stored map is drawn even where the phone sees the room" }
         let s = snapshot
-        if s.cells == 0 { return "Waiting for LiDAR depth near the drawn map" }
-        let k = s.hidden >= 1000 ? String(format: "%.1f k", Double(s.hidden) / 1000) : "\(s.hidden)"
-        return "\(k) stored faces hidden where this phone sees the room\(s.saturated ? " (coverage full)" : "")"
+        if s.cells == 0 && s.voxels == 0 { return "Waiting for LiDAR depth near the drawn map" }
+        let shown = s.faces - s.hidden
+        let k = shown >= 1000 ? String(format: "%.1f k", Double(shown) / 1000) : "\(shown)"
+        return "\(k) stored faces drawn where this phone's depth confirms them"
     }
 
     // MARK: registration (main)
 
-    /// A drawn mesh: `centroids` = x, y, z per face in the MAP frame. `apply` is called on main with the hidden mask
-    /// whenever enough new faces are hidden (or all come back: count 0).
-    func register(id: String, centroids: [Float], apply: @escaping Apply) {
+    /// A drawn mesh: `centroids` = x, y, z per face in the MAP frame (+ `normals` ×127 for confirm meshes). `apply` is
+    /// called on main with the hidden mask whenever it changes enough (empty = everything drawn).
+    func register(id: String, centroids: [Float], normals: [Int8] = [], policy: StoredFacePolicy = .hideSeen,
+                  apply: @escaping Apply) {
         appliers[id] = apply
         let on = active
+        let now = CACurrentMediaTime()
         q.async { [weak self] in
             guard let self else { return }
-            var cf = CoveredFaces(id: id, centroids: centroids)
-            self.applied[id] = 0
-            if on, let al = self.lastAlign, self.grid.count > 0 { cf.update(grid: self.grid, align: al, force: true) }
-            self.sets[id] = cf
-            if cf.hiddenCount > 0 {
-                self.applied[id] = cf.hiddenCount
-                let mask = cf.hidden, n = cf.hiddenCount
-                DispatchQueue.main.async { self.deliver(id, mask, n) }
+            if let d = self.engine.register(id: id, centroids: centroids, normals: normals, policy: policy, active: on,
+                                            now: now) {
+                DispatchQueue.main.async { self.deliver(d.id, d.hidden, d.hiddenCount) }
             }
         }
     }
 
     func unregister(id: String) {
         appliers[id] = nil
-        q.async { [weak self] in self?.sets[id] = nil; self?.applied[id] = nil; self?.lastDelivered[id] = nil }
+        q.async { [weak self] in self?.engine.unregister(id: id) }
     }
 
-    /// Is any face of `id` currently hidden (owner-side bookkeeping is preferred; this is for logs).
     private func deliver(_ id: String, _ mask: [Bool], _ n: Int) {
         guard let a = appliers[id] else { return }
         let t0 = CACurrentMediaTime()
         a(mask, n)
         stats.rebuilds += 1
         stats.rebuildMs += (CACurrentMediaTime() - t0) * 1000
-        if n > 0 && !firstHideLogged {
+        if n > 0 && n < mask.count && !firstHideLogged {
             firstHideLogged = true
             let since = model.mapLocalizer.lockedAt.map { Date().timeIntervalSince1970 - $0 } ?? -1
             model.log.event("device_surface_first_hide", ["id": .string(id), "hidden": .int(n), "faces": .int(mask.count),
                                                           "since_lock_s": .double((since * 10).rounded() / 10),
-                                                          "cells": .int(snapshot.cells)])
+                                                          "cells": .int(snapshot.cells), "voxels": .int(snapshot.voxels),
+                                                          "policy": .string(Self.basePolicy.rawValue)])
         }
     }
 
@@ -114,8 +114,9 @@ final class DeviceSurface {
         let on = active
         if on != wasOn {
             wasOn = on
-            model.log.event("device_surface_toggle", ["on": .bool(on), "setting": .bool(model.deviceTruth)])
-            if !on { restoreAll() }
+            model.log.event("device_surface_toggle", ["on": .bool(on), "setting": .bool(model.deviceTruth),
+                                                      "policy": .string(Self.basePolicy.rawValue)])
+            if on { activateAll() } else { restoreAll() }
         }
         let plan = model.memPlan                                   // 12.20: cadence / caps from the memory + heat plan
         guard on, !busy, let al = align, f.timestamp - lastObserve >= max(Self.everyS, plan.deviceEveryS) else { return }
@@ -136,36 +137,16 @@ final class DeviceSurface {
                           m.columns.2.x, m.columns.2.y, m.columns.2.z, m.columns.2.w,
                           m.columns.3.x, m.columns.3.y, m.columns.3.z, m.columns.3.w]
         busy = true
+        let now = CACurrentMediaTime()
         q.async { [weak self] in
             guard let self else { return }
             let t0 = CACurrentMediaTime()
-            let st = self.grid.observe(depth: depth, width: w, height: h, confidence: conf, K: K, camToWorld: M)
-            // 12.20 spatial cap: far cells go (faces already hidden stay hidden)
-            let cut = self.grid.prune(x: M[12], z: M[14], radius: Float(plan.deviceKeepRadiusM), maxCells: plan.deviceCellsMax)
-            self.pruned += cut
-            self.lastAlign = al
-            let tNow = CACurrentMediaTime()
-            var due: [(String, [Bool], Int)] = []
-            var faces = 0, hidden = 0, faceBytes = 0
-            for id in Array(self.sets.keys) {
-                guard var cf = self.sets[id] else { continue }
-                cf.update(grid: self.grid, align: al)
-                self.sets[id] = cf
-                faces += cf.faceCount
-                hidden += cf.hiddenCount
-                faceBytes += cf.centroids.count * 4 + cf.faceCount
-                let ap = self.applied[id] ?? 0
-                if due.count < min(Self.maxApplyPerCycle, plan.maskRebuildsPerCycle),
-                   tNow - (self.lastDelivered[id] ?? -1e9) >= plan.maskRebuildMinS,
-                   CoverageRebuild.due(hidden: cf.hiddenCount, applied: ap, faces: cf.faceCount) {
-                    self.applied[id] = cf.hiddenCount
-                    self.lastDelivered[id] = tNow
-                    due.append((id, cf.hidden, cf.hiddenCount))
-                }
-            }
-            let gridBytes = self.grid.estimatedBytes, prunedNow = self.pruned
+            let cy = self.engine.observe(depth: depth, width: w, height: h, confidence: conf, K: K, camToWorld: M,
+                                         align: al, plan: plan, now: now)
+            let e = self.engine
+            let snap = (e.grid.count, e.ids.count, e.faces, e.hidden, e.grid.saturated, e.hits.count)
+            let gridBytes = e.grid.estimatedBytes + e.hits.estimatedBytes, faceBytes = e.faceBytes, prunedNow = e.pruned
             let ms = (CACurrentMediaTime() - t0) * 1000
-            let snap = (self.grid.count, self.sets.count, faces, hidden, self.grid.saturated)
             DispatchQueue.main.async {
                 self.busy = false
                 guard self.active else { return }                   // switched off meanwhile: restoreAll ran
@@ -173,9 +154,11 @@ final class DeviceSurface {
                 self.bytes = (gridBytes, faceBytes)
                 self.prunedTotal = prunedNow
                 self.stats.frames += 1
-                self.stats.marked += st.marked
+                self.stats.marked += cy.coverage.marked
+                self.stats.hits += cy.surface.hits
+                self.stats.passes += cy.surface.passes
                 self.stats.observeMs.append(ms)
-                for (id, mask, n) in due { self.deliver(id, mask, n) }
+                for d in cy.deliveries { self.deliver(d.id, d.hidden, d.hiddenCount) }
                 self.maybeLog()
             }
         }
@@ -191,21 +174,35 @@ final class DeviceSurface {
 
     /// The ARKit world frame changed (session reset / relocalization jump): what the device saw belongs to the old one.
     func worldReset() {
-        model.log.event("device_surface_reset", ["cells": .int(snapshot.cells), "hidden": .int(snapshot.hidden)])
-        restoreAll()
+        model.log.event("device_surface_reset", ["cells": .int(snapshot.cells), "hidden": .int(snapshot.hidden),
+                                                 "voxels": .int(snapshot.voxels)])
+        let now = CACurrentMediaTime()
+        q.async { [weak self] in
+            guard let self else { return }
+            let ds = self.engine.reset(now: now)
+            DispatchQueue.main.async { for d in ds { self.deliver(d.id, d.hidden, d.hiddenCount) } }
+        }
+        snapshot = (0, snapshot.sets, snapshot.faces, 0, false, 0)
+        firstHideLogged = false
     }
 
+    /// Rule off: every stored face back; what the device saw is forgotten.
     private func restoreAll() {
         let ids = Array(appliers.keys)
         for id in ids { appliers[id]?([], 0) }
+        q.async { [weak self] in _ = self?.engine.reset() }
+        snapshot = (0, snapshot.sets, snapshot.faces, 0, false, 0)
+        firstHideLogged = false
+    }
+
+    /// Rule on: confirm meshes go to their current mask (hidden until confirmed).
+    private func activateAll() {
+        let now = CACurrentMediaTime()
         q.async { [weak self] in
             guard let self else { return }
-            self.grid.clear()
-            for (id, cf) in self.sets { self.sets[id] = CoveredFaces(id: id, centroids: cf.centroids) }
-            for id in self.applied.keys { self.applied[id] = 0 }
+            let ds = self.engine.activate(now: now)
+            DispatchQueue.main.async { for d in ds { self.deliver(d.id, d.hidden, d.hiddenCount) } }
         }
-        snapshot = (0, snapshot.sets, snapshot.faces, 0, false)
-        firstHideLogged = false
     }
 
     private func maybeLog() {
@@ -216,13 +213,16 @@ final class DeviceSurface {
         let p50 = ms.isEmpty ? -1 : ms[ms.count / 2], mx = ms.last ?? -1
         model.log.event("device_surface", [
             "cells": .int(snapshot.cells), "sets": .int(snapshot.sets), "faces": .int(snapshot.faces),
-            "hidden": .int(snapshot.hidden), "frames": .int(stats.frames), "marked": .int(stats.marked),
+            "hidden": .int(snapshot.hidden), "shown": .int(snapshot.faces - snapshot.hidden),
+            "voxels": .int(snapshot.voxels), "policy": .string(Self.basePolicy.rawValue),
+            "frames": .int(stats.frames), "marked": .int(stats.marked), "hits": .int(stats.hits),
+            "passes": .int(stats.passes),
             "observe_ms_p50": .double((p50 * 10).rounded() / 10), "observe_ms_max": .double((mx * 10).rounded() / 10),
             "rebuilds": .int(stats.rebuilds), "rebuild_ms": .double((stats.rebuildMs * 10).rounded() / 10),
             "saturated": .bool(snapshot.saturated), "pruned": .int(prunedTotal),
             "grid_mb": .double((Double(bytes.grid) / 1_048_576 * 10).rounded() / 10),
         ])
-        stats = (0, [], 0, 0, 0)
+        stats = (0, [], 0, 0, 0, 0, 0)
     }
 
     // MARK: pixel buffers

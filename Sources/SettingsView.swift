@@ -64,7 +64,7 @@ struct SettingsView: View {
                     Text("Collects LiDAR depth, a sharp photo every ~0.75 m and ARKit's mesh while you walk — no video, no audio — and sends it to the map server, which re-meshes and re-textures only the areas you covered and publishes a new house-map version. Off at launch; Auto starts it whenever the phone is localized. Pauses while recording, in Scans or when the phone is too hot; everything is saved on the phone first and resent after a Wi-Fi drop.")
                 }
                 Section {
-                    Toggle("Live map", isOn: $model.liveOn)
+                    Toggle("Live map", isOn: Binding(get: { model.liveOn }, set: { model.setLive($0, cause: "settings_toggle") }))
                     Picker("Rate", selection: $model.liveRateHz) {
                         ForEach(LiveGate.allowedRates, id: \.self) { Text(LiveText.rate($0)).tag($0) }
                     }
@@ -79,7 +79,7 @@ struct SettingsView: View {
                     if let l = model.liveText { Text(l).font(.caption.monospaced()).foregroundStyle(.secondary) }
                     Toggle("Force live downlink (beta)", isOn: $model.forceLiveDownlink)
                 } header: { Text("Live map (server)") } footer: {
-                    Text("Streams a keyframe (photo + LiDAR depth + pose) 1–2 times a second while you move; nothing while the phone is still, while recording or in Scans. Every keyframe is saved on the phone first and resent after a Wi-Fi drop. map_id applies the next time Live map is turned on. Watch it on the server's /live/ page.")
+                    Text("Streams a keyframe (photo + LiDAR depth + pose) 1–2 times a second while you move, also while recording; nothing while the phone is still or in Scans. Every keyframe is saved on the phone first and resent after a Wi-Fi drop. map_id applies the next time Live map is turned on. Watch it on the server's /live/ page.")
                 }
                 Section {
                     Picker("House overlay", selection: $model.houseStyle) {

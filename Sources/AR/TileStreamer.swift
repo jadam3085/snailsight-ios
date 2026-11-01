@@ -83,6 +83,9 @@ final class TileStreamer {
     private var noTilesLogged = false
 
     static let maxConcurrent = 3
+    /// 12.23: a loaded tile keeps its place in the budget until another is one leaf (4 m) nearer (10-31: 484 evictions,
+    /// the same pair swapped every 0.5-3 s as the heading prefetch turned; walk sim 80 -> 29 evictions).
+    static let keepBonusM = 4.0
     private var plan: MemPlan { model.memPlan }
     static let statusEveryS = 10.0
     static let retryS = 15.0
@@ -158,10 +161,11 @@ final class TileStreamer {
         let heading = forward.flatMap { TileMotion.heading(forward: $0) }
         want = TileSelect.select(roots, cam: cam, heading: heading, speed: motion.speed,
                                  nearBudget: plan.tileNearMB << 20, midBudget: plan.tileMidMB << 20,   // 12.20 MemPlan
-                                 camLevel: TileSelect.cameraLevel(z: cam[2], levels: levels))
+                                 camLevel: TileSelect.cameraLevel(z: cam[2], levels: levels),
+                                 keep: Set(ledger.items.keys), keepBonusM: Self.keepBonusM)    // 12.23 hysteresis
         refresh()
         remaskDirty()
-        if !model.recording && !model.arSuspended { schedule(t) }
+        if !model.arSuspended { schedule(t) }                      // 12.23: tiles keep streaming while recording
         if t - lastStatus >= Self.statusEveryS {
             lastStatus = t
             logStatus()
@@ -239,7 +243,7 @@ final class TileStreamer {
                                       "changed_total": .int(ev.changedTotal ?? -1)])
         if applied > 0 || gone > 0 {
             refresh()
-            if !model.recording && !model.arSuspended { schedule(now) }
+            if !model.arSuspended { schedule(now) }
         }
     }
 
@@ -530,9 +534,17 @@ final class TileStreamer {
         guard !fm.isEmpty else { return }
         masks[key] = fm
         deviceHidden[key] = nil
-        layer.surface.register(id: "base|\(key)|\(hash)", centroids: fm.centroids) { [weak self] hidden, n in
+        // 12.23 show on confirm: the tile starts with every face hidden (nothing flashes before its first test)
+        if layer.surface.failClosed && DeviceSurface.basePolicy == .confirm {
+            let all = [Bool](repeating: true, count: fm.faceCount)
+            deviceHidden[key] = all
+            fm.apply(all)
+            masked.insert(key)
+        }
+        layer.surface.register(id: "base|\(key)|\(hash)", centroids: fm.centroids, normals: fm.normals,
+                               policy: DeviceSurface.basePolicy) { [weak self] hidden, n in
             guard let self, self.ledger.items[key]?.hash == hash else { return }
-            self.deviceHidden[key] = n > 0 ? hidden : nil
+            self.deviceHidden[key] = n > 0 && !hidden.isEmpty ? hidden : nil
             self.remask(key)
         }
         if model.blocks.store.blockCount > 0 { remask(key) }

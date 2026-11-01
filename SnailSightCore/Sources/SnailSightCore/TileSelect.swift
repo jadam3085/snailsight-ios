@@ -67,7 +67,7 @@ public enum TileSelect {
     /// The set of nodes that should be drawn (REPLACE: no ancestor together with a descendant), keyed by tile key.
     public static func select(_ roots: [TileNode], cam: [Double], heading: (Double, Double)? = nil, speed: Double = 0,
                               nearBudget: Int = NEAR_BUDGET, midBudget: Int = MID_BUDGET,
-                              camLevel: Int? = nil) -> [String: Want] {
+                              camLevel: Int? = nil, keep: Set<String> = [], keepBonusM: Double = 0) -> [String: Want] {
         var want: [Want] = []
         func visit(_ n: TileNode) {
             let d = effDistance(cam, heading: heading, speed: speed, n, camLevel: camLevel)
@@ -84,10 +84,14 @@ public enum TileSelect {
         var out: [String: Want] = [:]
         for (band, budget) in [(Band.near, nearBudget), (Band.mid, midBudget)] {
             var used = 0
-            // stable sort by distance (Python's sorted() is stable: ties keep the visit order)
+            // stable sort by distance (Python's sorted() is stable: ties keep the visit order). 12.23 hysteresis: a
+            // loaded tile (`keep`) competes for the budget as if `keepBonusM` nearer, so two tiles at the budget edge
+            // do not swap every time the heading prefetch turns (the 10-31 walk: 484 evictions, the same pair
+            // reloaded every 0.5-3 s). Defaults = the server's tileselect.py exactly.
+            func rank(_ w: Want) -> Double { keep.contains(w.node.key) ? w.distance - keepBonusM : w.distance }
             let inBand = want.enumerated().filter { $0.element.band == band }
-                .sorted { $0.element.distance != $1.element.distance ? $0.element.distance < $1.element.distance
-                                                                     : $0.offset < $1.offset }
+                .sorted { rank($0.element) != rank($1.element) ? rank($0.element) < rank($1.element)
+                                                               : $0.offset < $1.offset }
             for (_, w) in inBand {
                 if used + w.node.mem > budget { continue }
                 used += w.node.mem

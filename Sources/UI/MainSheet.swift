@@ -177,7 +177,17 @@ private struct QuickActionsRow: View {
         case .settings:
             if on(a) { model.sheetDetent = .collapsed } else { model.sheetQuery = ""; model.openSettings(from: "quick") }
         case .liveMap:
-            model.liveOn.toggle()
+            let now = Date().timeIntervalSince1970
+            let d = LiveTapGuard.decide(now: now, turningOn: !model.liveOn, lastRecordToggle: model.lastRecordToggleAt,
+                                        pendingConfirmAt: model.liveOffConfirmAt)
+            if d == .confirm {                      // 12.23: a Live-off tap right after Record start / stop asks again
+                model.liveOffConfirmAt = now
+                model.log.event("live_tap_guard", ["since_record_s": .double(((now - (model.lastRecordToggleAt ?? now)) * 10).rounded() / 10)])
+                model.flash("Live map stays on while recording. Tap Live map again to stop it", seconds: 3)
+                return
+            }
+            model.liveOffConfirmAt = nil
+            model.setLive(!model.liveOn, cause: "owner_tap")
             if model.liveOn {                       // the point of Live map: watch the shared mesh grow from your walk
                 if !model.meshLive { model.meshLive = true }
                 model.flash("Live map on: your walk builds the shared mesh (fresh tiles glow)", seconds: 3)
@@ -419,7 +429,7 @@ private struct CategorySection: View {
             }
         case .liveMap:
             Section {
-                Toggle(isOn: $model.liveOn) { Label("Live map", systemImage: "dot.radiowaves.left.and.right") }
+                Toggle(isOn: Binding(get: { model.liveOn }, set: { model.setLive($0, cause: "sheet_toggle") })) { Label("Live map", systemImage: "dot.radiowaves.left.and.right") }
                 Picker(selection: $model.liveRateHz) {
                     ForEach(LiveGate.allowedRates, id: \.self) { Text(LiveText.rate($0)).tag($0) }
                 } label: { Label("Live rate", systemImage: "metronome") }
