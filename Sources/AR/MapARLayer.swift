@@ -232,6 +232,8 @@ final class MapARLayer {
         let cam = sh.toMap(pivot)
         let ahead = sh.toMap([pivot[0] + Double(camForwardWorld.x), pivot[1] + Double(camForwardWorld.y),
                               pivot[2] + Double(camForwardWorld.z)])
+        model.notePose(cam: cam, ahead: ahead)          // 12.25 snailCOP "you are here" + the Open AR here guide
+        syncTargetBeam()
         applyStyle()
         updateDoors()
         updateVisible(cam: cam)
@@ -252,6 +254,34 @@ final class MapARLayer {
         blender.reset()
         shown = nil
         root.isEnabled = false
+    }
+
+    // MARK: 12.25 Open AR here: a beam at the spot handed over from snailCOP
+
+    private var targetBeam: Entity?
+    private var targetBeamAt: [Double]?
+
+    private func syncTargetBeam() {
+        let t = model.arTarget?.target
+        guard t != targetBeamAt else { return }
+        targetBeamAt = t
+        targetBeam?.removeFromParent()
+        targetBeam = nil
+        guard let t else { return }
+        let e = Entity()
+        var beamMat = UnlitMaterial(color: UIColor(red: 1, green: 0.62, blue: 0.1, alpha: 1))
+        beamMat.blending = .transparent(opacity: 0.55)
+        // the portal's target may be an orbit point near eye height or a thing on the floor: a beam from 1.5 m below to
+        // 1 m above it is visible either way, with a ball at the exact spot
+        let beam = ModelEntity(mesh: .generateBox(size: [0.05, 0.05, 2.5]), materials: [beamMat])
+        beam.position = [0, 0, -0.25]
+        let ball = ModelEntity(mesh: .generateSphere(radius: 0.09), materials: [UnlitMaterial(color: .orange)])
+        e.addChild(beam)
+        e.addChild(ball)
+        e.position = SIMD3<Float>(Float(t[0]), Float(t[1]), Float(t[2]))
+        e.name = "ar.target"
+        markNode.addChild(e)
+        targetBeam = e
     }
 
     // MARK: map ↔ world helpers (for the other layers)

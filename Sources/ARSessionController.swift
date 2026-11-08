@@ -264,6 +264,7 @@ final class ARSessionController: NSObject, ARSessionDelegate {
         }
         if p.environmentProbes != old.environmentProbes, !depthCapture, started, !model.arSuspended { rerunConfiguration() }
         guard p.level != old.level || p.thermal != old.thermal else { return }
+        model.arMemLevel(p.level)                        // 12.25: a hidden snailCOP web view goes at shed
         var ev = MemoryProbe.fields()
         ev["from"] = .string(old.level.label)
         ev["level"] = .string(p.level.label)

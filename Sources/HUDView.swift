@@ -24,6 +24,16 @@ struct HUDView: View {
                             .accessibilityAddTraits(model.roomScanOn ? .isButton : [])
                     }
                     if model.locExpanded { LocCard().transition(.move(edge: .top).combined(with: .opacity)) }
+                    if let t = model.arTargetText {                       // 12.25 Open AR here (from snailCOP)
+                        HStack(spacing: 8) {
+                            Image(systemName: "scope").font(.caption.weight(.bold)).foregroundStyle(.orange)
+                            Text(t).font(.caption.weight(.semibold)).lineLimit(1).minimumScaleFactor(0.7)
+                            Button { model.clearARTarget(why: "hud") } label: { Image(systemName: "xmark").font(.caption2.weight(.bold)) }
+                                .buttonStyle(.plain).accessibilityLabel("Clear target")
+                        }
+                        .padding(.horizontal, 12).padding(.vertical, 5)
+                        .background(.ultraThinMaterial, in: Capsule())
+                    }
                 }
                 .frame(maxWidth: .infinity)
                 .padding(.top, -2)
@@ -262,6 +272,10 @@ private struct RightRail: View {
 
     var body: some View {
         VStack(spacing: 8) {
+            // 12.25: snailCOP mode (the operational picture, camera off) — one tap, the same app
+            railButton("scope", "snailCOP", "Open snailCOP: cameras, alerts, sensors and the 3D world, with the camera off") {
+                model.setMode(.cop, cause: "ar_rail")
+            }
             railButton("map", "Map", "Open the house map") { model.openMap() }
             railButton("square.3.layers.3d", "Layers", "Show or hide layers: live mesh, structure, terrain, cameras") {
                 model.showLayers = true

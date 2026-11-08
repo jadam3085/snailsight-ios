@@ -39,6 +39,29 @@ enum MeshStyle: String, CaseIterable, Identifiable {
 /// UI state. Mutated on the main thread only (ARSession delegate callbacks arrive on main; network actors report
 /// through DispatchQueue.main).
 final class AppModel: ObservableObject {
+    // MARK: 12.25 app modes (core CopMode.swift): AR explore (camera, ARSession, localizer, Live map) or snailCOP (the
+    // cop.snail portal in a web view, no camera). nil = the launch chooser. AR starts only when the owner switches to it.
+    @Published private(set) var appMode: AppMode?
+    @Published var askModeAtLaunch: Bool = UserDefaults.standard.bool(forKey: LaunchMode.askKey) {
+        didSet {
+            UserDefaults.standard.set(askModeAtLaunch, forKey: LaunchMode.askKey)
+            if askModeAtLaunch != oldValue { log.event("app_mode_ask", ["on": .bool(askModeAtLaunch)]) }
+        }
+    }
+    var rememberedMode: AppMode? { AppMode(rawValue: UserDefaults.standard.string(forKey: LaunchMode.rememberedKey) ?? "") }
+    @Published var showCopAddress = false
+    /// The AR stack has been started this run (camera + session + localizer); paused while snailCOP is up.
+    private(set) var arStarted = false
+    private(set) var arPausedForCop = false
+    private(set) lazy var cop = CopController(model: self)
+    /// "Open AR here" from snailCOP: the spot to walk to and the HUD line that guides there.
+    @Published var arTarget: ARHandoffTarget?
+    @Published var arTargetText: String?
+    /// The phone's last localized camera pose in the map frame (for snailCOP's "you are here").
+    private(set) var lastMapPose: (cam: [Double], ahead: [Double], t: Double)?
+    private var launchDone = false
+    private var pendingLink: AppDeepLink?
+
     /// 12.5: every launch starts on Select / Inspect (TapToolState); not persisted.
     private(set) var toolState = TapToolState()
     @Published var tool: ToolMode = ToolMode(TapToolState.launchDefault) {
@@ -211,8 +234,8 @@ final class AppModel: ObservableObject {
     }
     /// 12.7 drive mode FPV / Chase (Sources/Drive/DriveViewer): the non-AR 3D view from the driven body is up.
     @Published var showDriveViewer = false
-    /// Our AR session is paused (Scans, the 3D map or the drive FPV / Chase view is on screen): nothing may re-run it.
-    var arSuspended: Bool { showScans || showMap3D || showDriveViewer }
+    /// Our AR session is paused (Scans, the 3D map, the drive FPV / Chase view or snailCOP is on screen): nothing may re-run it.
+    var arSuspended: Bool { showScans || showMap3D || showDriveViewer || arPausedForCop || !arStarted }
     @Published var showLayers = false
     /// Where the Map should centre when it opens (map frame x, y, z) — set by a sheet row's Show / a room chip.
     @Published var mapFocus: [Double]?
@@ -614,7 +637,7 @@ final class AppModel: ObservableObject {
         let lg = services.log
         recorder.onEvent = { ev, data in lg.event(ev, data) }
         UIApplication.shared.isIdleTimerDisabled = true
-        DispatchQueue.main.async { [weak self] in self?.navStore.start() }     // 12.18 Layer A poller (idle unless shown)
+        // 12.18 Layer A poller (idle unless shown): started with AR (12.25; it touches the AR layer)
     }
 
     /// Screen stays awake while AR runs and while a capture uploads in front (set at launch and re-asserted here,
@@ -636,12 +659,6 @@ final class AppModel: ObservableObject {
         guard timer == nil else { return }
         let q = queue!, lg = logs!
         Task { await link.whenOnline { Task { try? await lg.syncAll(); await q.kick(reason: "online") } } }
-        let slog = services.log
-        SimContentStore.shared.inUse = { [weak self] in
-            guard let self else { return ([], []) }
-            return (self.serverSim.activeKinds.union(self.controller.sim.activeKinds), self.simRecents.keys)
-        }
-        SimContentStore.shared.attach(link: link, log: { e, d in slog.event(e, d) })   // 12.8 runtime sim content, 12.9 all models
         Task { await link.startMonitoring() }
         Task { [weak self] in
             guard let self else { return }
@@ -649,28 +666,33 @@ final class AppModel: ObservableObject {
             let items = await q.current()
             await MainActor.run { self.uploads = items }
             await self.link.probe(force: true)
-            await MainActor.run { self.warmLocalizer(reason: "launch") }       // 12.21 warm on open
+            await MainActor.run { if self.arStarted { self.warmLocalizer(reason: "launch") } }   // 12.21 warm on open (AR only, 12.25)
             await q.kick(reason: "launch")
         }
         timer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in self?.periodicSync() }
-        mapFollower.start()                                 // 10.7: cached head now, the server's head in the background
         let nc = NotificationCenter.default
         observers.append(nc.addObserver(forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main) { [weak self] _ in
             self?.backgroundFlush()
         })
         observers.append(nc.addObserver(forName: UIApplication.willEnterForegroundNotification, object: nil, queue: .main) { [weak self] _ in
             guard let self else { return }
-            self.log.event("foreground")
+            self.log.event("foreground", ["mode": .string(self.appMode?.rawValue ?? "chooser")])
             let q = self.queue!
-            // 10.6.x: every server loop resumes at once (owner: one timeout + background and it never placed him)
-            self.mapLocalizer.resume(why: "foreground")
-            self.mapFollower.resume(why: "foreground")
-            self.liveMap.resume(why: "foreground")
-            self.serverSim.resume(why: "foreground")
-            self.placeCtl.publish()
+            let ar = self.arActive                          // 12.25: the AR loops only while AR explore is up
+            if ar {
+                // 10.6.x: every server loop resumes at once (owner: one timeout + background and it never placed him)
+                self.mapLocalizer.resume(why: "foreground")
+                self.mapFollower.resume(why: "foreground")
+                self.liveMap.resume(why: "foreground")
+                self.serverSim.resume(why: "foreground")
+                self.placeCtl.publish()
+            } else if self.appMode == .cop {
+                self.cop.foreground()
+            }
             Task {
                 await self.link.probe(force: true)
                 await MainActor.run {                       // the server answered again (or still not): resume again
+                    guard self.arActive else { return }
                     self.warmLocalizer(reason: "foreground")                 // 12.21
                     if self.serverBase != nil { self.mapLocalizer.resume(why: "network") }
                 }
@@ -695,6 +717,7 @@ final class AppModel: ObservableObject {
 
     func periodicSync() {
         let q = queue!, lg = logs!
+        if appMode == .ar { cop.arMemory(level: memPlan.level) }      // 12.25: an unused hidden snailCOP view goes after 10 min
         Task {
             try? await lg.syncAll()
             await q.kick()
@@ -702,13 +725,17 @@ final class AppModel: ObservableObject {
     }
 
     private func backgroundFlush() {
-        log.event("background")
-        mapLocalizer.enteredBackground()
-        mapFollower.enteredBackground()
+        log.event("background", ["mode": .string(appMode?.rawValue ?? "chooser")])
+        if arStarted {
+            mapLocalizer.enteredBackground()
+            mapFollower.enteredBackground()
+        }
         // ARKit stops in the background and iOS may end a suspended app: finish the capture cleanly now
         if recorder.isRecording { stopRecording(reason: "background") }
-        roomScanner.appBackground()                     // 11.3: RoomPlan stops with ARKit; the room is built + spooled
-        meshMapper.appBackground()                      // 10.2: ARKit stops; the mapping upload finishes
+        if arStarted {
+            roomScanner.appBackground()                 // 11.3: RoomPlan stops with ARKit; the room is built + spooled
+            meshMapper.appBackground()                  // 10.2: ARKit stops; the mapping upload finishes
+        }
         guard bgTask == .invalid else { return }
         // short work only (log sync, packing any unpacked parts, handing them to the background session);
         // the capture bytes themselves travel on the background URLSession, which needs no background task
@@ -734,6 +761,152 @@ final class AppModel: ObservableObject {
         guard bgTask != .invalid else { return }
         UIApplication.shared.endBackgroundTask(bgTask)
         bgTask = .invalid
+    }
+
+    // MARK: 12.25 modes
+
+    /// AR explore is on screen and its session runs.
+    var arActive: Bool { appMode == .ar && arStarted && !arPausedForCop }
+
+    /// Once the UI is up: the launch decision (deep link > remembered > chooser).
+    func launch() {
+        guard !launchDone else { return }
+        launchDone = true
+        let d = LaunchMode.decide(remembered: UserDefaults.standard.string(forKey: LaunchMode.rememberedKey),
+                                  askEveryLaunch: askModeAtLaunch, deepLink: pendingLink)
+        log.event("app_launch_mode", ["mode": .string(d.mode?.rawValue ?? "chooser"), "reason": .string(d.reason)])
+        if let m = d.mode {
+            let link = pendingLink
+            pendingLink = nil
+            setMode(m, cause: "launch_\(d.reason)")
+            if let link { apply(link) }
+        }
+    }
+
+    /// The ONE way to switch modes (logged `app_mode` with its cause). AR starts on demand; snailCOP pauses it.
+    func setMode(_ m: AppMode, cause: String) {
+        if m == .cop, appMode == .ar, !ModeRules.canLeaveAR(recording: recording) {
+            flash("Stop recording first: snailCOP turns the camera off", seconds: 3)
+            log.event("app_mode_refused", ["to": .string(m.rawValue), "why": .string("recording")])
+            return
+        }
+        let from = appMode
+        UserDefaults.standard.set(m.rawValue, forKey: LaunchMode.rememberedKey)
+        guard m != from else { return }
+        var ev: [String: LogValue] = ["mode": .string(m.rawValue), "from": .string(from?.rawValue ?? "chooser"),
+                                      "cause": .string(cause), "ar_started": .bool(arStarted)]
+        for (k, v) in MemoryProbe.fields() where k == "footprint_mb" { ev[k] = v }
+        log.event("app_mode", ev)
+        switch m {
+        case .cop:
+            leaveAR()
+            appMode = .cop
+            UIApplication.shared.isIdleTimerDisabled = pendingUploads > 0      // no camera: the screen may dim
+            cop.show(why: cause)
+        case .ar:
+            if from == .cop { cop.hide(why: "mode_ar") }
+            appMode = .ar
+            UIApplication.shared.isIdleTimerDisabled = true
+            startOrResumeAR(cause: cause)
+        }
+    }
+
+    /// Leaving AR for snailCOP: Live map off, full-screen AR tools closed, the session paused (camera off).
+    private func leaveAR() {
+        guard arStarted, !arPausedForCop else { return }
+        if liveOn { setLive(false, cause: "mode_cop") }
+        if meshMapOn { meshMapOn = false }
+        if roomScanOn { roomScanner.stop(reason: "mode_cop") }
+        if drive.ui.active { drive.exit(why: "mode_cop") }
+        showMap = false
+        showMap3D = false
+        showScans = false
+        showDriveViewer = false
+        showSettings = false
+        arPausedForCop = true
+        controller.suspendForMap3D(why: "cop")
+    }
+
+    private func startOrResumeAR(cause: String) {
+        if !arStarted {
+            arStarted = true
+            controller.start()
+            let slog = services.log
+            SimContentStore.shared.inUse = { [weak self] in
+                guard let self else { return ([], []) }
+                return (self.serverSim.activeKinds.union(self.controller.sim.activeKinds), self.simRecents.keys)
+            }
+            SimContentStore.shared.attach(link: link, log: { e, d in slog.event(e, d) })   // 12.8 runtime sim content, 12.9 all models
+            mapFollower.start()                             // 10.7: cached head now, the server's head in the background
+            navStore.start()                                // 12.18 Layer A poller (idle unless shown)
+            warmLocalizer(reason: cause.hasPrefix("launch") ? "launch" : "mode_ar")     // 12.21 warm on open
+            return
+        }
+        guard arPausedForCop else { return }
+        arPausedForCop = false
+        controller.resumeAfterMap3D(why: "cop")
+        mapLocalizer.resume(why: "mode_ar")
+        mapFollower.resume(why: "mode_ar")
+        liveMap.resume(why: "mode_ar")
+        serverSim.resume(why: "mode_ar")
+        warmLocalizer(reason: "mode_ar")
+    }
+
+    /// The AR governor's level (ARSessionController): a hidden snailCOP web view goes when memory is tight.
+    func arMemLevel(_ l: MemLevel) { if appMode == .ar { cop.arMemory(level: l) } }
+
+    // MARK: 12.25 deep links + Open AR here
+
+    func openDeepLink(_ url: URL) {
+        guard let d = AppDeepLink.parse(url.absoluteString) else {
+            log.event("deep_link", ["ok": .bool(false), "scheme": .string(url.scheme ?? "")])
+            return
+        }
+        log.event("deep_link", ["ok": .bool(true), "mode": .string(d.mode.rawValue), "at": .bool(d.view != nil),
+                                "target": .bool(d.target != nil)])
+        guard launchDone else { pendingLink = d; return }
+        setMode(d.mode, cause: "deep_link")
+        apply(d)
+    }
+
+    private func apply(_ d: AppDeepLink) {
+        if let v = d.view { cop.goTo(v) }
+        if let t = d.target { openARHere(target: t, label: d.label ?? "Target") }
+    }
+
+    /// snailCOP's "Open AR here" (or a deep link): AR explore with a guide to the spot until you get there.
+    func openARHere(target: [Double], label: String) {
+        arTarget = ARHandoffTarget(target: target, label: label, since: Date().timeIntervalSince1970)
+        arTargetText = arTarget.map { "\($0.label): finding you first…" }
+        log.event("ar_target", ["source": .string("cop"), "label_len": .int(label.count)])
+        if appMode != .ar { setMode(.ar, cause: "open_ar_here") }
+    }
+
+    func clearARTarget(why: String) {
+        guard arTarget != nil else { return }
+        log.event("ar_target_clear", ["why": .string(why)])
+        arTarget = nil
+        arTargetText = nil
+    }
+
+    /// MapARLayer (2 Hz, while aligned): the camera in the map frame → snailCOP's "you are here" + the target guide.
+    func notePose(cam: [Double], ahead: [Double]) {
+        let now = Date().timeIntervalSince1970
+        lastMapPose = (cam, ahead, now)
+        guard let t = arTarget else { return }
+        if now - t.since > ARHandoffTarget.maxAgeS { clearARTarget(why: "age"); return }
+        let g = t.guide(camera: cam, forward: [ahead[0] - cam[0], ahead[1] - cam[1], ahead[2] - cam[2]])
+        if arTargetText != g.text { arTargetText = g.text }
+        if g.arrived, !arTargetArrived { arTargetArrived = true; log.event("ar_target_arrived", ["m": .double((g.distanceM * 100).rounded() / 100)]) }
+        if !g.arrived { arTargetArrived = false }
+    }
+    private var arTargetArrived = false
+
+    /// The pose snailCOP shows: live while AR explore is localized, else the last one with its age (nil = never localized).
+    func copPose(now: Double) -> PhonePose? {
+        guard let p = lastMapPose else { return nil }
+        let live = arActive && now - p.t < 3
+        return PhonePose.from(camera: p.cam, ahead: p.ahead, at: p.t, now: now, live: live)
     }
 
     /// "Send log": upload now and confirm with the path on the map server.

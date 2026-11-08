@@ -481,6 +481,11 @@ final class DriveController {
     // MARK: gamepad
 
     private func padConnected(_ name: String?, _ connected: Bool) {
+        if model.appMode == .cop {                          // 12.25: snailCOP mode drives / flies in the portal
+            model.log.event(connected ? "gamepad_connect" : "gamepad_disconnect", ["name": .string(name ?? ""), "mode": .string("cop")])
+            if !connected { model.cop.padFrame(nil) }
+            return
+        }
         ui.padName = connected ? name : nil
         router.reset()
         padOut = GamepadOutput(axes: TwinStickAxes(), turbo: false, wheelHeld: false, fired: [])
@@ -496,6 +501,7 @@ final class DriveController {
     }
 
     private func padFrame(_ f: GamepadFrame) {
+        if model.appMode == .cop { model.cop.padFrame(f); return }      // 12.25: the portal gets the pad
         guard padConfig.enabled else { return }
         lastPadFrame = f
         let out = router.step(f, config: padConfig)

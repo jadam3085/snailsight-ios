@@ -39,6 +39,10 @@ targets:
         NSAppTransportSecurity:
           NSAllowsArbitraryLoads: true
         UILaunchScreen: {}
+        # 12.25: snailsight://cop?at=x,y,z,d,yaw,pitch opens snailCOP at a view; snailsight://ar?target=x,y,z&label=… AR explore
+        CFBundleURLTypes:
+          - CFBundleURLName: snailsight
+            CFBundleURLSchemes: [snailsight]
         UIRequiredDeviceCapabilities: [arkit]
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
         UIStatusBarHidden: true

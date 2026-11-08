@@ -526,6 +526,10 @@ private struct CategorySection: View {
                 Button { model.showSettings = true } label: {
                     Label("App settings (server, camera, logs)…", systemImage: "gearshape")
                 }
+                // 12.25 app modes
+                Button { model.setMode(.cop, cause: "sheet") } label: { Label("Open snailCOP (camera off)", systemImage: "scope") }
+                Toggle(isOn: $model.askModeAtLaunch) { Label("Ask snailCOP / AR at launch", systemImage: "questionmark.circle") }
+                Button { model.showCopAddress = true } label: { Label("snailCOP address…", systemImage: "network") }
             }
         }
     }

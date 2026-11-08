@@ -11,11 +11,32 @@ struct SnailSightApp: App {
 
     var body: some SwiftUI.Scene {
         WindowGroup {
-            ContentView()
+            RootView()
                 .environmentObject(model)
                 .statusBarHidden(true)
                 .persistentSystemOverlays(.hidden)
         }
+    }
+}
+
+/// 12.25: the launch chooser, snailCOP (no camera) or AR explore. Networking (uploads, logs) runs in every mode; the AR
+/// stack starts only when AR explore is chosen (AppModel.setMode).
+struct RootView: View {
+    @EnvironmentObject var model: AppModel
+
+    var body: some View {
+        Group {
+            switch model.appMode {
+            case .none: ModeChooserView()
+            case .cop?: CopModeView(cop: model.cop)
+            case .ar?: ContentView()
+            }
+        }
+        .onAppear {
+            model.startNetworking()
+            model.launch()
+        }
+        .onOpenURL { model.openDeepLink($0) }
     }
 }
 
@@ -54,6 +75,7 @@ struct ContentView: View {
             .statusBarHidden(true)
         }
         .sheet(isPresented: $model.showPlaces) { PlacesView().environmentObject(model) }   // P2a places
+        .sheet(isPresented: $model.showCopAddress) { CopAddressSheet().environmentObject(model) }   // 12.25
         .sheet(isPresented: $model.showSpawn) {                             // 9.8 spawn picker
             SpawnPickerView().environmentObject(model).presentationDetents([.medium, .large])
         }
@@ -67,9 +89,7 @@ struct ContentView: View {
             ScansView(store: model.sharedScanStore(), followRev: model.mapFollower.followVersion)
         }
         .onAppear {
-            model.controller.start()
-            model.startNetworking()
-            UIApplication.shared.isIdleTimerDisabled = true   // as in Apple's sample: never dim mid-AR
+            UIApplication.shared.isIdleTimerDisabled = true   // as in Apple's sample: never dim mid-AR (AR started by setMode)
         }
     }
 }
