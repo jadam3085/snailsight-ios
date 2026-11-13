@@ -16,9 +16,10 @@ final class UIShellTests: XCTestCase {
 
     func testQuickActionsAreTheFourFromC1WithLabels() {
         // 12.19: Room scan left the primary row (it is Mapping ▸ Clean walls); Settings took the slot
-        XCTAssertEqual(QuickAction.allCases.map(\.title), ["Spawn", "Live map", "Record", "Settings"])
+        // 12.26: Walk replaced the bare Live map switch (still in Mapping ▸ Live map)
+        XCTAssertEqual(QuickAction.allCases.map(\.title), ["Walk", "Record", "Spawn", "Settings"])
         XCTAssertEqual(QuickAction.record.accessibility(on: true), "Stop recording")
-        XCTAssertTrue(QuickAction.liveMap.accessibility(on: false).contains("shared mesh"))
+        XCTAssertTrue(QuickAction.walk.accessibility(on: false).contains("shared map"))
         XCTAssertFalse(QuickAction.allCases.map(\.rawValue).contains("roomScan"))
     }
 

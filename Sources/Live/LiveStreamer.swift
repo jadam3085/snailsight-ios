@@ -58,6 +58,14 @@ final class LiveStreamer {
     private var skippedStill = 0
     private var skippedBlurry = 0
     private var maskedFrames = 0
+    /// 12.26: the server's ack `rate` hints, obeyed down to 1 Hz (SnailSightCore LiveRateCap).
+    private(set) var rateCap = LiveRateCap()
+    private var lastHintKey = ""
+    /// 12.26 walk: predicted blur of the newest AR frame, the snapshot / pause reason for the walk status line.
+    private(set) var lastBlurPx: Double?
+    var current: LiveSnapshot { snapshot }
+    var pausedNow: String? { pausedReason }
+    var rateHz: Double { gate.rateHz }
     private let personRequest: VNGeneratePersonSegmentationRequest = {     // used on `enc` only (serial)
         let r = VNGeneratePersonSegmentationRequest()
         r.qualityLevel = .balanced
@@ -90,6 +98,8 @@ final class LiveStreamer {
         uplink.onAck = { [weak self] o in                               // 12.18 M0 latency line
             guard let self else { return }
             self.model.islands.ack(o)                                   // 12.22 ack.islands (pill, island feeds)
+            self.model.walker.ack(o)                                    // 12.26 walk: accepted / trusted
+            if let h = LiveRateCap.parse(o) { self.rateHint(h) }        // 12.26 ack `rate` (live 0.15)
             if self.model.liveStages.ack(o) {
                 self.model.liveStagesChanged()
                 if let st = o["stages"] as? [String: Any], let seq = (st["seq"] as? NSNumber)?.intValue, seq >= self.lastStagesLogged + 10 || seq < self.lastStagesLogged {
@@ -105,6 +115,27 @@ final class LiveStreamer {
         }
     }
 
+    /// 12.26: obey the server's keyframe-rate hint (down to 1 Hz; back up after 20 s of keeping up).
+    private func rateHint(_ h: LiveRateCap.Hint) {
+        let from = gate.rateHz
+        let changed = rateCap.apply(h, now: Date().timeIntervalSince1970)
+        let key = "\(h.maxHz ?? -1)|\(h.why)"
+        if changed { applyRate() }
+        guard changed || key != lastHintKey else { return }
+        lastHintKey = key
+        model.log.event("live_rate_hint", ["max_hz": .double(h.maxHz ?? -1), "taken": .double(h.taken ?? -1),
+                                           "why": .string(h.why), "applied_hz": .double(gate.rateHz), "from_hz": .double(from),
+                                           "cap_hz": .double(rateCap.capHz ?? -1)])
+    }
+
+    private func applyRate() {
+        let r = rateCap.effective(user: LiveGate.clampRate(model.liveRateHz))
+        guard r != gate.rateHz else { return }
+        gate.rateHz = r
+        uplink.setRate(r)
+        publish()
+    }
+
     /// LiDAR depth frames are needed while the mode is on (ARSessionController adds `.sceneDepth`).
     var wantsDepth: Bool { model.liveOn }
 
@@ -115,6 +146,7 @@ final class LiveStreamer {
         if on {
             if closedStreams.contains(streamID) { newStream() }
             gate = LiveGate(rateHz: model.liveRateHz)
+            gate.rateHz = rateCap.effective(user: gate.rateHz)            // 12.26: a standing server hint still holds
             pausedReason = nil
             model.log.event("live_on", ["stream_id": .string(streamID), "rate_hz": .double(gate.rateHz),
                                         "map_id": .string(model.liveMapID), "next_seq": .int(nextSeq),
@@ -131,7 +163,7 @@ final class LiveStreamer {
     }
 
     func rateChanged() {
-        gate.rateHz = LiveGate.clampRate(model.liveRateHz)
+        gate.rateHz = rateCap.effective(user: LiveGate.clampRate(model.liveRateHz))
         uplink.setRate(gate.rateHz)
         model.log.event("live_rate", ["rate_hz": .double(gate.rateHz)])
         publish()
@@ -205,6 +237,7 @@ final class LiveStreamer {
                 exposureS: f.camera.exposureDuration, focalPx: Double(f.camera.intrinsics[0][0]))
         }
         motionPrev = (f.timestamp, pos, q)
+        lastBlurPx = blur
         guard !encoding else { return }
         switch gate.decide(t: f.timestamp, T: T, blurPx: blur) {
         case .capture: break
@@ -224,8 +257,16 @@ final class LiveStreamer {
         let img = CIImage(cvPixelBuffer: pixels)
         let stream = streamID, stamp = f.timestamp, wall = Date().timeIntervalSince1970
         let exposure = f.camera.exposureDuration, kfBlur = blur
+        let imgW = Int(res.width)
         enc.async { [weak self] in
             guard let self else { return }
+            // 12.26: the keyframe's depth quality (low confidence / far / grazing / no depth), for the walk hints and
+            // the stored header (`capture_q`); 1/16 of the pixels, ~1 ms
+            let quality: CaptureQuality? = d.withUnsafeBytes { raw in
+                let mm = Array(raw.bindMemory(to: UInt16.self))
+                return CaptureQuality.measure(depthMM: mm, conf: conf.map { [UInt8]($0.0) }, width: dw, height: dh,
+                                              K: Kv, imageW: imgW)
+            }
             let rgb = self.jpeg(img)
             let dp = CaptureRecorder.png(d, width: dw, height: dh, bits: 16)
             let cp = conf.flatMap { CaptureRecorder.png($0.0, width: $0.1, height: $0.2, bits: 8) }
@@ -249,7 +290,9 @@ final class LiveStreamer {
                 }
                 let h = LiveKeyframeHeader(seq: seq, streamID: stream, t: stamp, wall: wall, T: T, K: Kv,
                                            imageSize: size, tracking: "normal", blurPx: kfBlur, exposureS: exposure,
-                                           mapLock: lock, geo: self.model.geo.geo(T: T))   // 12.22 weak geo prior
+                                           mapLock: lock, geo: self.model.geo.geo(T: T),   // 12.22 weak geo prior
+                                           captureQ: quality)
+                self.model.walker.keyframe(quality: quality, conf: cp != nil, stream: stream)
                 var blobs: [(name: String, data: Data)] = [(name: "depth_png", data: dp), (name: "rgb_jpg", data: rgb)]
                 if let cp { blobs.append((name: "conf_png", data: cp)) }
                 if let mp {
@@ -853,7 +896,7 @@ final class LiveUplink {
         for s in (spool[t] ?? []) where s <= contiguous { deleteFile(t, s) }
         acked += 1
         if (o["dup"] as? Bool) == true { dups += 1 }
-        if o["stages"] != nil || o["gate"] != nil || o["islands"] != nil {   // 12.18 M0 stages + gate; 12.22 islands
+        if o["stages"] != nil || o["gate"] != nil || o["islands"] != nil || o["rate"] != nil {   // 12.18 M0 stages + gate; 12.22 islands; 12.26 rate
             let oc = o
             DispatchQueue.main.async { [weak self] in self?.onAck?(oc) }
         }

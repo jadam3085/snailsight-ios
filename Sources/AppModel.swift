@@ -188,7 +188,9 @@ final class AppModel: ObservableObject {
                 // shows up as "unattributed", which is a bug to find)
                 log.event("live_state", ["on": .bool(liveOn), "cause": .string(liveCause ?? "unattributed"),
                                          "recording": .bool(recording)])
+                let cause = liveCause ?? "unattributed"
                 liveCause = nil
+                if !liveOn { walker.liveTurnedOff(cause: cause) }                // 12.26: the walk ends with Live map
                 geo.setEnabled(liveOn)                                          // 12.22 GPS / compass / baro priors
                 islands.liveChanged(liveOn)
                 liveStreamer.setEnabled(liveOn)
@@ -512,6 +514,8 @@ final class AppModel: ObservableObject {
     private(set) lazy var placeCtl = PlaceController(model: self)
     private(set) lazy var mapLocalizer = MapLocalizer(model: self)
     private(set) lazy var liveStreamer = LiveStreamer(model: self)
+    /// 12.26 one-tap walk (Sources/Live/WalkController): AR + localize + Live map + status line + summary.
+    private(set) lazy var walker = WalkController(model: self)
     private(set) lazy var meshMapper = MeshMapper(model: self)
     private(set) lazy var roomScanner = RoomScanner(model: self)
     private(set) lazy var terrainLayer = TerrainARLayer(model: self)
@@ -870,6 +874,7 @@ final class AppModel: ObservableObject {
     }
 
     private func apply(_ d: AppDeepLink) {
+        if d.walk { walker.start(cause: "deep_link") }                  // 12.26 snailsight://walk
         if let v = d.view { cop.goTo(v) }
         if let t = d.target { openARHere(target: t, label: d.label ?? "Target") }
     }
@@ -910,6 +915,12 @@ final class AppModel: ObservableObject {
     }
 
     /// "Send log": upload now and confirm with the path on the map server.
+    /// 12.26: upload the session log quietly (a walk's end: the scorer reads it on the server).
+    func syncLogs() {
+        let lg = logs!
+        Task { try? await lg.syncAll() }
+    }
+
     func sendLog() {
         guard !sendingLog else { return }
         sendingLog = true

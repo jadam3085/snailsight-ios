@@ -45,12 +45,14 @@ public enum SheetDetent: Int, CaseIterable, Equatable {
 
 /// The collapsed sheet's four quick actions (concept C1; 12.19: Room scan left the row for Settings, see SheetCategory).
 public enum QuickAction: String, CaseIterable, Equatable {
-    case spawn, liveMap, record, settings
+    // 12.26: Walk (one-tap validation walk: AR + localize + Live map + status + summary) replaces the bare Live map
+    // switch, which stays in Mapping ▸ Live map; Spawn moves right (sim, not the everyday job)
+    case walk, record, spawn, settings
 
     public var title: String {
         switch self {
         case .spawn: return "Spawn"
-        case .liveMap: return "Live map"
+        case .walk: return "Walk"
         case .record: return "Record"
         case .settings: return "Settings"
         }
@@ -59,7 +61,7 @@ public enum QuickAction: String, CaseIterable, Equatable {
     public var symbol: String {
         switch self {
         case .spawn: return "plus.circle"
-        case .liveMap: return "dot.radiowaves.left.and.right"
+        case .walk: return "figure.walk"
         case .record: return "record.circle"
         case .settings: return "slider.horizontal.3"
         }
@@ -69,7 +71,7 @@ public enum QuickAction: String, CaseIterable, Equatable {
     public func accessibility(on: Bool) -> String {
         switch self {
         case .spawn: return on ? "End spawn mode" : "Spawn an animal or object"
-        case .liveMap: return on ? "Stop the live map" : "Start the live map: your walk builds the shared mesh"
+        case .walk: return on ? "Stop the walk" : "Start a walk: find your position and stream it to the shared map"
         case .record: return on ? "Stop recording" : "Record the room"
         case .settings: return on ? "Close settings" : "Open the settings by category"
         }

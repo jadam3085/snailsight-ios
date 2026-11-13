@@ -40,13 +40,17 @@ public struct LiveKeyframeHeader: Equatable {
     public var mapLock: LiveMapLock?
     /// 12.22, optional (omitted when nil): GPS / compass / barometer as weak priors (API §6b.13 `geo`).
     public var geo: LiveGeo?
+    /// 12.26, optional (omitted when nil): the keyframe's measured depth quality (CaptureQuality, header `capture_q`):
+    /// shares of low-confidence / far / grazing / valid depth pixels, for the walk check (additive; servers ignore it).
+    public var captureQ: CaptureQuality?
 
     public init(seq: Int, streamID: String, t: Double, wall: Double, T: [Double], K: [Double], imageSize: [Int],
                 tracking: String = "normal", blurPx: Double? = nil, exposureS: Double? = nil,
-                mapLock: LiveMapLock? = nil, geo: LiveGeo? = nil) {
+                mapLock: LiveMapLock? = nil, geo: LiveGeo? = nil, captureQ: CaptureQuality? = nil) {
         self.seq = seq; self.streamID = streamID; self.t = t; self.wall = wall
         self.T = T; self.K = K; self.imageSize = imageSize; self.tracking = tracking
         self.blurPx = blurPx; self.exposureS = exposureS; self.mapLock = mapLock; self.geo = geo
+        self.captureQ = captureQ
     }
 }
 
@@ -96,6 +100,7 @@ public enum LiveKeyframe {
             o["lock"] = lock
         }
         if let g = h.geo { o["geo"] = g.json }
+        if let q = h.captureQ { o["capture_q"] = q.json }
         return o
     }
 

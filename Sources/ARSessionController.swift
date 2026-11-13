@@ -715,6 +715,7 @@ final class ARSessionController: NSObject, ARSessionDelegate {
         model.meshMapper.tick()                          // 10.2: mesh anchors, upload pump, mapping line
         model.liveMap.tick()                             // 10.1 L3: other agents, downlink
         model.islands.tick()                             // 12.22 islands: world, feeds, AR placement
+        model.walker.tick(frame: frame)                  // 12.26 one-tap walk: status line, coverage, hints
         model.serverSim.tick()                           // 10.1 S2: shared sim connection + authority
         model.cameraMark.tick()                          // 12.2 Mark camera: ring faces you, lock quality
         model.cameraCheck.tick()                         // 12.2 Camera check: pose batches + who sees me

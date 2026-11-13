@@ -73,6 +73,8 @@ public struct SurfaceFrame: Equatable {
     public var hwWall: Double?
     public var agents: [String]
     public var captureToCommitMs: Double?
+    /// 12.26: the frame came as ssq1 (WireQ), for the downlink stats.
+    public var ssq1 = false
 
     struct RawBlock: Decodable {
         var b: [Int]
@@ -83,6 +85,7 @@ public struct SurfaceFrame: Equatable {
         var data: String?
         var rgb: String?
         var hm: String?
+        var nv: Int?                          // 12.26 ssq1: vertex count (records exist for nv > 0 only)
     }
 
     struct Raw: Decodable {
@@ -100,6 +103,12 @@ public struct SurfaceFrame: Equatable {
         var hw: [String: Int]?
         var hw_wall: Double?
         var stages: [String: Double]?
+        // 12.26 ssq1 (WireQ): enc, block table, quantised meshes, quantum, colour bin
+        var enc: String?
+        var bt: String?
+        var q: String?
+        var q_m: Double?
+        var cq: Int?
     }
 
     /// Is this downlink message a Layer B tile? (cheap check before the full decode)
@@ -112,23 +121,45 @@ public struct SurfaceFrame: Equatable {
     public static func parse(_ data: Data) -> SurfaceFrame? {
         guard let r = try? JSONDecoder().decode(Raw.self, from: data), r.type == "tile", r.layer == "surface" else { return nil }
         let p = r.key.split(separator: "/").compactMap { Int($0) }
+        let blockM = r.block_m ?? 0.4
+        // 12.26 ssq1: the block table and every block mesh come packed (WireQ); decoded = the f32 values exactly
+        var raws = r.blocks ?? []
+        var qrec: [Int: WireQ.Record] = [:]          // index in raws → decoded mesh
+        if r.enc == WireQ.enc {
+            guard let bt = r.bt.flatMap({ Data(base64Encoded: $0) }),
+                  let tab = try? Inflate.zlib(bt), let list = try? JSONDecoder().decode([RawBlock].self, from: tab)
+            else { return nil }
+            raws = list
+            let withMesh = raws.indices.filter { (raws[$0].nv ?? 0) > 0 && raws[$0].b.count == 3 }
+            if !withMesh.isEmpty {
+                guard let qd = r.q.flatMap({ Data(base64Encoded: $0) }),
+                      let recs = try? WireQ.unpack(qd, origins: withMesh.map { i in raws[i].b.map { Double($0) * blockM } },
+                                                   qm: r.q_m ?? 0.001, cq: r.cq ?? 4),
+                      recs.count == withMesh.count else { return nil }
+                for (k, i) in withMesh.enumerated() { qrec[i] = recs[k] }
+            }
+        }
         var blocks: [SurfaceBlock] = []
-        for b in r.blocks ?? [] where b.b.count == 3 {
+        for (bi, b) in raws.enumerated() where b.b.count == 3 {
             let surf = b.s == "surface"
             var mesh: FlatMesh?
-            if surf, let d = b.data { mesh = LiveMeshTile.decode(enc: "f32", base64: d) }
             var rgb: [UInt8]?
-            if let c = b.rgb, let d = Data(base64Encoded: c), let m = mesh, d.count == m.vertexCount * 3 { rgb = [UInt8](d) }
+            if let rec = qrec[bi] {
+                if surf { mesh = rec.mesh; rgb = rec.rgb }
+            } else if surf, let d = b.data { mesh = LiveMeshTile.decode(enc: "f32", base64: d) }
+            if rgb == nil, let c = b.rgb, let d = Data(base64Encoded: c), let m = mesh, d.count == m.vertexCount * 3 { rgb = [UInt8](d) }
             blocks.append(SurfaceBlock(key: BlockKey(b.b[0], b.b[1], b.b[2]), surface: surf, rev: b.rev ?? 0,
                                        tracked: b.tracked ?? 0, settled: b.src == "settled", mesh: mesh, rgb: rgb,
                                        hideMask: HideMask.decode(b.hm)))
         }
         let agents = Array(Set((r.hw ?? [:]).keys.map { k in k.split(separator: "/").first.map(String.init) ?? k })).sorted()
-        return SurfaceFrame(key: r.key, level: r.level ?? (p.first ?? 0), tx: r.tx ?? (p.count == 3 ? p[1] : 0),
+        var f = SurfaceFrame(key: r.key, level: r.level ?? (p.first ?? 0), tx: r.tx ?? (p.count == 3 ? p[1] : 0),
                             ty: r.ty ?? (p.count == 3 ? p[2] : 0), ver: r.ver ?? TileVer(base: 0, seq: 0), since: r.since,
-                            blockM: r.block_m ?? 0.4, blocks: blocks,
+                            blockM: blockM, blocks: blocks,
                             removed: (r.removed ?? []).filter { $0.count == 3 }.map { BlockKey($0[0], $0[1], $0[2]) },
                             hwWall: r.hw_wall, agents: agents, captureToCommitMs: r.stages?["capture_to_commit_ms"])
+        f.ssq1 = r.enc == WireQ.enc
+        return f
     }
 }
 

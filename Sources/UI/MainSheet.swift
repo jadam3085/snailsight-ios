@@ -65,7 +65,7 @@ struct MainSheet: View {
             .padding(.horizontal, 12)
             .frame(height: 44)
             .background(Color.primary.opacity(0.07), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-            QuickActionsRow()
+            QuickActionsRow(walker: model.walker)
             if model.sheetDetent != .collapsed || drag < -20 { CategoryChips() }
         }
         .padding(.horizontal, 16)
@@ -117,6 +117,7 @@ private struct ViewPresetMenu: View {
 
 private struct QuickActionsRow: View {
     @EnvironmentObject var model: AppModel
+    @ObservedObject var walker: WalkController
 
     var body: some View {
         HStack(spacing: 8) {
@@ -133,12 +134,13 @@ private struct QuickActionsRow: View {
                             }
                         }
                         .frame(height: 26)
-                        Text(on(a) && a == .record ? "Stop" : a.title).font(.caption2.weight(.semibold)).lineLimit(1)
+                        Text(on(a) && (a == .record || a == .walk) ? (a == .walk ? "Stop walk" : "Stop") : a.title)
+                            .font(.caption2.weight(.semibold)).lineLimit(1)
                             .minimumScaleFactor(0.8)
                     }
                     .frame(maxWidth: .infinity, minHeight: 56)
-                    .foregroundStyle(on(a) ? Color.accentColor : Color.primary)
-                    .background(on(a) ? Color.accentColor.opacity(0.16) : Color.primary.opacity(0.06),
+                    .foregroundStyle(on(a) ? Color.accentColor : (a == .walk ? Color.green : Color.primary))
+                    .background(on(a) ? Color.accentColor.opacity(0.16) : (a == .walk ? Color.green.opacity(0.16) : Color.primary.opacity(0.06)),
                                 in: RoundedRectangle(cornerRadius: 12, style: .continuous))
                 }
                 .buttonStyle(.plain)
@@ -152,7 +154,7 @@ private struct QuickActionsRow: View {
     private func on(_ a: QuickAction) -> Bool {
         switch a {
         case .spawn: return model.spawnMode
-        case .liveMap: return model.liveOn
+        case .walk: return walker.active
         case .record: return model.recording
         case .settings: return model.sheetDetent != .collapsed && model.sheetCategory.isSettings && model.sheetQuery.isEmpty
         }
@@ -161,7 +163,7 @@ private struct QuickActionsRow: View {
     private func disabled(_ a: QuickAction) -> Bool {
         switch a {
         case .spawn: return model.recording
-        case .liveMap, .record, .settings: return false
+        case .walk, .record, .settings: return false
         }
     }
 
@@ -176,22 +178,8 @@ private struct QuickActionsRow: View {
             }
         case .settings:
             if on(a) { model.sheetDetent = .collapsed } else { model.sheetQuery = ""; model.openSettings(from: "quick") }
-        case .liveMap:
-            let now = Date().timeIntervalSince1970
-            let d = LiveTapGuard.decide(now: now, turningOn: !model.liveOn, lastRecordToggle: model.lastRecordToggleAt,
-                                        pendingConfirmAt: model.liveOffConfirmAt)
-            if d == .confirm {                      // 12.23: a Live-off tap right after Record start / stop asks again
-                model.liveOffConfirmAt = now
-                model.log.event("live_tap_guard", ["since_record_s": .double(((now - (model.lastRecordToggleAt ?? now)) * 10).rounded() / 10)])
-                model.flash("Live map stays on while recording. Tap Live map again to stop it", seconds: 3)
-                return
-            }
-            model.liveOffConfirmAt = nil
-            model.setLive(!model.liveOn, cause: "owner_tap")
-            if model.liveOn {                       // the point of Live map: watch the shared mesh grow from your walk
-                if !model.meshLive { model.meshLive = true }
-                model.flash("Live map on: your walk builds the shared mesh (fresh tiles glow)", seconds: 3)
-            }
+        case .walk:                                 // 12.26 one tap: AR + localize + Live map + status (Live map alone: Mapping)
+            if walker.active { walker.stop(cause: "owner_tap") } else { walker.start(cause: "quick_action") }
         case .record: model.toggleRecording()
         }
     }
@@ -430,6 +418,8 @@ private struct CategorySection: View {
         case .liveMap:
             Section {
                 Toggle(isOn: Binding(get: { model.liveOn }, set: { model.setLive($0, cause: "sheet_toggle") })) { Label("Live map", systemImage: "dot.radiowaves.left.and.right") }
+                // 12.26: the walk's small capture hints (weak / far / edge-on depth, too fast, coverage)
+                Toggle(isOn: Binding(get: { model.walker.hintsOn }, set: { model.walker.hintsOn = $0 })) { Label("Walk hints", systemImage: "lightbulb") }
                 Picker(selection: $model.liveRateHz) {
                     ForEach(LiveGate.allowedRates, id: \.self) { Text(LiveText.rate($0)).tag($0) }
                 } label: { Label("Live rate", systemImage: "metronome") }

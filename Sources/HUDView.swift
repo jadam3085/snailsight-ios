@@ -76,20 +76,8 @@ struct HUDView: View {
                     .background(.ultraThinMaterial, in: Capsule())
             }
             if let u = model.undoText { UndoToast(text: u) }
-            if let l = model.liveText {
-                LiveCapsule(text: l, good: model.liveGood)
-                if let st = model.liveStagesText {                       // 12.18 M0: capture → server → phone → drawn
-                    Button { model.liveStagesOpen.toggle() } label: {
-                        Text(model.liveStagesOpen ? (model.liveStagesDetail ?? st) : st)
-                            .font(.caption2.weight(.medium)).monospacedDigit()
-                            .lineLimit(model.liveStagesOpen ? 4 : 1).minimumScaleFactor(0.7)
-                            .padding(.horizontal, 10).padding(.vertical, 3)
-                            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 10))
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("Live latency \(st)")
-                }
-            }
+            WalkHUD(walker: model.walker)                                // 12.26 one-tap walk: status + summary
+            LiveLines(walker: model.walker)
             if !mark.active { CameraCheckPanel(check: model.cameraCheck) }  // 12.2 Camera check: who sees me
             if model.drawHouse != .off || model.drawTerrain, !model.recording,
                !model.arStatus.title.isEmpty, model.arStatus.tone != .good {
@@ -121,6 +109,29 @@ struct HUDView: View {
                 .background(.ultraThinMaterial, in: Capsule())
         }
         RecPill()
+    }
+}
+
+/// The Live map line + latency line (12.18), hidden while a walk shows its own status (12.26: tap the walk bar for them).
+private struct LiveLines: View {
+    @EnvironmentObject var model: AppModel
+    @ObservedObject var walker: WalkController
+
+    var body: some View {
+        if walker.session == nil, let l = model.liveText {
+            LiveCapsule(text: l, good: model.liveGood)
+            if let st = model.liveStagesText {                       // 12.18 M0: capture → server → phone → drawn
+                Button { model.liveStagesOpen.toggle() } label: {
+                    Text(model.liveStagesOpen ? (model.liveStagesDetail ?? st) : st)
+                        .font(.caption2.weight(.medium)).monospacedDigit()
+                        .lineLimit(model.liveStagesOpen ? 4 : 1).minimumScaleFactor(0.7)
+                        .padding(.horizontal, 10).padding(.vertical, 3)
+                        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 10))
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Live latency \(st)")
+            }
+        }
     }
 }
 

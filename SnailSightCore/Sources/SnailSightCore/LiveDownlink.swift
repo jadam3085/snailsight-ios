@@ -104,7 +104,8 @@ public enum LiveSubscribe {
 
     public static func message(agentID: String, mapID: String, baseVersion: Int?, tiles: [String: TileVer],
                                epoch: String? = nil, seq: Int? = nil,
-                               bbox: [Double]? = nil, layers: [String] = LiveSubscribe.layers) -> Data {
+                               bbox: [Double]? = nil, layers: [String] = LiveSubscribe.layers,
+                               surfaceEnc: String? = nil) -> Data {
         var since: [String: Any] = ["tiles": tiles.mapValues { ["base_version": $0.base, "live_seq": $0.seq] }]
         if let b = baseVersion { since["base_version"] = b }
         if let e = epoch { since["epoch"] = e }
@@ -113,8 +114,27 @@ public enum LiveSubscribe {
                                 "since": since, "transport": "json", "accept": ["mesh": ["f32"]],
                                 "hmask": 1]                     // 12.24: Layer B per-voxel supersede masks (API §6b.7)
         if let b = bbox, b.count == 4 { o["bbox"] = b }
+        if let e = surfaceEnc { o["surface_enc"] = e }          // 12.26: ssq1 Layer B frames (WireQ)
         return (try? JSONSerialization.data(withJSONObject: o, options: [.sortedKeys])) ?? Data()
     }
+}
+
+/// 12.26 (requirement 2026-11-13 R1-R4): what each live socket subscribes to. A server with Layer B (`live_surface`,
+/// live 0.13+) gets `surface` and NO `mesh` (the legacy L3 mesh wakes the server's third live volume for every phone;
+/// the app draws Layer B anyway). Older servers keep the 12.25 lists. `ssq1` when the server offers it.
+public enum LiveLayers {
+    public static let houseBase = ["corrections", "agents", "changes", "docs"]
+
+    public static func house(_ f: ServerFeatures, estimated: Bool) -> [String] {
+        (f.liveSurface ? houseBase + ["surface"] : houseBase + ["mesh", "surface"]) + (estimated ? ["estimated"] : [])
+    }
+
+    public static func island(_ f: ServerFeatures) -> [String] {
+        f.liveSurface ? ["corrections", "surface"] : ["corrections", "mesh"]
+    }
+
+    /// `surface_enc` for the subscribe / `enc` for REST refetches; nil = the server's default (f32 on json).
+    public static func surfaceEnc(_ f: ServerFeatures) -> String? { f.surfaceSSQ1 ? WireQ.name : nil }
 }
 
 /// Which tile versions we hold: newer-only acceptance, and the `since.tiles` vector for a reconnect.
@@ -417,6 +437,10 @@ public struct ServerFeatures: Equatable {
     public func liveDownlink(forced: Bool) -> Bool {
         forced || !list.isDisjoint(with: ["live_downlink", "live_deltas", "live_subscribe", "map_live"])
     }
+
+    /// 12.26: the live socket serves Layer B `surface` (live 0.13+) / its ssq1 encoding (live 0.14+).
+    public var liveSurface: Bool { list.contains("live_surface") }
+    public var surfaceSSQ1: Bool { list.contains("live_surface_ssq1") }
 
     /// 12.0: the surveyed-vs-estimated world (API §5.16).
     public var estimatedWorld: Bool { list.contains("estimated_world") }

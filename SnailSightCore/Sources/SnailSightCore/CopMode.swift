@@ -80,8 +80,11 @@ public struct AppDeepLink: Equatable {
     public var target: [Double]?
     public var label: String?
     public var map: String?
-    public init(mode: AppMode, view: CopView? = nil, target: [Double]? = nil, label: String? = nil, map: String? = nil) {
-        self.mode = mode; self.view = view; self.target = target; self.label = label; self.map = map
+    /// 12.26 `snailsight://walk`: AR explore + Start walk (one-tap validation walk).
+    public var walk = false
+    public init(mode: AppMode, view: CopView? = nil, target: [Double]? = nil, label: String? = nil, map: String? = nil,
+                walk: Bool = false) {
+        self.mode = mode; self.view = view; self.target = target; self.label = label; self.map = map; self.walk = walk
     }
 
     public static let scheme = "snailsight"
@@ -101,6 +104,8 @@ public struct AppDeepLink: Equatable {
             switch host {
             case "cop", "snailcop":
                 return AppDeepLink(mode: .cop, view: (q["at"] ?? frag["at"]).flatMap(CopView.parse), map: map)
+            case "walk":
+                return AppDeepLink(mode: .ar, map: map, walk: true)
             case "ar", "explore":
                 var t: [Double]?
                 if let s = q["target"], let v = CopView.parse(s) { t = v.target }

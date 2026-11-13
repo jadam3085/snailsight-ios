@@ -65,6 +65,8 @@ private struct CopModePill: View {
 
     var body: some View {
         Menu {
+            // 12.26 one tap: AR + find your position + Live map + status line
+            Button { model.walker.start(cause: "cop_pill") } label: { Label("Start walk", systemImage: "figure.walk") }
             Button { model.setMode(.ar, cause: "cop_pill") } label: { Label("AR explore (camera)", systemImage: "arkit") }
             Button { cop.reload() } label: { Label("Reload snailCOP", systemImage: "arrow.clockwise") }
             Button { model.showCopAddress = true } label: { Label("snailCOP address…", systemImage: "network") }
@@ -188,6 +190,23 @@ struct ModeChooserView: View {
             VStack(spacing: 16) {
                 Text("SnailSight").font(.largeTitle.weight(.bold))
                 Text("What do you want to open?").font(.callout).foregroundStyle(.white.opacity(0.65))
+                Button { model.walker.start(cause: "chooser") } label: {      // 12.26 one-tap walk
+                    HStack(spacing: 12) {
+                        Image(systemName: "figure.walk").font(.system(size: 26, weight: .semibold)).frame(width: 40)
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("Start walk").font(.title3.weight(.bold))
+                            Text("Camera + LiDAR: finds you, streams your walk to the shared map, then the server improves it.")
+                                .font(.footnote).foregroundStyle(.black.opacity(0.7)).multilineTextAlignment(.leading)
+                        }
+                        Spacer(minLength: 0)
+                    }
+                    .padding(16)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Color.green.opacity(0.85), in: RoundedRectangle(cornerRadius: 16))
+                    .foregroundStyle(.black)
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Start walk")
                 card(.cop, icon: "scope", title: "snailCOP",
                      text: "The whole picture: cameras, alerts, sensors, sim and robots in the 3D world. No camera, no localizing.")
                 card(.ar, icon: "arkit", title: "AR explore",

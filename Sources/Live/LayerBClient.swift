@@ -30,6 +30,8 @@ final class LayerBClient {
     private var refetching = Set<String>()
     private var stats = (frames: 0, blocks: 0, removed: 0, gaps: 0, refetches: 0, buildMs: 0.0, lagMs: [Double]())
     private var lastStats: TimeInterval = 0
+    /// 12.26: downlink bytes of surface frames, frames that came as ssq1, frames that failed to decode (per stats window).
+    private var wire = (bytes: 0, ssq1: 0, bad: 0)
     private var firstLogged = false
     private var drawnColour: MeshColour?
     private var shownLive: Bool?
@@ -114,7 +116,14 @@ final class LayerBClient {
     /// A downlink text frame with layer `surface` (LiveMapClient). Returns true when it was one.
     @discardableResult
     func handle(_ d: Data) -> Bool {
-        guard SurfaceFrame.isSurface(d), let f = SurfaceFrame.parse(d) else { return false }
+        guard SurfaceFrame.isSurface(d) else { return false }
+        wire.bytes += d.count
+        guard let f = SurfaceFrame.parse(d) else {
+            wire.bad += 1
+            if wire.bad == 1 { model.log.event("layerb_decode_error", ["bytes": .int(d.count)]) }
+            return true                                                 // a surface frame, just not drawable
+        }
+        if f.ssq1 { wire.ssq1 += 1 }
         apply(f, refetched: false)
         return true
     }
@@ -188,13 +197,15 @@ final class LayerBClient {
         refetching.insert(key)
         stats.refetches += 1
         let map = model.liveMapID
+        let enc = LiveLayers.surfaceEnc(model.serverFeatures)                   // 12.26 ssq1 refetches too
         Task { [weak self] in
             var frame: SurfaceFrame?
             var status = 0
             if let r = try? await link.request("GET", "/v1/live/surface/\(level)/\(tx)/\(ty)",
                                                query: [URLQueryItem(name: "map_id", value: map),
                                                        URLQueryItem(name: "transport", value: "json"),
-                                                       URLQueryItem(name: "hmask", value: "1")], timeout: 20) {
+                                                       URLQueryItem(name: "hmask", value: "1")]
+                                                       + (enc.map { [URLQueryItem(name: "enc", value: $0)] } ?? []), timeout: 20) {
                 status = r.1
                 if r.1 == 200 { frame = SurfaceFrame.parse(r.0) }
             }
@@ -325,7 +336,9 @@ final class LayerBClient {
             "lag_ms_p50": .double(l.isEmpty ? -1 : l[l.count / 2].rounded()),
             "lag_ms_max": .double(l.last?.rounded() ?? -1), "lag_n": .int(l.count),
             "evicted": .int(evicted), "mem_mb": .double((Double(estimatedBytes) / 1_048_576 * 10).rounded() / 10),
+            "ssq1": .int(wire.ssq1), "kb": .int(wire.bytes / 1024), "bad": .int(wire.bad),     // 12.26 wire
         ])
         stats = (0, 0, 0, 0, 0, 0, [])
+        wire = (0, 0, 0)
     }
 }

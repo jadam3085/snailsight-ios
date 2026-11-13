@@ -290,6 +290,10 @@ final class IslandFeed {
     private var lastInbound: TimeInterval = 0
     private var lastPing: TimeInterval = 0
     private var store = LiveTileStore()
+    /// 12.26 (requirement 2026-11-13 R2): on a Layer B server the island's surface comes as `surface` block deltas,
+    /// drawn per tile like the old mesh tiles (island frame); the legacy `mesh` layer is not asked for.
+    private var lb = LayerBStore()
+    private var refetching = Set<String>()
     private var entities: [String: ModelEntity] = [:]
     private var data: [String: (mesh: FlatMesh, rgb: [UInt8]?)] = [:]
     private var lru = SpatialLRU<String>()
@@ -370,8 +374,13 @@ final class IslandFeed {
         tk.resume()
         subCenter = cam
         let bbox: [Double]? = cam.map { [$0[0] - Self.half, $0[1] - Self.half, $0[0] + Self.half, $0[1] + Self.half] }
+        let ls = LiveLayers.island(model.serverFeatures), enc = LiveLayers.surfaceEnc(model.serverFeatures)
+        let held = Dictionary(uniqueKeysWithValues: lb.held.map { ("surface:" + $0.key, $0.value) })
         let sub = LiveSubscribe.message(agentID: model.agentID, mapID: mapID, baseVersion: store.baseVersion,
-                                        tiles: store.allSince, bbox: bbox, layers: ["corrections", "mesh"])
+                                        tiles: store.allSince.merging(held) { a, _ in a }, bbox: bbox, layers: ls,
+                                        surfaceEnc: ls.contains("surface") ? enc : nil)
+        model.log.event("live_subscribe", ["socket": .string("island"), "island": .string(id), "layers": .string(ls.joined(separator: ",")),
+                                           "surface_enc": .string(enc ?? "f32"), "mesh": .bool(ls.contains("mesh"))])
         tk.send(.string(String(decoding: sub, as: UTF8.self))) { [weak self] err in
             guard let err else { return }
             DispatchQueue.main.async { if self?.gen == g { self?.fail("send: \(err.localizedDescription)") } }
@@ -381,8 +390,11 @@ final class IslandFeed {
 
     private func resubscribe(_ c: [Double]) {
         subCenter = c
-        send(["type": "subscribe", "map_id": mapID, "layers": ["corrections", "mesh"],
-              "bbox": [c[0] - Self.half, c[1] - Self.half, c[0] + Self.half, c[1] + Self.half]])
+        let ls = LiveLayers.island(model.serverFeatures)
+        var o: [String: Any] = ["type": "subscribe", "map_id": mapID, "layers": ls,
+                                "bbox": [c[0] - Self.half, c[1] - Self.half, c[0] + Self.half, c[1] + Self.half]]
+        if ls.contains("surface"), let e = LiveLayers.surfaceEnc(model.serverFeatures) { o["surface_enc"] = e }
+        send(o)
     }
 
     private func send(_ o: [String: Any]) {
@@ -456,6 +468,15 @@ final class IslandFeed {
             client.correction(island: id, T: Mat4(A), stream: sid)
             return
         }
+        if type == "head", let e = o["epoch"] as? String {                // 12.26: Layer B revisions are per live run
+            let before = Set(lb.tiles.keys)
+            lb.setEpoch(e)
+            for k in before where lb.tiles[k] == nil { if data[k] != nil { drop(k) } }
+        }
+        if type == "tile", SurfaceFrame.isSurface(d) {                   // 12.26 Layer B (R2)
+            if let f = SurfaceFrame.parse(d) { applySurface(f) }
+            return
+        }
         let parsed = type == "tile" ? LiveDownMessage.parseWithSeq(d) : nil
         guard let msg = parsed?.message, case .tile(let l, let key, let ver, let enc, let b64) = msg, l == "mesh" else {
             if type == "rebase" || type == "commit", let v = o["base_version"] as? Int { store.rebase(v) }
@@ -476,7 +497,55 @@ final class IslandFeed {
         client.feedTilesChanged()
     }
 
+    /// 12.26: one Layer B frame of this island: apply, then draw the tile's surface blocks as one mesh (island frame).
+    private func applySurface(_ f: SurfaceFrame) {
+        switch lb.apply(f, now: now) {
+        case .gap:
+            refetch(f)
+        case .applied:
+            guard let m = lb.tileMesh(f.key), m.mesh.triangleCount > 0 else {
+                if data[f.key] != nil {
+                    lru.remove(f.key)
+                    entities.removeValue(forKey: f.key)?.removeFromParent()
+                    data[f.key] = nil
+                    client.feedTilesChanged()
+                }
+                return
+            }
+            data[f.key] = (m.mesh, m.rgb)
+            let cpu: Int = (m.mesh.positions.count + m.mesh.indices.count) * 4
+            let gpu: Int = m.rgb != nil ? m.mesh.triangleCount * 64 : cpu
+            let c = lb.centre(f.key) ?? (0, 0)
+            lru.put(f.key, x: c.x, y: c.y, bytes: cpu + gpu + (m.rgb?.count ?? 0) * 2, now: now)
+            draw(key: f.key, mesh: m.mesh, rgb: m.rgb)
+            if placed, !node.isEnabled { node.isEnabled = true }
+            client.feedTilesChanged()
+        }
+    }
+
+    /// A missed Layer B delta: the tile in full over REST (the island's own map id).
+    private func refetch(_ f: SurfaceFrame) {
+        guard !refetching.contains(f.key), let link = model.link else { return }
+        refetching.insert(f.key)
+        let map = mapID, key = f.key
+        var q = [URLQueryItem(name: "map_id", value: map), URLQueryItem(name: "transport", value: "json"),
+                 URLQueryItem(name: "hmask", value: "1")]
+        if let e = LiveLayers.surfaceEnc(model.serverFeatures) { q.append(URLQueryItem(name: "enc", value: e)) }
+        Task { [weak self] in
+            var fr: SurfaceFrame?
+            if let r = try? await link.request("GET", "/v1/live/surface/\(f.level)/\(f.tx)/\(f.ty)", query: q, timeout: 20),
+               r.1 == 200 { fr = SurfaceFrame.parse(r.0) }
+            let got = fr
+            await MainActor.run {
+                guard let self else { return }
+                self.refetching.remove(key)
+                if var g = got { g.since = nil; self.applySurface(g) }
+            }
+        }
+    }
+
     private func drop(_ key: String) {
+        lb.forget(key)
         lru.remove(key)
         entities.removeValue(forKey: key)?.removeFromParent()
         data[key] = nil

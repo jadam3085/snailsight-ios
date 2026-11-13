@@ -89,9 +89,14 @@ final class LiveMapClient {
     }
 
     /// 12.0: what the downlink subscribes to: the live layers, + the estimated world's tree events when the server has it.
+    /// 12.26 (requirement 2026-11-13 R1): a Layer B server (`live_surface`) gets `surface` and no legacy `mesh` (it kept
+    /// the server's L3 volume busy for every phone; the app draws Layer B); `ssq1` frames when offered (R4).
     private var layers: [String] {
-        LiveSubscribe.layers + ["surface"] + (model.serverFeatures.estimatedWorld ? ["estimated"] : [])   // 12.18 Layer B
+        LiveLayers.house(model.serverFeatures, estimated: model.serverFeatures.estimatedWorld)
     }
+    private var surfaceEnc: String? { LiveLayers.surfaceEnc(model.serverFeatures) }
+    private var subLayers: [String] = []
+    private var subEnc: String?
 
     /// Fresh tile looks (literal opacities): just arrived / changed = bright, then fading, then the settled amber.
     private static func freshMaterial(_ step: Int) -> UnlitMaterial {
@@ -154,6 +159,8 @@ final class LiveMapClient {
             if connected, let c = layer.cameraMap, let sc = subCenter,
                hypot(c[0] - sc[0], c[1] - sc[1]) > 6 || subHalf != bboxHalf {
                 resubscribe(center: c)                      // walked away / Map opened: move or grow the tile bbox
+            } else if connected, subLayers != layers || subEnc != surfaceEnc {
+                resubscribe(center: layer.cameraMap ?? subCenter)      // 12.26: the server's features arrived / changed
             }
             if t - downlinkAgentsAt < 5 {
                 trails.expire(now: t)
@@ -271,10 +278,12 @@ final class LiveMapClient {
         subCenter = c
         subHalf = bboxHalf
         let half = subHalf
+        let ls = layers, enc = surfaceEnc
         let sub = LiveSubscribe.message(agentID: model.agentID, mapID: mapID, baseVersion: tiles.baseVersion ?? layer.mapVersion,
                                         tiles: tiles.allSince.merging(model.blocks.heldSince) { a, _ in a },
                                         epoch: epoch, seq: lastSeq,
-                                        bbox: c.map { Self.bbox($0, half: half) }, layers: layers)
+                                        bbox: c.map { Self.bbox($0, half: half) }, layers: ls, surfaceEnc: enc)
+        noteSubscribed(ls, enc, why: "connect")
         tk.send(.string(String(decoding: sub, as: UTF8.self))) { [weak self] err in
             guard let err else { return }
             DispatchQueue.main.async { if self?.gen == g { self?.fail("send: \(err.localizedDescription)") } }
@@ -288,10 +297,23 @@ final class LiveMapClient {
         [c[0] - half, c[1] - half, c[0] + half, c[1] + half]
     }
 
-    private func resubscribe(center c: [Double]) {
-        subCenter = c
+    private func resubscribe(center c: [Double]?) {
         subHalf = bboxHalf
-        sendText(["type": "subscribe", "map_id": mapID, "layers": layers, "bbox": Self.bbox(c, half: subHalf)])
+        let ls = layers, enc = surfaceEnc
+        var o: [String: Any] = ["type": "subscribe", "map_id": mapID, "layers": ls]
+        if let c { subCenter = c; o["bbox"] = Self.bbox(c, half: subHalf) }
+        if let enc { o["surface_enc"] = enc }
+        sendText(o)
+        if ls != subLayers || enc != subEnc { noteSubscribed(ls, enc, why: "features") }
+    }
+
+    /// 12.26: log every change of what the house socket asks for (walk_validate checks surface without mesh).
+    private func noteSubscribed(_ ls: [String], _ enc: String?, why: String) {
+        subLayers = ls
+        subEnc = enc
+        model.log.event("live_subscribe", ["socket": .string("house"), "layers": .string(ls.joined(separator: ",")),
+                                           "surface_enc": .string(enc ?? "f32"), "mesh": .bool(ls.contains("mesh")),
+                                           "why": .string(why)])
     }
 
     private func sendText(_ o: [String: Any]) {
