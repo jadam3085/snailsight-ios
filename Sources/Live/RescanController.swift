@@ -253,6 +253,15 @@ final class RescanController: ObservableObject {
         pollTask = Task { @MainActor [weak self] in await self?.pollLoop() }
     }
 
+    /// Foreground: a build being watched is polled now (its Task may have slept through the background); one left
+    /// from an earlier run is picked up again.
+    func foreground() {
+        guard let s = session else { resumeOnLaunch(); return }
+        guard s.phase == .building else { return }
+        pollTask?.cancel()
+        pollTask = Task { @MainActor [weak self] in await self?.pollLoop() }
+    }
+
     // MARK: result helpers
 
     /// A preview URL from the status (relative to the map server, or absolute).

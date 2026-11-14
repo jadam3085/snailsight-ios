@@ -683,6 +683,7 @@ final class AppModel: ObservableObject {
         observers.append(nc.addObserver(forName: UIApplication.willEnterForegroundNotification, object: nil, queue: .main) { [weak self] _ in
             guard let self else { return }
             self.log.event("foreground", ["mode": .string(self.appMode?.rawValue ?? "chooser")])
+            self.rescan.foreground()                         // 12.28: a Rescan build (hours) is checked again at once
             let q = self.queue!
             let ar = self.arActive                          // 12.25: the AR loops only while AR explore is up
             if ar {

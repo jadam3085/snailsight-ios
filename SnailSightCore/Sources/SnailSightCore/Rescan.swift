@@ -290,8 +290,11 @@ public struct RescanSession: Equatable {
     public private(set) var stale = false
     public var finish: RescanFinish?
 
-    /// Polling gives up (card: "still building, check snailCOP") after this long.
-    public static let pollGiveUpS = 45.0 * 60
+    /// Polling gives up (card: "still building, check snailCOP") after this long. API §5.17: the session runs the
+    /// ordinary place -> tile path first and the rescan job after it, so the full result takes HOURS, not minutes.
+    public static let pollGiveUpS = 24.0 * 3600
+    /// A build that was running when the app went away is watched again on launch / foreground within this window.
+    public static let resumeWindowS = 24.0 * 3600
 
     public init(setting: RescanSetting, name: String?, map: String, now: Double) {
         self.setting = setting; self.name = name; self.map = map; startedAt = now
@@ -389,7 +392,9 @@ public struct RescanSession: Equatable {
         if phase.terminal { return nil }
         let since = now - (finishedAt ?? startedAt)
         if since > Self.pollGiveUpS { stale = true; return nil }
-        return since < 60 ? 5 : 15                           // §5.17: poll every 15 s after finish
+        // §5.17: every 15 s after finish; slower once it is clearly a long build (hours), so a phone left open on the
+        // card does not poll all evening
+        return since < 60 ? 5 : (since < 1800 ? 15 : (since < 4 * 3600 ? 60 : 300))
     }
 
     /// While scanning: the server's live coverage (§5.17 `coverage.live`, poll every 5 s). Never changes the phase.
@@ -444,9 +449,11 @@ public struct RescanSession: Equatable {
     public var next: String? {
         switch phase {
         case .finishing, .building:
-            return stale ? nil : "The server is building this area; you'll see before / after here when it's ready."
+            return stale ? nil : "The server builds this area after the normal map update: often an hour or more. You can close "
+                + "the app; the result shows here when you open it again (before / after, or why it was held)."
         case .published: return "Before / after below; snailCOP shows the new area."
-        case .held: return "The old map stays. Scan again more slowly and closer if the reason says coverage or quality."
+        case .held: return "The old map stays (the scan still improves it as an ordinary walk). Follow the advice above and "
+                + "rescan the whole area in one go."
         default: return nil
         }
     }
@@ -463,7 +470,7 @@ public struct RescanSession: Equatable {
         guard let id = o["id"] as? String, let map = o["map"] as? String,
               let st = (o["setting"] as? String).flatMap(RescanSetting.init(rawValue:)),
               let started = (o["started"] as? NSNumber)?.doubleValue,
-              let fin = (o["finished"] as? NSNumber)?.doubleValue, fin > 0, now - fin < 7200,
+              let fin = (o["finished"] as? NSNumber)?.doubleValue, fin > 0, now - fin < resumeWindowS,
               o["phase"] as? String == RescanPhase.building.rawValue || o["phase"] as? String == RescanPhase.finishing.rawValue
         else { return nil }
         var s = RescanSession(setting: st, name: (o["name"] as? String).flatMap { $0.isEmpty ? nil : $0 }, map: map, now: started)

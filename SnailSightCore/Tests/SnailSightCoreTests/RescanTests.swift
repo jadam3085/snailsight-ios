@@ -204,6 +204,9 @@ final class RescanTests: XCTestCase {
         XCTAssertEqual(s.polled(http: 200, body: b, now: 30), 5)
         XCTAssertEqual(s.polled(http: 200, body: b, now: 120), 15)
         XCTAssertEqual(s.polled(http: 200, body: b, now: 600), 15)
+        XCTAssertEqual(s.polled(http: 200, body: b, now: 2 * 3600), 60, "a long build polls slower")
+        XCTAssertEqual(s.polled(http: 200, body: b, now: 6 * 3600), 300)
+        XCTAssertFalse(s.stale, "hours of building are normal (§5.17: place -> tile first, then the rescan job)")
         XCTAssertNil(s.polled(http: 200, body: b, now: RescanSession.pollGiveUpS + 1))
         XCTAssertTrue(s.stale)
         XCTAssertEqual(s.title, "Still building: check snailCOP later")
@@ -244,7 +247,8 @@ final class RescanTests: XCTestCase {
         XCTAssertEqual(r.phase, .building)
         XCTAssertEqual(r.setting, .outdoor)
         XCTAssertEqual(r.name, "Back yard")
-        XCTAssertNil(RescanSession.resume(o, now: 400 + 7201), "too old")
+        XCTAssertNotNil(RescanSession.resume(o, now: 400 + 5 * 3600), "a build hours later is still watched")
+        XCTAssertNil(RescanSession.resume(o, now: 400 + RescanSession.resumeWindowS + 1), "too old")
         var scanning = o; scanning["phase"] = "scanning"
         XCTAssertNil(RescanSession.resume(scanning, now: 500), "an interrupted scan is not resumed as a build")
     }
@@ -353,5 +357,75 @@ final class RescanTests: XCTestCase {
         let none = await c.create(&t, RescanRequest(setting: .indoor))
         XCTAssertNil(none)
         XCTAssertEqual(t.localReason, "the server refused the rescan (HTTP 422)")
+    }
+
+    // MARK: contract: the server's documented responses (snailCOP docs/SNAILSIGHT-API.md §5.17), raw JSON text
+
+    static let doc201 = #"{"rescan_id": "rs-20261114-153012-a1b2c3", "map_id": "site", "kind": "area", "name": "basement den", "level": 0, "state": "open", "created": 1794600000.0, "status": "/v1/maps/site/rescan/rs-20261114-153012-a1b2c3", "guide": {"max_range_m": 2.5, "min_conf": 2, "min_cos": 0.3, "block_m": 0.25, "cell_m": 4.0}}"#
+    static let doc409 = #"{"detail": "this agent has an open rescan on this map: finish or cancel it first", "rescan_id": "rs-20261114-140000-ffffff"}"#
+    static let doc202 = #"{"rescan_id": "rs-20261114-153012-a1b2c3", "map_id": "site", "kind": "area", "state": "waiting", "created": 1794600000.0, "finished": 1794600400.0}"#
+    /// The §5.17 status example ("…" placeholders filled with valid values).
+    static let docStatus = #"""
+    {"rescan_id": "rs-20261114-153012-a1b2c3", "map_id": "site", "kind": "area", "name": "basement den", "level": 0,
+     "state": "held", "stage": "score", "created": 0.0, "finished": 0.0, "updated": 0.0,
+     "agent_id": "phone-x", "streams": ["phone-x/ar-1"], "sessions": ["s-1"],
+     "coverage": {"live": false, "good_m2": 41.2, "area_m2": 38.0, "blocks": 2210,
+                  "cells": [{"cell": "L0:-2,3", "cover": 0.81, "good_m2": 12.4, "in_area": true}],
+                  "capture": {"conf2_share": 0.62, "grazing_share": 0.12, "far_share": 0.21}},
+     "quality": {"checks": [{"name": "self_loop", "value": 3.1, "limit": 5.0, "unit": "cm", "pass": true},
+                            {"name": "seam", "value": 4.8, "limit": 3.0, "unit": "cm", "pass": false}],
+                 "self": {"loop_cm": 3.1, "loop_deg": 0.21, "pair_res_p90_cm": 1.8},
+                 "fused": {"holes_pct": 6.2, "res_p90_cm": 1.9},
+                 "tie": {"mode": "overlap", "band_m2": 14.2, "fit_cm": 1.4, "seam_p90_cm": 1.6, "step_max_cm": 0.4,
+                         "orient_deg": 0.12, "sigma": {"x_cm": 0.6, "y_cm": 0.9, "z_cm": 0.3, "yaw_deg": 0.05},
+                         "weak_dof": [], "gps": {"used": false}}},
+     "before_after": {"cells": {"L0:-2,3": {"before": {"dup_m2": 2.6, "dup_wall_m2": 1.2, "ghost_pct": 9.1, "res_p90_cm": 8.5, "holes_pct": 22.0},
+                                            "after":  {"dup_m2": 0.3, "dup_wall_m2": 0.1, "ghost_pct": 1.2, "res_p90_cm": 1.9, "holes_pct": 6.0}}},
+                      "rooms": {"L0r1": {"before": {}, "after": {}}}},
+     "preview": {"tileset": "0123abcd", "portal": "/?preview=0123abcd"},
+     "result": {"decision": "held", "rev": null, "rev_before": 177, "why": "seam p90 4.8 cm > 3.0 cm at the doorway (L0:-2,4)",
+                "rescan_advice": [{"cell": "L0:-2,4", "do": "include the doorway and 1 m of the next room's walls in the scan"}],
+                "island": null},
+     "epoch": null}
+    """#
+
+    func testContractDocumentedResponses() {
+        // 201 create
+        var s = RescanSession(setting: .indoor, name: "basement den", map: "site", now: 0)
+        s.creating()
+        XCTAssertEqual(s.created(http: 201, body: Data(Self.doc201.utf8)), "rs-20261114-153012-a1b2c3")
+        XCTAssertEqual(s.phase, .scanning)
+        // the create body the server's RescanIn reads
+        let body = RescanRequest(setting: .indoor, name: "basement den", agentID: "phone-x").json
+        XCTAssertEqual(body["kind"] as? String, "area")
+        XCTAssertEqual(body["agent_id"] as? String, "phone-x")
+        XCTAssertNotNil(body["client_rescan_id"] as? String)
+        // 409 names the open rescan (the client cancels it and retries)
+        XCTAssertEqual(RescanStatus.parse(Data(Self.doc409.utf8))?.id, "rs-20261114-140000-ffffff")
+        // 202 finish -> building ("waiting")
+        s.finishing(RescanFinish(streamIDs: ["ar-1"], keyframes: 10, durationS: 60, coverage: ScanCoverage.Summary(),
+                                 points: 1, locked: true, queueLeft: 0), now: 10)
+        let fj = s.finish!.json
+        XCTAssertNotNil(fj["stream_ids"] as? [String])
+        XCTAssertNotNil(fj["recorded"] as? Bool)
+        s.finished(http: 202, body: Data(Self.doc202.utf8))
+        XCTAssertEqual(s.phase, .building)
+        XCTAssertEqual(s.status?.state, "waiting")
+        // the status example: held with the why, the failed check, the advice, before / after, the preview
+        XCTAssertNil(s.polled(http: 200, body: Data(Self.docStatus.utf8), now: 3 * 3600))
+        XCTAssertEqual(s.phase, .held)
+        let st = s.status!
+        XCTAssertEqual(st.reason, "seam p90 4.8 cm > 3.0 cm at the doorway (L0:-2,4)")
+        XCTAssertEqual(st.failedChecks, ["seam 4.8 (limit 3 cm)"])
+        XCTAssertEqual(st.advice, ["L0:-2,4: include the doorway and 1 m of the next room's walls in the scan"])
+        XCTAssertEqual(st.portalPath, "/?preview=0123abcd")
+        XCTAssertEqual(st.goodM2, 41.2)
+        XCTAssertEqual(st.coveragePct ?? 0, 81, accuracy: 1e-6)
+        XCTAssertNil(st.publishedRev)
+        XCTAssertNotNil(st.beforeAfter)
+        XCTAssertTrue(s.lines.contains("Why: seam p90 4.8 cm > 3.0 cm at the doorway (L0:-2,4)"))
+        XCTAssertTrue(s.lines.contains { $0.hasPrefix("Re-scan L0:-2,4") })
+        XCTAssertTrue(s.lines.contains { $0.hasPrefix("Failed: seam") })
+        XCTAssertTrue(s.next?.contains("in one go") ?? false)
     }
 }
