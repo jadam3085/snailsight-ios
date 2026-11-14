@@ -88,6 +88,8 @@ final class MemoryBudgetTests: XCTestCase {
                     XCTAssertLessThanOrEqual(b.islandMaxTiles, a.islandMaxTiles)
                     XCTAssertLessThanOrEqual(b.islandRadiusM, a.islandRadiusM)
                     XCTAssertLessThanOrEqual(b.deviceCellsMax, a.deviceCellsMax)
+                    XCTAssertLessThanOrEqual(b.cloudMaxPoints, a.cloudMaxPoints)
+                    XCTAssertLessThanOrEqual(b.cloudKeepRadiusM, a.cloudKeepRadiusM)
                     XCTAssertLessThanOrEqual(b.deviceKeepRadiusM, a.deviceKeepRadiusM)
                     XCTAssertGreaterThanOrEqual(b.deviceEveryS, a.deviceEveryS)
                     XCTAssertGreaterThanOrEqual(b.maskRebuildMinS, a.maskRebuildMinS)
@@ -312,7 +314,15 @@ final class MemoryBudgetTests: XCTestCase {
     /// placed islands are held for Map 3D: their tiles stay inside MemPlan.islandMaxTiles / islandRadiusM.
     func testSoakWithIslandsPlateaus() { soak(overlay: false, islands: true) }
 
-    func soak(overlay: Bool, islands: Bool = false) {
+    /// 12.27: the same walk with the Scan view point cloud on: a real ScanCloud integrating a synthetic room-like depth
+    /// frame (walls 1-3.5 m away, floor) every 2 s along the loop, enforced by the plan each 5 s. Counted at its
+    /// estimatedBytes + two GPU vertex buffers sized to the plan's budget.
+    func testSoakWithPointCloudPlateaus() { soak(overlay: false, cloud: true) }
+
+    func soak(overlay: Bool, islands: Bool = false, cloud: Bool = false) {
+        var sc = ScanCloud()
+        sc.config.step = 4
+        var cloudPeak = 0
         var isl = SpatialLRU<String>()
         var gov = MemoryGovernor()
         var plan = MemPlan.plan(level: .normal, thermal: .nominal, walking: true)
@@ -384,6 +394,22 @@ final class MemoryBudgetTests: XCTestCase {
                 let b = disk.sync(items, spawned: ["k5", "k17", "k40"], recents: [], now: t, legacy: false)
                 if step > 0 { syncBytesAfterFirst += b }
             }
+            if cloud {
+                // ARKit world: x = map x, z = -map y; yaw follows the loop, then a slow sweep
+                if step % 2 == 0 {
+                    let yaw = Float(step % 360) * .pi / 180
+                    sc.integrate(ScanCloudTests.roomFrame(camX: Float(x), camZ: Float(-y), yaw: yaw, w: 128, h: 96, seed: step))
+                }
+                if step % 5 == 0 {
+                    sc.enforce(camX: Float(x), camY: 1.4, camZ: Float(-y), maxPoints: plan.cloudMaxPoints,
+                               keepRadiusM: Float(plan.cloudKeepRadiusM))
+                }
+                cloudPeak = max(cloudPeak, sc.count)
+            }
+            // pessimistic: a real phone (12 k samples a frame at 6 Hz) fills the budget in minutes, so the cloud is
+            // charged as if it were full (44 B a point on the CPU + two 16 B GPU copies) whenever that is more
+            let cloudMB = cloud ? max(Double(sc.estimatedBytes + 2 * sc.count * 16),
+                                      Double(plan.cloudMaxPoints) * 76) / 1_048_576 : 0
             // footprint = app + tracking 500, base tiles (raw: ~360 MB near you, capped by the plan), mask bookkeeping,
             // live + Layer B + grid, our overlay copies (40 B a vertex), ARKit's mesh, sim templates
             let tilesMB = min(360.0, Double(plan.tileNearMB + plan.tileMidMB)) + 12
@@ -391,7 +417,7 @@ final class MemoryBudgetTests: XCTestCase {
             let wireMB = Double(min(arVerts, plan.overlayMaxVertices)) * 40 / 1_048_576
             let layerBDrawn = overlay ? layerB.estimatedBytes * 3 : layerB.estimatedBytes      // + solid strip meshes
             let f = 500 + tilesMB + Double(live.totalBytes + layerBDrawn + grid.estimatedBytes + isl.totalBytes) / 1_048_576
-                + wireMB + Double(arVerts) * 1700 / 1_048_576 + simMB
+                + wireMB + Double(arVerts) * 1700 / 1_048_576 + simMB + cloudMB
             foot.append(f)
             gov.update(footprintMB: f, limitMB: limit, now: t)
             plan = MemPlan.plan(level: gov.level, thermal: step > 600 ? .serious : .fair, walking: true)
@@ -399,6 +425,12 @@ final class MemoryBudgetTests: XCTestCase {
         let peak = foot.max()!
         let lastTen = foot.suffix(600), midTen = foot[600..<1200]
         if islands { XCTAssertLessThanOrEqual(isl.count, MemPlan.plan(level: .normal, thermal: .nominal).islandMaxTiles) }
+        if cloud {
+            print("soak cloud: points \(sc.count) (peak \(cloudPeak)), chunks \(sc.chunkCount), evicted chunks \(sc.evictedChunks), decimated \(sc.decimatedChunks), \(sc.estimatedBytes / 1_048_576) MB")
+            XCTAssertGreaterThan(sc.count, 5_000, "the cloud kept something near you")
+            XCTAssertLessThanOrEqual(cloudPeak, MemPlan.cloudPoints[0] + 20_000)
+            XCTAssertGreaterThan(sc.evictedChunks, 0, "far chunks were evicted on the loop")
+        }
         print(String(format: "soak(overlay \(overlay), islands \(islands)): peak %.0f MB, min 10-20 max %.0f, min 20-30 max %.0f mean %.0f, peak level %@, resets %d, live %d, layerB %d, cells %d, sim re-download %d B",
                      peak, midTen.max()!, lastTen.max()!, lastTen.reduce(0, +) / 600, gov.peakLevel.label, resets, live.count,
                      layerB.tiles.count, grid.count, syncBytesAfterFirst))

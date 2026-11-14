@@ -427,12 +427,14 @@ public enum ModeRules {
     ]
     public static let arOnlyPrefixes: [String] = [
         "maploc_", "live_", "tile_", "tiles_", "device_surface", "layerb_", "geo_", "island", "mapfollow_", "armap_",
-        "reloc_", "sim_server_", "sim_content_", "meshmap_", "roomscan_", "nav_layer_", "terrain_", "record_",
+        "reloc_", "sim_server_", "sim_content_", "scan_cloud", "meshmap_", "roomscan_", "nav_layer_", "terrain_", "record_",
     ]
     /// The teardown when leaving AR for snailCOP (allowed right after the switch).
     public static let teardown: Set<String> = [
         "ar_paused", "live_state", "live_off", "live_bye", "live_bye_ack", "live_drain_end", "live_stats", "geo_off",
         "geo_stats", "island_state", "live_down_stats", "layerb_stats", "device_surface",
+        "device_surface_toggle",                                    // 12.27 (gate doc §7): turned off on leaving AR
+        "scan_cloud",                                               // 12.27: the Scan view's off on leaving AR
     ]
 
     public static func isAROnly(_ ev: String) -> Bool {

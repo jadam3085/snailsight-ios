@@ -156,6 +156,13 @@ public struct MemPlan: Equatable {
     // sim
     public enum SimTemplates: String, Equatable { case all, inUse, none }
     public var simTemplates: SimTemplates
+    // 12.27 Scan view point cloud (ScanCloud): points held and the radius kept around you (ARKit x / z)
+    public var cloudMaxPoints: Int = 0
+    public var cloudKeepRadiusM: Double = 0
+
+    /// ScanCloud budgets per level: ~44 B a point on the CPU + 32 B (two GPU buffers) = ~75 MB at 1 M.
+    public static let cloudPoints = [1_000_000, 600_000, 300_000, 100_000]
+    public static let cloudRadius = [20.0, 14.0, 9.0, 6.0]
 
     public static let overlayVertexCap = [400_000, 250_000, 120_000, 0]
     public static let arMeshCap = [600_000, 400_000, 250_000, 0]
@@ -180,6 +187,8 @@ public struct MemPlan: Equatable {
                         arMeshVertexCap: arMeshCap[i],
                         environmentProbes: i == 0 && !walking,
                         simTemplates: [.all, .inUse, .inUse, .none][i])
+        p.cloudMaxPoints = cloudPoints[i]
+        p.cloudKeepRadiusM = cloudRadius[i]
         if hot {                                       // thermal SERIOUS / CRITICAL: step the expensive work down
             p.deviceEveryS = max(p.deviceEveryS, thermal == .critical ? 2.0 : 1.2)
             p.maskRebuildMinS = max(p.maskRebuildMinS, thermal == .critical ? 8 : 4)
@@ -201,6 +210,7 @@ public struct MemPlan: Equatable {
         if liveMaxTiles < n.liveMaxTiles { a.append("live_tiles_\(liveMaxTiles)") }
         if islandMaxTiles < n.islandMaxTiles { a.append("island_tiles_\(islandMaxMaps)x\(islandMaxTiles)") }
         if tileNearMB < n.tileNearMB { a.append("tiles_\(tileNearMB)_\(tileMidMB)mb") }
+        if cloudMaxPoints < n.cloudMaxPoints { a.append("cloud_\(cloudMaxPoints / 1000)k") }
         if deviceCellsMax < n.deviceCellsMax { a.append("device_cells_\(deviceCellsMax / 1000)k") }
         if overlayMaxVertices < n.overlayMaxVertices { a.append(overlayMaxVertices == 0 ? "overlay_off" : "overlay_\(overlayMaxVertices / 1000)k") }
         if arMeshVertexCap < n.arMeshVertexCap { a.append(arMeshVertexCap == 0 ? "ar_mesh_reset" : "ar_mesh_cap_\(arMeshVertexCap / 1000)k") }
