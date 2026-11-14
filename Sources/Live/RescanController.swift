@@ -76,7 +76,7 @@ final class RescanController: ObservableObject {
         let fix = model.geo.latestFix
         let req = RescanRequest(setting: setting, name: s.name, appVersion: Self.appVersion,
                                 lat: fix?.coordinate.latitude, lon: fix?.coordinate.longitude,
-                                hAccM: fix.map { $0.horizontalAccuracy })
+                                hAccM: fix.map { $0.horizontalAccuracy }, agentID: model.agentID)
         model.log.event("rescan_start", ["setting": .string(setting.rawValue), "name_len": .int(trimmed.count),
                                          "map_id": .string(s.map), "server": .bool(model.serverBase != nil),
                                          "geo": .bool(fix != nil)])
@@ -92,6 +92,19 @@ final class RescanController: ObservableObject {
         model.scanCloud.reset(why: "rescan_start")
         model.scanCloud.setForced(true, cause: "rescan")
         model.walker.start(cause: "rescan")
+        if id != nil { pollTask = Task { @MainActor [weak self] in await self?.liveLoop() } }
+    }
+
+    /// While scanning: the server's live coverage every 5 s (API §5.17 `coverage.live`).
+    @MainActor
+    private func liveLoop() async {
+        while !Task.isCancelled {
+            try? await Task.sleep(nanoseconds: 5_000_000_000)
+            guard !Task.isCancelled, var s = session, s.phase == .scanning else { return }
+            await client.pollLive(&s)
+            guard !Task.isCancelled, session?.phase == .scanning else { return }
+            session = s
+        }
     }
 
     /// The walk bar's Finish while rescanning.
@@ -101,9 +114,11 @@ final class RescanController: ObservableObject {
         model.walker.stop(cause: "rescan_finish")
         let snap = model.scanCloud.snapshot()
         let q = model.liveStreamer.current.queue
-        let f = RescanFinish(streamIDs: walk?.streams ?? [model.liveStreamer.streamID], keyframes: walk?.sent ?? 0,
+        var f = RescanFinish(streamIDs: walk?.streams ?? [model.liveStreamer.streamID], keyframes: walk?.sent ?? 0,
                              durationS: now - s.startedAt, coverage: snap.coverage, points: snap.points,
                              locked: walk?.lockedAt != nil, queueLeft: q)
+        f.recorded = model.walker.recordedDuringWalk
+        pollTask?.cancel()
         s.finishing(f, now: now)
         session = s
         model.liveStreamer.endRescan()
@@ -137,6 +152,10 @@ final class RescanController: ObservableObject {
         session = s
         pollTask?.cancel()
         if wasScanning { model.walker.stop(cause: "rescan_cancel") }
+        if let id = s.id {                                    // §5.17 cancel: the session stays an ordinary walk
+            let c = client, map = s.map
+            Task { _ = await c.cancel(map: map, id: id, why: "owner cancelled in the app") }
+        }
         model.liveStreamer.endRescan()
         model.scanCloud.setForced(false, cause: "rescan_cancel")
         model.log.event("rescan_cancel", ["rescan_id": .string(s.id ?? ""), "was_scanning": .bool(wasScanning)])
@@ -244,12 +263,14 @@ final class RescanController: ObservableObject {
         return URL(string: b + (s.hasPrefix("/") ? s : "/" + s))
     }
 
-    /// Open the result in snailCOP (at the server's view if it gave one).
+    /// Open the result in snailCOP: the candidate preview (§5.17 `preview.portal`, held ones too) or the server's view.
     func openInCop() {
-        let at = session?.status?.viewAt
-        model.log.event("rescan_open_cop", ["at": .bool(at != nil)])
+        let at = session?.status?.viewAt, portal = session?.status?.portalPath
+        model.log.event("rescan_open_cop", ["at": .bool(at != nil), "preview": .bool(portal != nil)])
         let v = at.flatMap(CopView.parse)
-        dismiss()
+        let keep = session?.phase == .building                     // keep watching a build while snailCOP shows it
+        if !keep { dismiss() }
+        if let portal, session?.phase != .published { model.cop.openPortalPath(portal) }
         model.setMode(.cop, cause: "rescan_result")
         if let v { model.cop.goTo(v) }
     }

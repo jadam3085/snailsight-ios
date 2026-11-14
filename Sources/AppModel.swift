@@ -1015,6 +1015,7 @@ final class AppModel: ObservableObject {
         var meta: [String: Any] = ["agent_id": agentID, "agent_type": Identity.agentType, "app_version": version,
                                    "device": DebugLog.deviceModel]
         for (k, v) in object?.meta ?? [:] { meta[k] = v }
+        if object == nil, let r = liveStreamer.rescanID { meta["rescan_id"] = r }   // 12.27: API §5.17 Record during a Rescan
         recorder.keyframeProfileScale = object == nil ? 1 : ObjectProfile.keyframeScale
         do {
             _ = try recorder.start(clientSessionID: id, meta: meta)

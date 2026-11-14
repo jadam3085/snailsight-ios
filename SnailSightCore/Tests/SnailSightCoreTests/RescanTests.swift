@@ -16,6 +16,8 @@ final class RescanTests: XCTestCase {
                                                   "after_url": "/v1/maps/site/rescan/r1/after.png", "at": "1,2,3,4,0.5,-0.3"]]
         var polls = 0
         var finishStatus = 202
+        var openRescan: String?          // §5.17: one open rescan per agent + map
+        var cancelled: [String] = []
 
         struct Down: Error {}
 
@@ -27,7 +29,17 @@ final class RescanTests: XCTestCase {
             if !supported { return (j(["detail": "Not Found"]), 404) }
             switch (m, p) {
             case ("POST", "/v1/maps/site/rescan"):
-                return (j(["rescan_id": "r1", "state": "open"]), 201)
+                guard (body?["agent_id"] as? String)?.isEmpty == false, body?["kind"] as? String == "area" else {
+                    return (j(["detail": "agent_id is required"]), 422)
+                }
+                if let o = openRescan { return (j(["detail": "open rescan", "rescan_id": o]), 409) }
+                openRescan = "r1"
+                return (j(["rescan_id": "r1", "state": "open", "guide": ["max_range_m": 2.5]]), 201)
+            case ("POST", let path) where path.hasSuffix("/cancel"):
+                let id = path.split(separator: "/")[4]   // ["v1", "maps", "site", "rescan", id, "cancel"]
+                cancelled.append(String(id))
+                if openRescan == String(id) { openRescan = nil }
+                return (j(["rescan_id": String(id), "state": "cancelled"]), 200)
             case ("POST", "/v1/maps/site/rescan/r1/finish"):
                 return (j(["rescan_id": "r1", "state": "queued"]), finishStatus)
             case ("GET", "/v1/maps/site/rescan/r1"):
@@ -54,7 +66,8 @@ final class RescanTests: XCTestCase {
         let c = RescanClient(transport: srv.handle)
         var s = RescanSession(setting: .indoor, name: "Kitchen", map: "site", now: 1000)
         XCTAssertEqual(s.phase, .idle)
-        let id = await c.create(&s, RescanRequest(setting: .indoor, name: "Kitchen", appVersion: "12.27", lat: 45.1, lon: -75.2, hAccM: 8))
+        let id = await c.create(&s, RescanRequest(setting: .indoor, name: "Kitchen", appVersion: "12.27", lat: 45.1, lon: -75.2, hAccM: 8,
+                                                  agentID: "phone-x"))
         XCTAssertEqual(id, "r1")
         XCTAssertEqual(s.phase, .scanning)
         let create = srv.calls[0].2!
@@ -73,7 +86,7 @@ final class RescanTests: XCTestCase {
         var t = 1312.0, delays: [Double] = []
         while let d = await c.poll(&s, now: t) { delays.append(d); t += d }
         XCTAssertEqual(s.phase, .published)
-        XCTAssertEqual(delays, [4, 4])
+        XCTAssertEqual(delays, [5, 5])
         XCTAssertEqual(s.status?.publishedRev, 177)
         XCTAssertEqual(s.status?.quality, "good")
         XCTAssertEqual(s.status?.qualityScore, 0.82)
@@ -91,7 +104,7 @@ final class RescanTests: XCTestCase {
         srv.outcome = ["status": "held", "held_reason": "coverage 38 % < 60 %", "coverage": 0.38]
         let c = RescanClient(transport: srv.handle)
         var s = RescanSession(setting: .outdoor, name: nil, map: "site", now: 0)
-        _ = await c.create(&s, RescanRequest(setting: .outdoor))
+        _ = await c.create(&s, RescanRequest(setting: .outdoor, agentID: "phone-x"))
         s.finishing(finishInfo(), now: 100)
         await c.finish(&s)
         let d = await c.poll(&s, now: 104)
@@ -108,7 +121,7 @@ final class RescanTests: XCTestCase {
         srv.supported = false
         let c = RescanClient(transport: srv.handle)
         var s = RescanSession(setting: .indoor, name: nil, map: "site", now: 0)
-        let id = await c.create(&s, RescanRequest(setting: .indoor))
+        let id = await c.create(&s, RescanRequest(setting: .indoor, agentID: "phone-x"))
         XCTAssertNil(id)
         XCTAssertEqual(s.phase, .scanning, "the scan still runs (as a normal walk)")
         s.finishing(finishInfo(), now: 50)
@@ -123,7 +136,7 @@ final class RescanTests: XCTestCase {
         srv.offline = true
         let c = RescanClient(transport: srv.handle)
         var s = RescanSession(setting: .indoor, name: nil, map: "site", now: 0)
-        let none = await c.create(&s, RescanRequest(setting: .indoor))
+        let none = await c.create(&s, RescanRequest(setting: .indoor, agentID: "phone-x"))
         XCTAssertNil(none)
         XCTAssertEqual(s.phase, .scanning)
         XCTAssertTrue(s.localReason?.hasPrefix("server unreachable") ?? false)
@@ -131,13 +144,13 @@ final class RescanTests: XCTestCase {
         let srv2 = MockServer()
         let c2 = RescanClient(transport: srv2.handle)
         var s2 = RescanSession(setting: .indoor, name: nil, map: "site", now: 0)
-        _ = await c2.create(&s2, RescanRequest(setting: .indoor))
+        _ = await c2.create(&s2, RescanRequest(setting: .indoor, agentID: "phone-x"))
         s2.finishing(finishInfo(), now: 10)
         srv2.offline = true
         await c2.finish(&s2)
         XCTAssertEqual(s2.phase, .building)
         let d = await c2.poll(&s2, now: 14)
-        XCTAssertEqual(d, 4, "an unreachable poll retries")
+        XCTAssertEqual(d, 5, "an unreachable poll retries")
         srv2.offline = false
         srv2.buildPolls = 0
         _ = await c2.poll(&s2, now: 18)
@@ -188,9 +201,9 @@ final class RescanTests: XCTestCase {
         s.finishing(finishInfo(), now: 0)
         s.finished(http: 202, body: #"{"state":"queued"}"#.data(using: .utf8))
         let b = #"{"state":"building"}"#.data(using: .utf8)
-        XCTAssertEqual(s.polled(http: 200, body: b, now: 30), 4)
-        XCTAssertEqual(s.polled(http: 200, body: b, now: 120), 10)
-        XCTAssertEqual(s.polled(http: 200, body: b, now: 600), 20)
+        XCTAssertEqual(s.polled(http: 200, body: b, now: 30), 5)
+        XCTAssertEqual(s.polled(http: 200, body: b, now: 120), 15)
+        XCTAssertEqual(s.polled(http: 200, body: b, now: 600), 15)
         XCTAssertNil(s.polled(http: 200, body: b, now: RescanSession.pollGiveUpS + 1))
         XCTAssertTrue(s.stale)
         XCTAssertEqual(s.title, "Still building: check snailCOP later")
@@ -271,5 +284,74 @@ final class RescanTests: XCTestCase {
                                         trackingNormal: true, scanViewOpen: true), "the 3D scan view")
         XCTAssertNil(LivePause.reason(recording: false, scansOpen: false, map3DOpen: false, thermalCritical: false,
                                       trackingNormal: true))
+    }
+
+    /// The §5.17 status example (held) as the server documents it.
+    func testServer517HeldShape() {
+        let doc: [String: Any] = [
+            "rescan_id": "rs-20261114-153012-a1b2c3", "map_id": "site", "kind": "area", "name": "basement den", "level": 0,
+            "state": "held", "stage": "score",
+            "coverage": ["live": false, "good_m2": 41.2, "area_m2": 38.0, "blocks": 2210,
+                         "cells": [["cell": "L0:-2,3", "cover": 0.81, "good_m2": 12.4, "in_area": true],
+                                   ["cell": "L0:-2,4", "cover": 0.2, "good_m2": 1.0, "in_area": false]]],
+            "quality": ["checks": [["name": "self_loop", "value": 3.1, "limit": 5.0, "unit": "cm", "pass": true],
+                                   ["name": "seam", "value": 4.8, "limit": 3.0, "unit": "cm", "pass": false]]],
+            "before_after": ["cells": ["L0:-2,3": ["before": ["dup_m2": 2.6, "ghost_pct": 9.1, "res_p90_cm": 8.5, "holes_pct": 22.0],
+                                                    "after": ["dup_m2": 0.3, "ghost_pct": 1.2, "res_p90_cm": 1.9, "holes_pct": 6.0]]]],
+            "preview": ["tileset": "abc", "portal": "/?preview=abc"],
+            "result": ["decision": "held", "rev": NSNull(), "rev_before": 177,
+                       "why": "seam p90 4.8 cm > 3.0 cm at the doorway (L0:-2,4)",
+                       "rescan_advice": [["cell": "L0:-2,4", "do": "include the doorway and 1 m of the next room's walls in the scan"]],
+                       "island": NSNull()],
+        ]
+        let s = RescanStatus.parse(doc)
+        XCTAssertEqual(s.id, "rs-20261114-153012-a1b2c3")
+        XCTAssertEqual(s.phase, .held)
+        XCTAssertEqual(s.coveragePct ?? 0, 81, accuracy: 1e-6, "mean cover of the in-area cells")
+        XCTAssertEqual(s.goodM2, 41.2)
+        XCTAssertEqual(s.areaM2, 38.0)
+        XCTAssertEqual(s.failedChecks, ["seam 4.8 (limit 3 cm)"])
+        XCTAssertEqual(s.quality, "1 of 2 checks pass")
+        XCTAssertEqual(s.reason, "seam p90 4.8 cm > 3.0 cm at the doorway (L0:-2,4)")
+        XCTAssertNil(s.publishedRev)
+        XCTAssertEqual(s.portalPath, "/?preview=abc")
+        XCTAssertEqual(s.advice.first, "L0:-2,4: include the doorway and 1 m of the next room's walls in the scan")
+        XCTAssertEqual(s.beforeAfter, "duplicate 2.6 → 0.3 m² · ghost 9.1 → 1.2 % · residual p90 8.5 → 1.9 cm · holes 22.0 → 6.0 %")
+        // the states
+        XCTAssertEqual(RescanStatus.phase(of: "waiting"), .building)
+        XCTAssertEqual(RescanStatus.phase(of: "publishing"), .building)
+        XCTAssertEqual(RescanStatus.phase(of: "island"), .published)
+        XCTAssertEqual(RescanStatus.phase(of: "rolled-back"), .held)
+        XCTAssertEqual(RescanStatus.phase(of: "expired"), .failed)
+        XCTAssertEqual(RescanStatus.phase(of: "cancelled"), .cancelled)
+        // published as an island
+        let i = RescanStatus.parse(["state": "island", "result": ["decision": "island", "rev": 180, "island": "isl-3"]])
+        XCTAssertEqual(i.phase, .published)
+        XCTAssertEqual(i.islandID, "isl-3")
+        XCTAssertEqual(i.publishedRev, 180)
+    }
+
+    func testOpenRescanIsCancelledThenRetried() async {
+        let srv = MockServer()
+        srv.openRescan = "r0"                                  // left open by a killed app run
+        let c = RescanClient(transport: srv.handle)
+        var s = RescanSession(setting: .indoor, name: nil, map: "site", now: 0)
+        let id = await c.create(&s, RescanRequest(setting: .indoor, agentID: "phone-x"))
+        XCTAssertEqual(id, "r1")
+        XCTAssertEqual(srv.cancelled, ["r0"])
+        XCTAssertNotNil(srv.calls[0].2?["client_rescan_id"] as? String)
+        // live coverage while scanning does not move the phase
+        await c.pollLive(&s)
+        XCTAssertEqual(s.phase, .scanning)
+        XCTAssertNotNil(s.live)
+        // cancel route
+        let st = await c.cancel(map: "site", id: "r1", why: "owner")
+        XCTAssertEqual(st, 200)
+        XCTAssertEqual(srv.cancelled, ["r0", "r1"])
+        // a missing agent id is refused by the server -> a walk
+        var t = RescanSession(setting: .indoor, name: nil, map: "site", now: 0)
+        let none = await c.create(&t, RescanRequest(setting: .indoor))
+        XCTAssertNil(none)
+        XCTAssertEqual(t.localReason, "the server refused the rescan (HTTP 422)")
     }
 }

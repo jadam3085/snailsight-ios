@@ -292,7 +292,12 @@ final class CopController: NSObject, ObservableObject {
         bridgeReady = false
         let v = pendingView ?? lastView
         pendingView = nil
-        let s = CopPortal.pageURL(base: b, appVersion: model.version, view: v, lite: lite)
+        var s = CopPortal.pageURL(base: b, appVersion: model.version, view: v, lite: lite)
+        if let extra = pendingQuery, var c = URLComponents(string: s) {          // 12.27: e.g. a rescan's ?preview=<sha>
+            c.queryItems = (c.queryItems ?? []) + extra
+            s = c.string ?? s
+        }
+        pendingQuery = nil
         guard let u = URL(string: s) else { return }
         model.log.event("cop_load", ["base_label": .string(baseLabel(b)), "lite": .bool(lite), "at": .bool(v != nil)])
         hostView.load(URLRequest(url: u, cachePolicy: .useProtocolCachePolicy, timeoutInterval: 15))
@@ -319,6 +324,17 @@ final class CopController: NSObject, ObservableObject {
 
     func setInsets(_ e: EdgeInsets) {
         send(CopBridgeOut.insets(top: Double(e.top), right: Double(e.trailing), bottom: Double(e.bottom), left: Double(e.leading)))
+    }
+
+    /// 12.27: query items for the next page load only (a rescan's candidate preview, API §5.17 `preview.portal`).
+    private var pendingQuery: [URLQueryItem]?
+
+    /// Open the portal with a server-given path's query (`/?preview=<sha>`); reloads the page when it is up.
+    func openPortalPath(_ path: String) {
+        guard let c = URLComponents(string: path), let q = c.queryItems, !q.isEmpty else { return }
+        pendingQuery = q.filter { ["preview", "map", "rescan"].contains($0.name) }
+        model.log.event("cop_portal_path", ["keys": .string(q.map(\.name).joined(separator: ","))])
+        if phase == .ready || phase == .loading { load() }
     }
 
     func goTo(_ v: CopView) {

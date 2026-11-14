@@ -2,13 +2,17 @@ import Foundation
 
 // SnailSight 12.27 Rescan area (owner 2026-11-14: one careful continuous scan becomes that AREA's map; indoors a room,
 // outdoors the region the scan covered well, so no room model is required). Client side of the server's rescan API
-// (snailCOP docs/SNAILSIGHT-API.md "Rescan"; until that lands, the draft contract):
+// (snailCOP docs/SNAILSIGHT-API.md §5.17, server 2026-11-14):
 //
-//   POST /v1/maps/{map}/rescan            {kind: "area", setting, name?, level?, geo?, app_version}  -> {rescan_id, ...}
-//   (stream the walk as usual: the hello and every keyframe header carry `rescan_id`)
-//   POST /v1/maps/{map}/rescan/{id}/finish {stream_ids, keyframes, coverage{...}, duration_s, ...}  -> status
-//   GET  /v1/maps/{map}/rescan/{id}       -> {state, coverage_pct, quality, preview{before_url, after_url, at},
-//                                             published_rev | held_reason, message}
+//   POST /v1/maps/{map}/rescan             {kind: "area", agent_id, client_rescan_id, name?, level?, by}
+//                                          -> 201 {rescan_id, state: "open", guide}; 409 {rescan_id} = one already open
+//   (stream the walk as usual: the hello carries `rescan_id`; 12.27 also puts it in every keyframe header)
+//   POST /v1/maps/{map}/rescan/{id}/finish {stream_ids, recorded}  -> 202 {state: "waiting"}
+//   POST /v1/maps/{map}/rescan/{id}/cancel {why}
+//   GET  /v1/maps/{map}/rescan/{id}        -> {state, stage, coverage{live, good_m2, area_m2, cells[]}, quality{checks[]},
+//                                              before_after{cells}, preview{portal}, result{decision, rev, why, rescan_advice}}
+// Extra fields this client sends (setting, geo, app_version, keyframes, coverage) are ignored by the server; the
+// parser also accepts the pre-§5.17 draft names (coverage_pct, published_rev, held_reason, preview before / after urls).
 //
 // A server without the API (404 / 405 / 501) or an unreachable one does not block the scan: it streams as a normal walk
 // and the card says so (a queue outage costs the rescan, never the walk). Everything here is pure / injectable
@@ -62,6 +66,17 @@ public struct RescanStatus: Equatable {
     public var keyframes: Int?
     public var areaM2: Double?
     public var areaName: String?
+    // §5.17
+    public var stage: String?
+    public var coverageLive = false
+    public var goodM2: Double?
+    public var portalPath: String?             // preview.portal "/?preview=<sha>"
+    public var decision: String?
+    public var islandID: String?
+    public var advice: [String] = []
+    public var failedChecks: [String] = []
+    public var checks = 0
+    public var beforeAfter: String?            // "duplicate 2.6 → 0.3 m² · ghost 9.1 → 1.2 % · …"
     public init() {}
 
     static func num(_ v: Any?) -> Double? {
@@ -80,13 +95,38 @@ public struct RescanStatus: Equatable {
         switch state.lowercased() {
         case "open", "created", "scanning", "streaming", "active", "recording": return .scanning
         case "finishing", "queued", "pending", "building", "processing", "running", "waiting", "integrating", "candidate",
-             "comparing", "checking":
+             "comparing", "checking", "publishing":
             return .building
-        case "published", "done", "ready", "complete", "completed", "applied", "live": return .published
-        case "held", "rejected", "not_published", "blocked", "kept": return .held
-        case "failed", "error", "expired", "aborted", "cancelled", "canceled": return .failed
+        case "published", "done", "ready", "complete", "completed", "applied", "live", "island": return .published
+        case "held", "rejected", "not_published", "blocked", "kept", "rolled-back", "rolled_back": return .held
+        case "failed", "error", "expired", "aborted": return .failed
+        case "cancelled", "canceled": return .cancelled
         default: return nil
         }
+    }
+
+    static func fmt(_ v: Double) -> String { v == v.rounded() ? String(Int(v)) : String(format: "%.1f", v) }
+
+    /// §5.17 before_after: the area cells summed (m²) / averaged (%, cm) into one line.
+    static func beforeAfterLine(_ ba: [String: Any]?) -> String? {
+        guard let cells = ba?["cells"] as? [String: Any], !cells.isEmpty else { return nil }
+        let keys = ["dup_m2", "ghost_pct", "res_p90_cm", "holes_pct"]
+        let labels = ["duplicate", "ghost", "residual p90", "holes"]
+        let units = [" m²", " %", " cm", " %"]
+        var bs = [Double](repeating: 0, count: 4), afs = [Double](repeating: 0, count: 4), ns = [Int](repeating: 0, count: 4)
+        for (_, v) in cells {
+            guard let c = v as? [String: Any], let b = c["before"] as? [String: Any], let a = c["after"] as? [String: Any] else { continue }
+            for i in 0..<4 {
+                guard let x = num(b[keys[i]]), let y = num(a[keys[i]]) else { continue }
+                bs[i] += x; afs[i] += y; ns[i] += 1
+            }
+        }
+        var parts: [String] = []
+        for i in 0..<4 where ns[i] > 0 {
+            let d = i == 0 ? 1.0 : Double(ns[i])                // m² sum; % / cm mean
+            parts.append(labels[i] + " " + String(format: "%.1f", bs[i] / d) + " → " + String(format: "%.1f", afs[i] / d) + units[i])
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
     }
 
     public static func parse(_ data: Data?) -> RescanStatus? {
@@ -103,9 +143,33 @@ public struct RescanStatus: Equatable {
         if let c = num(o["coverage_pct"]) ?? num(o["coverage"]) ?? num((o["coverage"] as? [String: Any])?["pct"]) {
             s.coveragePct = c <= 1.0 && num(o["coverage_pct"]) == nil ? c * 100 : c
         }
+        if let cv = o["coverage"] as? [String: Any] {                     // §5.17
+            s.coverageLive = cv["live"] as? Bool ?? false
+            s.goodM2 = num(cv["good_m2"])
+            s.areaM2 = num(cv["area_m2"])
+            if s.coveragePct == nil, let cells = cv["cells"] as? [[String: Any]] {
+                var sum = 0.0, n = 0
+                for c in cells where (c["in_area"] as? Bool) ?? true {
+                    if let v = num(c["cover"]) { sum += v; n += 1 }
+                }
+                if n > 0 { s.coveragePct = sum / Double(n) * 100 }
+            }
+        }
+        s.stage = str(o["stage"])
         if let q = o["quality"] as? [String: Any] {
             s.quality = str(q["label"]) ?? str(q["verdict"]) ?? str(q["summary"])
             s.qualityScore = num(q["score"]) ?? num(q["value"])
+            if let checks = q["checks"] as? [[String: Any]], !checks.isEmpty {    // §5.17 acceptance rows
+                s.checks = checks.count
+                for c in checks where (c["pass"] as? Bool) == false {
+                    let n = str(c["name"]) ?? "?"
+                    if let v = num(c["value"]), let l = num(c["limit"]) {
+                        let unit = str(c["unit"]).map { " " + $0 } ?? ""
+                        s.failedChecks.append(n + " " + fmt(v) + " (limit " + fmt(l) + unit + ")")
+                    } else { s.failedChecks.append(n) }
+                }
+                if s.quality == nil { s.quality = "\(checks.count - s.failedChecks.count) of \(checks.count) checks pass" }
+            }
         } else if let q = num(o["quality"]) {
             s.qualityScore = q
         } else {
@@ -117,6 +181,7 @@ public struct RescanStatus: Equatable {
         s.afterURL = str(pv["after_url"]) ?? str(pv["after"]) ?? str(o["after_url"])
         s.viewAt = str(pv["at"]) ?? str(o["at"]) ?? str(o["view_at"])
         s.portalURL = str(pv["portal_url"]) ?? str(o["portal_url"])
+        s.portalPath = str(pv["portal"])
         s.publishedRev = (num(o["published_rev"]) ?? num(o["rev"]) ?? num(pv["rev"])).map { Int($0) }
         s.reason = str(o["held_reason"]) ?? str(o["reason"]) ?? str(o["why"]) ?? str(o["error"])
         s.message = str(o["message"]) ?? str(o["note"])
@@ -126,6 +191,18 @@ public struct RescanStatus: Equatable {
             s.areaName = str(a["name"])
         }
         if s.areaM2 == nil { s.areaM2 = num(o["area_m2"]) }
+        if let r = o["result"] as? [String: Any] {                         // §5.17 result
+            s.decision = str(r["decision"])
+            if let rv = num(r["rev"]) { s.publishedRev = Int(rv) }
+            if let w = str(r["why"]) { s.reason = w }
+            s.islandID = str(r["island"])
+            for a in (r["rescan_advice"] as? [[String: Any]]) ?? [] {
+                guard let d = str(a["do"]) else { continue }
+                s.advice.append((str(a["cell"]).map { $0 + ": " } ?? "") + d)
+            }
+            if let d = s.decision, let p = phase(of: d) { s.phase = p }
+        }
+        s.beforeAfter = beforeAfterLine(o["before_after"] as? [String: Any])
         if s.areaName == nil { s.areaName = str(o["name"]) }
         // a published rev is publication even if the state word is new to us
         if s.publishedRev != nil, phase(of: s.state) == nil { s.phase = .published }
@@ -143,15 +220,22 @@ public struct RescanRequest: Equatable {
     public var hAccM: Double?
     public var appVersion: String
     public var streamID: String?
+    /// §5.17: required; the same agent id the live stream uses.
+    public var agentID: String
+    /// §5.17: idempotency key (a retried create returns the same rescan).
+    public var clientRescanID: String
 
     public init(setting: RescanSetting, name: String? = nil, level: Int? = nil, appVersion: String = "",
-                lat: Double? = nil, lon: Double? = nil, hAccM: Double? = nil, streamID: String? = nil) {
+                lat: Double? = nil, lon: Double? = nil, hAccM: Double? = nil, streamID: String? = nil,
+                agentID: String = "", clientRescanID: String = UUID().uuidString.lowercased()) {
         self.setting = setting; self.name = name; self.level = level; self.appVersion = appVersion
         self.lat = lat; self.lon = lon; self.hAccM = hAccM; self.streamID = streamID
+        self.agentID = agentID; self.clientRescanID = clientRescanID
     }
 
     public var json: [String: Any] {
-        var o: [String: Any] = ["kind": "area", "setting": setting.rawValue, "agent_type": "phone"]
+        var o: [String: Any] = ["kind": "area", "setting": setting.rawValue, "agent_type": "phone", "agent_id": agentID,
+                                "client_rescan_id": clientRescanID, "by": "snailsight-app"]
         if let n = name?.trimmingCharacters(in: .whitespacesAndNewlines), !n.isEmpty { o["name"] = String(n.prefix(60)) }
         if let l = level { o["level"] = l }
         if !appVersion.isEmpty { o["app_version"] = appVersion }
@@ -181,8 +265,10 @@ public struct RescanFinish: Equatable {
         self.points = points; self.locked = locked; self.queueLeft = queueLeft
     }
 
+    public var recorded = false
+
     public var json: [String: Any] {
-        ["stream_ids": streamIDs, "keyframes": keyframes, "duration_s": (durationS * 10).rounded() / 10,
+        ["stream_ids": streamIDs, "recorded": recorded, "keyframes": keyframes, "duration_s": (durationS * 10).rounded() / 10,
          "coverage": coverage.json, "points": points, "locked": locked, "queue_left": queueLeft]
     }
 }
@@ -232,7 +318,8 @@ public struct RescanSession: Equatable {
             status = s
             return i
         }
-        if [404, 405, 501].contains(http) { localReason = "this map server has no Rescan yet" }
+        if http == 409 { localReason = "another rescan is still open on the server" }
+        else if [404, 405, 501].contains(http) { localReason = "this map server has no Rescan yet" }
         else { localReason = "the server refused the rescan (HTTP \(http))" }
         return nil
     }
@@ -302,7 +389,14 @@ public struct RescanSession: Equatable {
         if phase.terminal { return nil }
         let since = now - (finishedAt ?? startedAt)
         if since > Self.pollGiveUpS { stale = true; return nil }
-        return since < 60 ? 4 : (since < 300 ? 10 : 20)
+        return since < 60 ? 5 : 15                           // §5.17: poll every 15 s after finish
+    }
+
+    /// While scanning: the server's live coverage (§5.17 `coverage.live`, poll every 5 s). Never changes the phase.
+    public private(set) var live: RescanStatus?
+    public mutating func liveStatus(http: Int, body: Data?) {
+        guard phase == .scanning, id != nil, (200..<300).contains(http), let s = RescanStatus.parse(body) else { return }
+        live = s
     }
 
     // MARK: card
@@ -333,6 +427,14 @@ public struct RescanSession: Equatable {
             if let q = s.quality ?? s.qualityScore.map({ String(format: "%.2f", $0) }) { out.append("Quality: \(q)") }
             if phase == .published, let r = s.publishedRev { out.append("Published as map rev \(r)") }
             if phase == .held || phase == .failed, let r = s.reason { out.append("Why: \(r)") }
+            if phase == .published, s.decision == "island" {
+                out.append("No overlap with the mapped house: it became its own area" + (s.islandID.map { " (\($0))" } ?? ""))
+            }
+            if let g = s.goodM2 { out.append(String(format: "Server: %.0f m² of good surface", g) + (s.areaM2.map { String(format: " · area %.0f m²", $0) } ?? "")) }
+            if let ba = s.beforeAfter { out.append("Before → after: " + ba) }
+            if phase == .building, let st = s.stage { out.append("Stage: " + st) }
+            if phase == .held { for f in s.failedChecks.prefix(3) { out.append("Failed: " + f) } }
+            for a in s.advice.prefix(3) { out.append("Re-scan " + a) }
             if let m = s.message { out.append(m) }
         }
         if phase == .local, let r = localReason { out.append("Not a rescan: \(r). The walk still improves the map as usual.") }
@@ -383,7 +485,13 @@ public struct RescanClient {
     public func create(_ s: inout RescanSession, _ r: RescanRequest) async -> String? {
         s.creating()
         do {
-            let (d, st) = try await transport("POST", RescanSession.path(s.map), Self.body(r.json))
+            var (d, st) = try await transport("POST", RescanSession.path(s.map), Self.body(r.json))
+            // §5.17: one open rescan per agent and map. An earlier one this phone left open (app killed mid-scan) is
+            // cancelled (it stays an ordinary walk on the server) and the create retried once.
+            if st == 409, let old = RescanStatus.parse(d)?.id {
+                _ = try? await transport("POST", RescanSession.path(s.map, old) + "/cancel", Self.body(["why": "superseded by a new rescan"]))
+                (d, st) = try await transport("POST", RescanSession.path(s.map), Self.body(r.json))
+            }
             return s.created(http: st, body: d)
         } catch {
             return s.created(http: 0, body: nil, error: "\(error)".prefix(80).description)
@@ -398,6 +506,17 @@ public struct RescanClient {
         } catch {
             s.finished(http: 0, body: nil, error: "\(error)".prefix(80).description)
         }
+    }
+
+    /// §5.17 cancel (best effort; the session stays an ordinary walk on the server).
+    public func cancel(map: String, id: String, why: String) async -> Int? {
+        try? await transport("POST", RescanSession.path(map, id) + "/cancel", Self.body(["why": why])).1
+    }
+
+    /// While scanning: the server's live coverage.
+    public func pollLive(_ s: inout RescanSession) async {
+        guard s.phase == .scanning, let id = s.id else { return }
+        if let (d, st) = try? await transport("GET", RescanSession.path(s.map, id), nil) { s.liveStatus(http: st, body: d) }
     }
 
     /// One poll; returns the delay to the next (nil = stop).

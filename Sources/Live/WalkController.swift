@@ -39,6 +39,8 @@ final class WalkController: ObservableObject {
     init(model: AppModel) { self.model = model }
 
     var active: Bool { session != nil && stopAt == nil }
+    /// 12.27: Record ran during this walk (the Rescan finish says `recorded`).
+    var recordedDuringWalk: Bool { wasRecording || model.recording }
     private var now: Double { Date().timeIntervalSince1970 }
 
     // MARK: start / stop

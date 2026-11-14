@@ -102,8 +102,9 @@ struct RescanStrip: View {
                     }
                     Text(cloud.coverage.line(outdoor: s.setting == .outdoor)).font(.caption2).monospacedDigit()
                         .lineLimit(1).minimumScaleFactor(0.7)
-                    Text("\(cloud.points / 1000)k points · \(Int(cloud.coverage.coveredM2.rounded())) m² good depth")
-                        .font(.caption2).foregroundStyle(.secondary).monospacedDigit()
+                    Text("\(cloud.points / 1000)k points · \(Int(cloud.coverage.coveredM2.rounded())) m² good depth"
+                         + (s.live?.goodM2.map { " · server \(Int($0.rounded())) m²" } ?? ""))
+                        .font(.caption2).foregroundStyle(.secondary).monospacedDigit().lineLimit(1).minimumScaleFactor(0.7)
                 }
                 VStack(spacing: 6) {
                     Button { cloud.orbitOpen = true } label: { Image(systemName: "rotate.3d").font(.system(size: 15, weight: .semibold)) }
@@ -185,7 +186,10 @@ struct RescanCard: View {
                     }
                     Spacer(minLength: 0)
                     if s.phase == .published || s.phase == .building || s.phase == .held {
-                        Button { rescan.openInCop() } label: { Label("snailCOP", systemImage: "scope") }.buttonStyle(.bordered)
+                        Button { rescan.openInCop() } label: {
+                            Label(s.status?.portalPath != nil && s.phase != .published ? "Preview" : "snailCOP", systemImage: "scope")
+                        }
+                        .buttonStyle(.bordered)
                     }
                     if s.phase.terminal {
                         Button("Scan again") { rescan.dismiss(); rescan.open(cause: "card_again") }.buttonStyle(.bordered)
