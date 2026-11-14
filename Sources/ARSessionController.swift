@@ -123,6 +123,7 @@ final class ARSessionController: NSObject, ARSessionDelegate {
         let wantDepth = depthCapture || model.mapLocalizer.wantsDepth || model.liveStreamer.wantsDepth   // 10.0 Live map
             || model.meshMapper.wantsDepth                                                               // 10.2 Map mesh
             || mapLayer.surface.depthWanted                                                              // 12.18 device surface
+            || model.scanCloud.wantsDepth                                                                // 12.27 Scan view
         if model.peopleOcclusion && Self.supportsPeople && !wantDepth { c.frameSemantics.insert(.personSegmentationWithDepth) }
         if wantDepth && Self.supportsDepth { c.frameSemantics.insert(.sceneDepth) }
         // 12.20: environment probes grow with the area walked: off while Live map streams or memory is tight
@@ -133,6 +134,7 @@ final class ARSessionController: NSObject, ARSessionDelegate {
     func start() {
         guard !started else { return }
         started = true
+        model.scanCloud.attach(arView)                  // 12.27 Scan view: the point cloud's post-process pass
         applyRenderSettings()
         // 10.3: always a clean session; the house map localizes it (a saved place only on evidence, PlaceController)
         model.placeCtl.launch { [weak self] map in
@@ -310,6 +312,7 @@ final class ARSessionController: NSObject, ARSessionDelegate {
         a.set("islands", model.islands.estimatedBytes)          // 12.22
         a.set("mesh_overlay", meshOverlay.estimatedBytes)
         a.set("ar_mesh_est", meshOverlay.vertexCount * 48)      // ARKit's own mesh (estimate; its volume is extra)
+        a.set("scan_cloud", model.scanCloud.estimatedBytes)     // 12.27 Scan view points (CPU + GPU copies)
         return a
     }
 
@@ -366,6 +369,9 @@ final class ARSessionController: NSObject, ARSessionDelegate {
         ev["live_evicted"] = .int(model.liveMap.evicted)
         ev["layerb_evicted"] = .int(model.blocks.evicted)
         ev["device_pruned"] = .int(mapLayer.surface.prunedTotal)
+        ev["cloud_points"] = .int(model.scanCloud.points)                  // 12.27 Scan view
+        ev["cloud_evicted"] = .int(model.scanCloud.evictedChunks)
+        ev["cloud_decimated"] = .int(model.scanCloud.decimatedChunks)
         if simMade { ev["sim_templates"] = .int(sim.templateCount) }
         let acc = memAccount()
         for (k, v) in acc.fields { ev[k] = v }
@@ -694,6 +700,7 @@ final class ARSessionController: NSObject, ARSessionDelegate {
         }
         model.mapLocalizer.frame(frame)                  // P2b: keyframes to /v1/localize while finding / refining
         model.liveStreamer.frame(frame)                  // 10.0 Live map: keyframes to the live uplink while on
+        model.scanCloud.frame(frame)                     // 12.27 Scan view: depth + colour into the live point cloud
         model.meshMapper.frame(frame)                    // 10.2 Map mesh: depth / sharp keyframes to /v1/meshmap
         model.mapFollower.frame(t: frame.timestamp, camera: frame.camera.transform)   // 10.7 follow LATEST (still → swap)
         mapLayer.frame(frame)                            // 10.1 AR 1:1: blend the map alignment, labels face you

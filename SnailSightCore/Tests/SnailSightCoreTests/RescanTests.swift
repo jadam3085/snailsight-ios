@@ -261,4 +261,15 @@ final class RescanTests: XCTestCase {
         XCTAssertTrue(ModeRules.teardown.contains("scan_cloud"))
         XCTAssertTrue(ModeRules.isAROnly("scan_cloud_stats"))
     }
+
+    func testDeepLinkAndPause() {
+        let d = AppDeepLink.parse("snailsight://rescan")
+        XCTAssertEqual(d?.mode, .ar)
+        XCTAssertEqual(d?.rescan, true)
+        XCTAssertEqual(d?.walk, false)
+        XCTAssertEqual(LivePause.reason(recording: false, scansOpen: false, map3DOpen: false, thermalCritical: false,
+                                        trackingNormal: true, scanViewOpen: true), "the 3D scan view")
+        XCTAssertNil(LivePause.reason(recording: false, scansOpen: false, map3DOpen: false, thermalCritical: false,
+                                      trackingNormal: true))
+    }
 }

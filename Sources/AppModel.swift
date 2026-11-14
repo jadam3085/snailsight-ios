@@ -516,6 +516,8 @@ final class AppModel: ObservableObject {
     private(set) lazy var liveStreamer = LiveStreamer(model: self)
     /// 12.26 one-tap walk (Sources/Live/WalkController): AR + localize + Live map + status line + summary.
     private(set) lazy var walker = WalkController(model: self)
+    private(set) lazy var scanCloud = ScanCloudController(model: self)   // 12.27 Scan view: the live point cloud
+    private(set) lazy var rescan = RescanController(model: self)         // 12.27 Rescan area
     private(set) lazy var meshMapper = MeshMapper(model: self)
     private(set) lazy var roomScanner = RoomScanner(model: self)
     private(set) lazy var terrainLayer = TerrainARLayer(model: self)
@@ -776,6 +778,7 @@ final class AppModel: ObservableObject {
     func launch() {
         guard !launchDone else { return }
         launchDone = true
+        rescan.resumeOnLaunch()                              // 12.27: a Rescan that was building is watched again
         let d = LaunchMode.decide(remembered: UserDefaults.standard.string(forKey: LaunchMode.rememberedKey),
                                   askEveryLaunch: askModeAtLaunch, deepLink: pendingLink)
         log.event("app_launch_mode", ["mode": .string(d.mode?.rawValue ?? "chooser"), "reason": .string(d.reason)])
@@ -819,6 +822,7 @@ final class AppModel: ObservableObject {
     private func leaveAR() {
         guard arStarted, !arPausedForCop else { return }
         if liveOn { setLive(false, cause: "mode_cop") }
+        scanCloud.leftAR()                                  // 12.27: the Scan view stops drawing (points kept)
         if meshMapOn { meshMapOn = false }
         if roomScanOn { roomScanner.stop(reason: "mode_cop") }
         if drive.ui.active { drive.exit(why: "mode_cop") }
@@ -840,6 +844,7 @@ final class AppModel: ObservableObject {
                 guard let self else { return ([], []) }
                 return (self.serverSim.activeKinds.union(self.controller.sim.activeKinds), self.simRecents.keys)
             }
+            SimContentStore.shared.arActive = { [weak self] in self?.arActive ?? false }   // 12.27: no refresh in snailCOP mode
             SimContentStore.shared.attach(link: link, log: { e, d in slog.event(e, d) })   // 12.8 runtime sim content, 12.9 all models
             mapFollower.start()                             // 10.7: cached head now, the server's head in the background
             navStore.start()                                // 12.18 Layer A poller (idle unless shown)
@@ -849,6 +854,8 @@ final class AppModel: ObservableObject {
         guard arPausedForCop else { return }
         arPausedForCop = false
         controller.resumeAfterMap3D(why: "cop")
+        scanCloud.enteredAR()
+        SimContentStore.shared.enteredAR()                  // 12.27: the sim catalogue syncs once on entering AR
         mapLocalizer.resume(why: "mode_ar")
         mapFollower.resume(why: "mode_ar")
         liveMap.resume(why: "mode_ar")
@@ -875,6 +882,7 @@ final class AppModel: ObservableObject {
 
     private func apply(_ d: AppDeepLink) {
         if d.walk { walker.start(cause: "deep_link") }                  // 12.26 snailsight://walk
+        if d.rescan { rescan.open(cause: "deep_link") }                 // 12.27 snailsight://rescan
         if let v = d.view { cop.goTo(v) }
         if let t = d.target { openARHere(target: t, label: d.label ?? "Target") }
     }

@@ -82,8 +82,24 @@ final class SimContentStore: ObservableObject {
         guard self.link == nil else { return }
         self.link = link
         self.log = log
-        Task { await link.whenOnline { [weak self] in DispatchQueue.main.async { self?.refresh(reason: "online") } } }
+        Task { await link.whenOnline { [weak self] in DispatchQueue.main.async { self?.online() } } }
         refresh(reason: "launch")
+    }
+
+    /// 12.27 (gate doc §7): the sim catalogue is AR-only. A reconnect while in snailCOP mode only marks a sync as owed;
+    /// it runs once on entering AR (`enteredAR`).
+    var arActive: (() -> Bool)?
+    private var owedOnline = false
+
+    private func online() {
+        if let a = arActive, !a() { owedOnline = true; return }
+        refresh(reason: "online")
+    }
+
+    func enteredAR() {
+        guard owedOnline else { return }
+        owedOnline = false
+        refresh(reason: "online")
     }
 
     // MARK: file resolution (runtime blob → bundled minimal file → nothing)

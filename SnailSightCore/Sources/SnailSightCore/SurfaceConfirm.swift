@@ -572,9 +572,10 @@ public struct DeviceSurfaceEngine {
 /// longer pauses the live stream (the stream's bye still says `recorded`, so the server knows a capture covers it).
 public enum LivePause {
     public static func reason(recording: Bool, scansOpen: Bool, map3DOpen: Bool, thermalCritical: Bool,
-                              trackingNormal: Bool, pauseWhileRecording: Bool = false) -> String? {
+                              trackingNormal: Bool, pauseWhileRecording: Bool = false, scanViewOpen: Bool = false) -> String? {
         if recording && pauseWhileRecording { return "recording" }
         if scansOpen { return "Scans" }
+        if scanViewOpen { return "the 3D scan view" }              // 12.27: the orbit view hides the camera
         if map3DOpen { return "3D map" }
         if thermalCritical { return "too hot" }
         if !trackingNormal { return "tracking" }

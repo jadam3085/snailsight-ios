@@ -79,7 +79,8 @@ final class WalkController: ObservableObject {
         if !model.mapLocalizer.isLocked { model.mapLocalizer.resume(why: "walk") }
         if !model.liveOn { model.setLive(true, cause: "walk_start") }
         if !model.meshLive { model.meshLive = true }
-        model.flash("Walk started: finding your position", seconds: 2.5)
+        model.flash(cause == "rescan" ? "Rescan started: scan slowly, 1-2.5 m from surfaces" : "Walk started: finding your position",
+                    seconds: 2.5)
         tick(frame: nil)
     }
 
@@ -116,6 +117,7 @@ final class WalkController: ObservableObject {
         }
         model.log.event("walk_stop", ev)
         model.syncLogs()                                     // the scorer reads this session's log on the server
+        model.rescan.walkStopped(cause: cause)               // 12.27: a walk that ends during a Rescan is its Finish
     }
 
     /// The summary card's Done.

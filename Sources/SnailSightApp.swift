@@ -88,6 +88,7 @@ struct ContentView: View {
         .fullScreenCover(isPresented: $model.showScans) {                  // 9.6 native scan viewer (Sources/Scans)
             ScansView(store: model.sharedScanStore(), followRev: model.mapFollower.followVersion)
         }
+        .modifier(RescanPresenter(rescan: model.rescan, cloud: model.scanCloud))   // 12.27 Rescan guide + Scan view 3D
         .onAppear {
             UIApplication.shared.isIdleTimerDisabled = true   // as in Apple's sample: never dim mid-AR (AR started by setMode)
         }

@@ -67,6 +67,7 @@ private struct CopModePill: View {
         Menu {
             // 12.26 one tap: AR + find your position + Live map + status line
             Button { model.walker.start(cause: "cop_pill") } label: { Label("Start walk", systemImage: "figure.walk") }
+            Button { model.rescan.open(cause: "cop_pill") } label: { Label("Rescan an area", systemImage: "viewfinder") }   // 12.27
             Button { model.setMode(.ar, cause: "cop_pill") } label: { Label("AR explore (camera)", systemImage: "arkit") }
             Button { cop.reload() } label: { Label("Reload snailCOP", systemImage: "arrow.clockwise") }
             Button { model.showCopAddress = true } label: { Label("snailCOP address…", systemImage: "network") }
@@ -207,6 +208,23 @@ struct ModeChooserView: View {
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Start walk")
+                Button { model.rescan.open(cause: "chooser") } label: {      // 12.27 Rescan area
+                    HStack(spacing: 10) {
+                        Image(systemName: "viewfinder").font(.system(size: 18, weight: .semibold)).frame(width: 40)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Rescan an area").font(.headline)
+                            Text("One careful scan (room or yard) becomes that area's map. Live points as you go.")
+                                .font(.caption).foregroundStyle(.white.opacity(0.7)).multilineTextAlignment(.leading)
+                        }
+                        Spacer(minLength: 0)
+                    }
+                    .padding(.horizontal, 16).padding(.vertical, 10)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Color.green.opacity(0.18), in: RoundedRectangle(cornerRadius: 14))
+                    .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.green.opacity(0.6)))
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Rescan an area")
                 card(.cop, icon: "scope", title: "snailCOP",
                      text: "The whole picture: cameras, alerts, sensors, sim and robots in the 3D world. No camera, no localizing.")
                 card(.ar, icon: "arkit", title: "AR explore",

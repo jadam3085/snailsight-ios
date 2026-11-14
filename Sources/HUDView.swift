@@ -76,7 +76,7 @@ struct HUDView: View {
                     .background(.ultraThinMaterial, in: Capsule())
             }
             if let u = model.undoText { UndoToast(text: u) }
-            WalkHUD(walker: model.walker)                                // 12.26 one-tap walk: status + summary
+            WalkHUD(walker: model.walker, rescan: model.rescan, cloud: model.scanCloud)   // 12.26 walk + 12.27 rescan
             LiveLines(walker: model.walker)
             if !mark.active { CameraCheckPanel(check: model.cameraCheck) }  // 12.2 Camera check: who sees me
             if model.drawHouse != .off || model.drawTerrain, !model.recording,

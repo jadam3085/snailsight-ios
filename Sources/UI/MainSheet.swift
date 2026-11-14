@@ -420,6 +420,13 @@ private struct CategorySection: View {
                 Toggle(isOn: Binding(get: { model.liveOn }, set: { model.setLive($0, cause: "sheet_toggle") })) { Label("Live map", systemImage: "dot.radiowaves.left.and.right") }
                 // 12.26: the walk's small capture hints (weak / far / edge-on depth, too fast, coverage)
                 Toggle(isOn: Binding(get: { model.walker.hintsOn }, set: { model.walker.hintsOn = $0 })) { Label("Walk hints", systemImage: "lightbulb") }
+                ScanViewToggle(cloud: model.scanCloud)                      // 12.27 Scan view: the live point cloud
+                Button { model.rescan.open(cause: "sheet_mapping") } label: {   // 12.27 Rescan area
+                    VStack(alignment: .leading, spacing: 3) {
+                        Label("Rescan an area", systemImage: "viewfinder")
+                        Text("One careful scan becomes this room's or area's map").font(.caption).foregroundStyle(.secondary)
+                    }
+                }
                 Picker(selection: $model.liveRateHz) {
                     ForEach(LiveGate.allowedRates, id: \.self) { Text(LiveText.rate($0)).tag($0) }
                 } label: { Label("Live rate", systemImage: "metronome") }

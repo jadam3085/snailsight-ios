@@ -7,12 +7,19 @@ import SnailSightCore
 struct WalkHUD: View {
     @EnvironmentObject var model: AppModel
     @ObservedObject var walker: WalkController
+    @ObservedObject var rescan: RescanController          // 12.27: the coverage strip + the result card
+    @ObservedObject var cloud: ScanCloudController
 
     var body: some View {
-        if let s = walker.summary {
+        if rescan.cardVisible {
+            RescanCard(rescan: rescan, cloud: cloud)
+        } else if let s = walker.summary {
             WalkSummaryCard(walker: walker, summary: s)
         } else if walker.active, let l = walker.line {
-            WalkBar(walker: walker, line: l)
+            VStack(spacing: 6) {
+                RescanStrip(rescan: rescan, cloud: cloud)
+                WalkBar(walker: walker, line: l, rescanning: rescan.scanning, cloud: cloud)
+            }
         }
     }
 }
@@ -21,6 +28,8 @@ private struct WalkBar: View {
     @EnvironmentObject var model: AppModel
     @ObservedObject var walker: WalkController
     let line: WalkLine
+    let rescanning: Bool
+    @ObservedObject var cloud: ScanCloudController
 
     private var dot: Color {
         switch line.tone {
@@ -72,12 +81,28 @@ private struct WalkBar: View {
                 .buttonStyle(.plain)
                 .accessibilityLabel("Walk: \(line.title). \(line.problem ?? line.detail ?? "")")
                 .accessibilityHint("Shows the live map details")
-                Button { walker.stop(cause: "owner_tap") } label: {
-                    Text("Stop").font(.footnote.weight(.bold)).padding(.horizontal, 12).frame(height: 32)
-                        .background(Color.red.opacity(0.9), in: Capsule()).foregroundStyle(.white)
+                if !rescanning {                                  // 12.27 Scan view toggle (forced on in a Rescan)
+                    Button { cloud.on.toggle() } label: {
+                        Image(systemName: cloud.on ? "circle.grid.3x3.fill" : "circle.grid.3x3")
+                            .font(.system(size: 15, weight: .semibold)).frame(width: 30, height: 32)
+                            .foregroundStyle(cloud.on ? Color.green : Color.primary)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel(cloud.on ? "Hide the live points" : "Show the live points (Scan view)")
+                    if cloud.on, cloud.points > 0 {
+                        Button { cloud.orbitOpen = true } label: {
+                            Image(systemName: "rotate.3d").font(.system(size: 15, weight: .semibold)).frame(width: 28, height: 32)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Pause and view the points in 3D")
+                    }
+                }
+                Button { if rescanning { model.rescan.finish(cause: "owner_tap") } else { walker.stop(cause: "owner_tap") } } label: {
+                    Text(rescanning ? "Finish" : "Stop").font(.footnote.weight(.bold)).padding(.horizontal, 12).frame(height: 32)
+                        .background((rescanning ? Color.green : Color.red).opacity(0.9), in: Capsule()).foregroundStyle(.white)
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel("Stop walk")
+                .accessibilityLabel(rescanning ? "Finish rescan" : "Stop walk")
             }
             .padding(.horizontal, 12).padding(.vertical, 8)
             .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
@@ -107,6 +132,7 @@ private struct WalkSummaryCard: View {
             HStack(spacing: 8) {
                 Button("Done") { walker.dismissSummary() }.buttonStyle(.borderedProminent)
                 Button("Walk again") { walker.dismissSummary(); walker.start(cause: "summary_again") }.buttonStyle(.bordered)
+                Button("Rescan") { walker.dismissSummary(); model.rescan.open(cause: "walk_summary") }.buttonStyle(.bordered)
                 Spacer(minLength: 0)
                 Button { walker.dismissSummary(); model.setMode(.cop, cause: "walk_summary") } label: {
                     Label("snailCOP", systemImage: "scope")

@@ -169,6 +169,37 @@ final class LiveStreamer {
         publish()
     }
 
+    // MARK: 12.27 Rescan
+
+    /// The Rescan the stream belongs to (nil = a normal walk). Streams STARTED while it is set carry it in their hello
+    /// (stream.json keeps it for a drain after a restart) and every keyframe header carries it.
+    private(set) var rescanID: String?
+
+    /// A Rescan starts: a fresh stream, so the rescan holds only its own keyframes (`id` nil = the server has no
+    /// Rescan: still a fresh stream for a clean walk).
+    func beginRescan(_ id: String?) {
+        rescanID = id
+        uplink.setRescan(id)
+        model.log.event("live_rescan", ["rescan_id": .string(id ?? ""), "from": .string(streamID), "live": .bool(model.liveOn)])
+        // always a new stream id (the uplink may already know the current one without the rescan tag)
+        let old = streamID
+        newStream()
+        uplink.endStream(old)
+        if model.liveOn { uplink.start(stream: streamID, mapID: model.liveMapID, rateHz: gate.rateHz) }
+    }
+
+    /// The Rescan finished / was cancelled: streams after this are normal walks again.
+    func endRescan() {
+        guard rescanID != nil else { return }
+        rescanID = nil
+        uplink.setRescan(nil)
+        // the next walk must not reuse a rescan-tagged stream id
+        let old = streamID
+        newStream()
+        uplink.endStream(old)
+        if model.liveOn { uplink.start(stream: streamID, mapID: model.liveMapID, rateHz: gate.rateHz) }
+    }
+
     /// The ARKit world frame changed (MapLocalizer.worldFrameChanged): every pose from now on is in a new odometry
     /// frame, so a new stream starts at seq 0; the old one drains under its own id.
     func worldFrameChanged(_ reason: String) {
@@ -209,7 +240,8 @@ final class LiveStreamer {
         var tn = false
         if case .normal = f.camera.trackingState { tn = true }
         let paused = LivePause.reason(recording: model.recording, scansOpen: model.showScans, map3DOpen: model.showMap3D,
-                                      thermalCritical: model.thermal == "CRITICAL", trackingNormal: tn)
+                                      thermalCritical: model.thermal == "CRITICAL", trackingNormal: tn,
+                                      scanViewOpen: model.scanCloud.orbitOpen)                  // 12.27
         if model.recording && !recordedNoted {
             recordedNoted = true
             uplink.noteRecorded(streamID)                                   // 12.14: this stream's bye says recorded
@@ -255,7 +287,7 @@ final class LiveStreamer {
         let conf = depth.confidenceMap.map { CaptureRecorder.copyBytes($0) }
         let pixels = f.capturedImage
         let img = CIImage(cvPixelBuffer: pixels)
-        let stream = streamID, stamp = f.timestamp, wall = Date().timeIntervalSince1970
+        let stream = streamID, stamp = f.timestamp, wall = Date().timeIntervalSince1970, rescan = rescanID
         let exposure = f.camera.exposureDuration, kfBlur = blur
         let imgW = Int(res.width)
         enc.async { [weak self] in
@@ -291,7 +323,7 @@ final class LiveStreamer {
                 let h = LiveKeyframeHeader(seq: seq, streamID: stream, t: stamp, wall: wall, T: T, K: Kv,
                                            imageSize: size, tracking: "normal", blurPx: kfBlur, exposureS: exposure,
                                            mapLock: lock, geo: self.model.geo.geo(T: T),   // 12.22 weak geo prior
-                                           captureQ: quality)
+                                           captureQ: quality, rescanID: rescan)    // 12.27 Rescan
                 self.model.walker.keyframe(quality: quality, conf: cp != nil, stream: stream)
                 var blobs: [(name: String, data: Data)] = [(name: "depth_png", data: dp), (name: "rgb_jpg", data: rgb)]
                 if let cp { blobs.append((name: "conf_png", data: cp)) }
@@ -373,6 +405,7 @@ final class LiveUplink {
         var streamID: String
         var mapID: String
         var created: Double
+        var rescanID: String? = nil          // 12.27: hello `rescan_id` (also after a restart's drain)
     }
 
     // streams + spool (q)
@@ -386,6 +419,7 @@ final class LiveUplink {
     private var enabled = false
     private var drainUntil: Double?
     private var base: String?
+    private var rescanID: String?                       // 12.27: new streams belong to this Rescan
 
     // connection (q)
     private enum Phase { case idle, connecting, open }
@@ -450,6 +484,9 @@ final class LiveUplink {
     }
 
     func setRate(_ hz: Double) { q.async { self.rateHz = hz } }
+
+    /// 12.27: streams created from now on belong to this Rescan (nil = normal walks).
+    func setRescan(_ id: String?) { q.async { self.rescanID = id } }
 
     func start(stream: String, mapID: String, rateHz: Double) {
         q.async {
@@ -529,7 +566,7 @@ final class LiveUplink {
 
     private func ensureStream(_ s: String) {
         guard streams[s] == nil, let d = dir(s) else { return }
-        let info = StreamInfo(streamID: s, mapID: mapID, created: Self.now)
+        let info = StreamInfo(streamID: s, mapID: mapID, created: Self.now, rescanID: rescanID)
         streams[s] = info
         try? FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
         if let j = try? JSONEncoder().encode(info) { try? j.write(to: d.appendingPathComponent("stream.json"), options: .atomic) }
@@ -654,8 +691,10 @@ final class LiveUplink {
     }
 
     private func helloObject(_ s: String) -> [String: Any] {
-        ["type": "hello", "agent_type": Identity.agentType, "stream_id": s,
-         "map_id": streams[s]?.mapID ?? mapID, "app_version": appVersion, "rate_hz": Int(rateHz.rounded())]
+        var o: [String: Any] = ["type": "hello", "agent_type": Identity.agentType, "stream_id": s,
+                                "map_id": streams[s]?.mapID ?? mapID, "app_version": appVersion, "rate_hz": Int(rateHz.rounded())]
+        if let r = streams[s]?.rescanID, !r.isEmpty { o["rescan_id"] = r }        // 12.27 Rescan
+        return o
     }
 
     // MARK: WebSocket

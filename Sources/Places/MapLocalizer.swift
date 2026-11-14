@@ -103,6 +103,7 @@ final class MapLocalizer {
     func worldFrameChanged(_ reason: String, placeID: String? = nil, sessionRunFollows: Bool = false,
                            carryLock: Bool = false) {
         model.liveStreamer.worldFrameChanged(reason)     // 10.0 Live map: a new odometry frame = a new stream_id
+        model.scanCloud.worldFrameChanged(reason)        // 12.27 Scan view: points are in the old ARKit frame
         model.meshMapper.worldFrameChanged(reason)       // 10.2 Map mesh: same rule
         model.controller.mapLayer.worldFrameChanged()    // 10.1 AR 1:1: the shown alignment belongs to the old frame
         model.log.event("maploc_reset", ["reason": .string(reason), "was_locked": .bool(alignment != nil),
